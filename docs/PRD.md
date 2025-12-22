@@ -1,16 +1,16 @@
-# MyMozhem Lottery — Product Requirements Document
+# MyMozhem — Product Requirements Document
 
 ## Project Overview
 
-**Project Name:** MyMozhem Lottery  
-**Brand:** MyMozhem ("Мы можем!" / "We Can!")  
-**Domain:** mymozhem.com  
-**Version:** Prototype (v0.1)  
+**Project Name:** MyMozhem
+**Brand:** MyMozhem ("Мы можем!" / "We Can!")
+**Domain:** mymozhem.com
+**Current Module:** Lottery (Prototype v0.1)
 **Target Release:** New Year 2025 season
 
 ### Purpose
 
-A web-based lottery application for organizing prize drawings at events. The prototype features a New Year theme and serves as a portfolio showcase for freelance services on FL.ru.
+MyMozhem is an interactive entertainment platform for events, designed to host multiple game types and experiences. The lottery module is the first implementation — a web-based application for organizing prize drawings at events. The prototype features a New Year theme and serves as a portfolio showcase for freelance services on FL.ru.
 
 ### Business Goals
 

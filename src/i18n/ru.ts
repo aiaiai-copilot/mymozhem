@@ -14,8 +14,8 @@ export const ru = {
     success: 'Успешно',
   },
   landing: {
-    title: 'MyMozhem Lottery',
-    subtitle: 'Интерактивная лотерея для мероприятий',
+    title: 'MyMozhem',
+    subtitle: 'Интерактивные развлечения для мероприятий',
     createLottery: 'Создать лотерею',
     description: 'Создайте лотерею для вашего мероприятия за несколько кликов',
   },

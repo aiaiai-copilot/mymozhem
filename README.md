@@ -1,6 +1,8 @@
-# MyMozhem Lottery
+# MyMozhem
 
-Interactive lottery platform for events with real-time synchronization.
+Interactive entertainment platform for events — games, lotteries, and more.
+
+**Current Module:** Lottery (Prototype v0.1)
 
 ## Quick Start
 
@@ -53,7 +55,7 @@ src/
 
 ## Documentation
 
-- [Product Requirements Document](docs/mymozhem-lottery-prd.md)
+- [Product Requirements Document](docs/PRD.md)
 - [Claude Code Instructions](CLAUDE.md)
 
 ## Tech Stack
@@ -63,7 +65,7 @@ src/
 - **Backend**: Supabase (PostgreSQL + Realtime)
 - **Deployment**: Vercel
 
-## Features
+## Features (Lottery Module)
 
 - Room creation and management
 - Real-time participant synchronization
@@ -72,6 +74,10 @@ src/
 - Animated winner reveal
 - QR code generation for easy joining
 - New Year theme (prototype)
+
+## Future Games
+
+MyMozhem is designed as an extensible platform. The lottery is the first game module, with more interactive entertainment experiences planned for future releases.
 
 ## Current Status
 
