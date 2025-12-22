@@ -1,0 +1,107 @@
+export const ru = {
+  common: {
+    create: 'Создать',
+    join: 'Присоединиться',
+    cancel: 'Отменить',
+    delete: 'Удалить',
+    save: 'Сохранить',
+    edit: 'Редактировать',
+    close: 'Закрыть',
+    open: 'Открыть',
+    start: 'Начать',
+    loading: 'Загрузка...',
+    error: 'Ошибка',
+    success: 'Успешно',
+  },
+  landing: {
+    title: 'MyMozhem Lottery',
+    subtitle: 'Интерактивная лотерея для мероприятий',
+    createLottery: 'Создать лотерею',
+    description: 'Создайте лотерею для вашего мероприятия за несколько кликов',
+  },
+  room: {
+    create: {
+      title: 'Создание лотереи',
+      roomName: 'Название лотереи',
+      roomNamePlaceholder: 'Новогодняя лотерея 2025',
+    },
+    created: {
+      title: 'Комната создана!',
+      publicLink: 'Ссылка для участников',
+      adminLink: 'Ссылка организатора',
+      copyLink: 'Скопировать ссылку',
+      qrCode: 'QR код для входа',
+    },
+  },
+  participant: {
+    join: {
+      title: 'Присоединиться к лотерее',
+      enterName: 'Введите ваше имя',
+      namePlaceholder: 'Иван Иванов',
+      submit: 'Присоединиться',
+    },
+    waiting: {
+      title: 'Ожидание начала',
+      participants: 'Участников',
+      registrationClosed: 'Регистрация закрыта',
+      drawingStartsSoon: 'Розыгрыш скоро начнется...',
+    },
+    drawing: {
+      title: 'Идет розыгрыш',
+      currentPrize: 'Текущий приз',
+      winner: 'Победитель',
+    },
+    finished: {
+      title: 'Результаты',
+      winners: 'Победители',
+      noWinners: 'Нет победителей',
+    },
+  },
+  admin: {
+    dashboard: {
+      title: 'Панель управления',
+      roomStatus: 'Статус',
+      participants: 'Участники',
+      prizes: 'Призы',
+      registration: 'Регистрация',
+      registrationOpen: 'Открыта',
+      registrationClosed: 'Закрыта',
+      toggleRegistration: 'Переключить регистрацию',
+      startDrawing: 'Начать розыгрыш',
+      deleteRoom: 'Удалить комнату',
+    },
+    prizes: {
+      title: 'Управление призами',
+      add: 'Добавить приз',
+      name: 'Название приза',
+      namePlaceholder: 'Подарочный сертификат',
+      description: 'Описание',
+      descriptionPlaceholder: 'На сумму 1000 рублей',
+      order: 'Порядок',
+      noPrizes: 'Нет призов',
+    },
+    participants: {
+      title: 'Участники',
+      name: 'Имя',
+      joinedAt: 'Присоединился',
+      status: 'Статус',
+      winner: 'Победитель',
+      waiting: 'Ожидает',
+      noParticipants: 'Нет участников',
+    },
+    errors: {
+      notEnoughParticipants: 'Недостаточно участников для розыгрыша',
+      noPrizes: 'Нет призов для розыгрыша',
+      registrationStillOpen: 'Закройте регистрацию перед началом',
+    },
+  },
+  errors: {
+    general: 'Что-то пошло не так',
+    roomNotFound: 'Комната не найдена',
+    nameTaken: 'Это имя уже занято',
+    registrationClosed: 'Регистрация закрыта',
+    invalidInput: 'Неверные данные',
+  },
+} as const
+
+export type Translations = typeof ru
