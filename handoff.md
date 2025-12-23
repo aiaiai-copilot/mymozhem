@@ -5,56 +5,124 @@
 **Project:** MyMozhem - Interactive entertainment platform for events
 **Current Module:** Lottery (first game, prototype v0.1)
 **Repository:** https://github.com/aiaiai-copilot/mymozhem
-**Status:** Foundation complete, ready for feature implementation
-**Branch:** master (2 commits pushed)
+**Status:** Phase 0 & 1 complete, ready for Phase 2 (React hooks)
+**Branch:** master (1 commit ahead, just pushed)
+**Latest Commit:** `53b647f` - Implement Phase 0 and Phase 1: Database schema and repository layer
 
 ### What's Done
+
+**Foundation (Phases 0-1 Complete):**
 - ✅ Project scaffolding (Vite + React + TypeScript + Supabase)
 - ✅ Git repository initialized and pushed to GitHub
 - ✅ Complete type system (Room, Prize, Participant, plugins)
-- ✅ Repository pattern interface defined
+- ✅ Repository pattern fully implemented
 - ✅ Plugin architecture designed (games, visualizations, themes)
 - ✅ i18n system with complete Russian translations
-- ✅ Project rebranded as multi-game platform (not just lottery)
+- ✅ Project rebranded as multi-game platform
 - ✅ PRD documentation complete
-- ✅ Specialized agents configured (component-creator, supabase-schema, etc.)
+- ✅ Specialized agents configured
 
-### Current Blockers
-- ❌ **29 TypeScript build errors** - All unused parameters in stub methods
-- ❌ **No Supabase database** - Tables don't exist yet
-- ❌ **No repository implementation** - All methods throw "Not implemented"
-- ❌ **No UI components** - Components directory is empty
-- ❌ **No working features** - Pages are static placeholders
+**Phase 0 - Database & Schema:**
+- ✅ Fixed 29 TypeScript build errors
+- ✅ Supabase project created ("mymozhem", us-west-2)
+- ✅ Database migration applied successfully
+- ✅ Tables: rooms, prizes, participants (with RLS + Realtime)
+- ✅ Case-insensitive unique name constraint working
+- ✅ Cascade delete verified
+- ✅ Database type definitions (`src/types/database.ts`)
+- ✅ Type mappers (`src/lib/mappers.ts`)
 
-### Immediate Next Steps
-1. **Fix TypeScript errors** (15 min) - Prefix unused params with underscore
-2. **Create database schema** (30 min) - Use `supabase-schema` agent
-3. **Implement repository** (2-3 hours) - Core CRUD operations
-4. **Build UI components** (3-4 hours) - Use `component-creator` agent
+**Phase 1 - Repository Implementation:**
+- ✅ All CRUD methods implemented
+- ✅ Public ID generation (NY2025-XXX format)
+- ✅ Realtime subscriptions (rooms, prizes, participants)
+- ✅ Auto-incrementing prize sort_order
+- ✅ Validation test script (15/15 tests passing)
+- ✅ Supabase client supports Vite + Node.js
+
+### Current Status
+
+**What Works:**
+- ✅ TypeScript builds with 0 errors
+- ✅ Complete data layer (repository + database)
+- ✅ All repository methods tested and validated
+- ✅ Realtime synchronization functional
+- ✅ Environment variables configured (.env)
+
+**What's Missing:**
+- ❌ No React hooks for data management
+- ❌ No UI components
+- ❌ No pages (Landing, AdminDashboard, ParticipantRoom)
+- ❌ No drawing logic implementation
+- ❌ No theme integration
+
+### Immediate Next Steps (Phase 2)
+
+**Priority:** Create React hooks to connect repository to UI
+
+1. **Data Hooks** (30-45 min each):
+   - `useRoom.ts` - Fetch + subscribe to room by ID
+   - `useRoomByPublicId.ts` - For participant view
+   - `useRoomBySecretId.ts` - For admin dashboard
+   - `usePrizes.ts` - Real-time prize list
+   - `useParticipants.ts` - Real-time participant list
+
+2. **Action Hooks** (20-30 min each):
+   - `useRoomActions.ts` - createRoom, updateRoom, deleteRoom
+   - `usePrizeActions.ts` - addPrize, updatePrize, deletePrize
+   - `useParticipantActions.ts` - addParticipant
+
+3. **Validation:**
+   - Create test component to verify hooks work
+   - Test real-time updates in browser
 
 ### Key Files to Know
-- `docs/PRD.md` - Complete requirements (source of truth)
+
+**Core Implementation:**
+- `src/repositories/supabase.lottery.repository.ts` - Complete repository (316 lines)
+- `src/lib/mappers.ts` - snake_case ↔ camelCase conversion
+- `src/types/database.ts` - Database schema types
+- `src/types/index.ts` - Application types
+- `supabase/migrations/20251222000000_initial_schema.sql` - Database schema
+
+**Configuration:**
+- `.env` - Supabase credentials (gitignored)
+- `tsconfig.json` - Excludes `src/scripts/` from build
+- `supabase/IMPLEMENTATION_SUMMARY.md` - Schema documentation
+
+**Testing:**
+- `src/scripts/test-repository.ts` - Phase 1 validation (all passing)
+- Run: `npx tsx src/scripts/test-repository.ts`
+
+**Documentation:**
+- `docs/PRD.md` - Product requirements (source of truth)
 - `CLAUDE.md` - Development guidelines and agent usage
-- `src/types/index.ts` - All TypeScript interfaces
-- `src/repositories/lottery.repository.ts` - Interface to implement
-- `src/repositories/supabase.lottery.repository.ts` - Stub implementation
 - `src/i18n/ru.ts` - All UI strings (Russian only for v0.1)
 
 ### Architecture Principles
+
 1. Plugin-based extensibility (games, visualizations, themes)
 2. Repository pattern for data access abstraction
 3. All UI strings through i18n (no hardcoded text)
 4. Mobile-first responsive design
 5. Real-time synchronization via Supabase Realtime
 
-### Dependencies Installed
-- React, TypeScript, Vite (build tools)
+### Environment
+
+**Supabase Project:**
+- Name: `mymozhem`
+- Region: `us-west-2`
+- Status: ACTIVE_HEALTHY
+- Tables: rooms, prizes, participants (with RLS + Realtime enabled)
+
+**Dependencies:**
+- React, TypeScript, Vite
 - Supabase client, Realtime
-- shadcn/ui, Tailwind CSS (UI framework)
-- framer-motion (animations)
-- qrcode.react (QR generation)
-- react-router-dom (routing)
-- Vitest, Testing Library (testing)
+- shadcn/ui, Tailwind CSS
+- framer-motion, qrcode.react
+- react-router-dom
+- Vitest, Testing Library
+- dotenv (for Node.js scripts)
 
 ---
 
@@ -64,19 +132,19 @@ Complete the lottery prototype with full end-to-end functionality: room creation
 
 ---
 
-## Phase 0: Foundation (CRITICAL - DO FIRST)
+## Phase 0: Foundation ✅ COMPLETE
 
-### Fix TypeScript Build Errors
-**Files:**
-- `src/repositories/supabase.lottery.repository.ts`
-- `src/plugins/games/classic.ts`
+### ✅ Fix TypeScript Build Errors
+**Status:** DONE (commit 53b647f)
+- Fixed 28 unused parameters in `supabase.lottery.repository.ts`
+- Fixed 1 unused parameter in `classic.ts`
+- Build passes with 0 errors
 
-**Action:** Prefix all 29 unused parameters with underscore (`data` → `_data`)
-
-### Database Schema Setup
+### ✅ Database Schema Setup
+**Status:** DONE (commit 53b647f)
 **Agent:** `supabase-schema`
 
-**Tables to create:**
+**Tables created:**
 ```sql
 rooms (
   id UUID PRIMARY KEY,
@@ -106,48 +174,63 @@ participants (
   name VARCHAR(255),
   has_won BOOLEAN DEFAULT false,
   prize_id UUID REFERENCES prizes,
-  joined_at TIMESTAMPTZ,
-  UNIQUE(room_id, LOWER(name))
+  joined_at TIMESTAMPTZ
 )
 ```
 
-**Enable:**
-- RLS policies (public access for prototype)
-- Realtime on all tables
-- Indexes on public_id, secret_id
+**Note:** Case-insensitive unique constraint implemented via index:
+```sql
+CREATE UNIQUE INDEX idx_participants_unique_name
+ON participants(room_id, LOWER(name));
+```
+
+**Enabled:**
+- ✅ RLS policies (public access for prototype)
+- ✅ Realtime on all tables
+- ✅ Indexes on public_id, secret_id
 
 ---
 
-## Phase 1: Repository Implementation
+## Phase 1: Repository Implementation ✅ COMPLETE
 
-### Implement All CRUD Methods
+### ✅ Implement All CRUD Methods
+**Status:** DONE (commit 53b647f)
 **File:** `src/repositories/supabase.lottery.repository.ts`
 
-**Priority order:**
-1. `createRoom()` - Generate publicId format "NY2025-XXX", secretId UUID
-2. `getRoom()`, `getRoomByPublicId()`, `getRoomBySecretId()`
-3. `updateRoom()` - Status changes, registration toggle
-4. `addPrize()`, `getPrizes()`, `updatePrize()`, `deletePrize()`
-5. `addParticipant()` - Check name uniqueness (case-insensitive)
-6. `getParticipants()`, `updateParticipant()`
-7. `deleteRoom()` - Cascade handled by DB
+**Implemented methods:**
+1. ✅ `createRoom()` - Generates publicId format "NY2025-XXX", secretId UUID
+2. ✅ `getRoom()`, `getRoomByPublicId()`, `getRoomBySecretId()`
+3. ✅ `updateRoom()` - Status changes, registration toggle
+4. ✅ `addPrize()`, `getPrizes()`, `updatePrize()`, `deletePrize()`
+5. ✅ `addParticipant()` - Enforces case-insensitive name uniqueness
+6. ✅ `getParticipants()`, `updateParticipant()`
+7. ✅ `deleteRoom()` - Cascade handled by DB
 
-**Critical:** Map snake_case DB ↔ camelCase TypeScript
+**Features:**
+- snake_case ↔ camelCase mapping via mappers
+- Auto-incrementing prize sort_order
+- Custom error messages for unique constraint violations
+- Proper cleanup functions for subscriptions
 
-### Implement Realtime Subscriptions
-**Consult:** `supabase-realtime` skill first
+### ✅ Implement Realtime Subscriptions
+**Status:** DONE (commit 53b647f)
+**Consulted:** `supabase-realtime` skill
 
 **Methods:**
-- `subscribeToRoom(roomId, callback)` - Room status updates
-- `subscribeToPrizes(roomId, callback)` - Prize changes
-- `subscribeToParticipants(roomId, callback)` - Participant joins/wins
+- ✅ `subscribeToRoom(roomId, callback)` - Room status updates
+- ✅ `subscribeToPrizes(roomId, callback)` - Prize changes
+- ✅ `subscribeToParticipants(roomId, callback)` - Participant joins/wins
 
-**Pattern:**
+**Pattern used:**
 ```typescript
 const channel = supabase
   .channel(`room:${roomId}`)
-  .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
-    payload => callback(mapToRoom(payload.new)))
+  .on('postgres_changes', {
+    event: 'UPDATE',
+    schema: 'public',
+    table: 'rooms',
+    filter: `id=eq.${roomId}`
+  }, payload => callback(mapRoomFromDb(payload.new)))
   .subscribe()
 
 return () => { channel.unsubscribe() }
@@ -155,36 +238,150 @@ return () => { channel.unsubscribe() }
 
 ---
 
-## Phase 2: React Hooks
+## Phase 2: React Hooks ⬅️ START HERE
 
 ### Data Hooks (Create in `src/hooks/`)
-1. `useRoom.ts` - Fetch + subscribe to room by ID
-2. `useRoomByPublicId.ts` - For participant view
-3. `useRoomBySecretId.ts` - For admin view
-4. `usePrizes.ts` - Real-time prize list
-5. `useParticipants.ts` - Real-time participant list
 
-**Pattern:**
+**1. useRoom.ts**
 ```typescript
 export function useRoom(roomId: string | undefined) {
   const [room, setRoom] = useState<Room | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<Error | null>(null)
 
   useEffect(() => {
     if (!roomId) return
-    lotteryRepository.getRoom(roomId).then(setRoom)
+
+    setLoading(true)
+    lotteryRepository.getRoom(roomId)
+      .then(setRoom)
+      .catch(setError)
+      .finally(() => setLoading(false))
+
     const unsub = lotteryRepository.subscribeToRoom(roomId, setRoom)
     return unsub
   }, [roomId])
 
-  return { room, loading }
+  return { room, loading, error }
 }
 ```
 
+**2. useRoomByPublicId.ts** - Same pattern, use `getRoomByPublicId()`
+
+**3. useRoomBySecretId.ts** - Same pattern, use `getRoomBySecretId()`
+
+**4. usePrizes.ts**
+```typescript
+export function usePrizes(roomId: string | undefined) {
+  const [prizes, setPrizes] = useState<Prize[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<Error | null>(null)
+
+  useEffect(() => {
+    if (!roomId) return
+
+    setLoading(true)
+    lotteryRepository.getPrizes(roomId)
+      .then(setPrizes)
+      .catch(setError)
+      .finally(() => setLoading(false))
+
+    const unsub = lotteryRepository.subscribeToPrizes(roomId, setPrizes)
+    return unsub
+  }, [roomId])
+
+  return { prizes, loading, error }
+}
+```
+
+**5. useParticipants.ts** - Same pattern for participants
+
 ### Action Hooks
-1. `useRoomActions.ts` - createRoom, updateRoom, deleteRoom
-2. `usePrizeActions.ts` - addPrize, updatePrize, deletePrize
-3. `useParticipantActions.ts` - addParticipant
+
+**1. useRoomActions.ts**
+```typescript
+export function useRoomActions() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<Error | null>(null)
+
+  const createRoom = useCallback(async (data: CreateRoomData) => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await lotteryRepository.createRoom(data)
+    } catch (err) {
+      setError(err as Error)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const updateRoom = useCallback(async (id: string, data: Partial<Room>) => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await lotteryRepository.updateRoom(id, data)
+    } catch (err) {
+      setError(err as Error)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const deleteRoom = useCallback(async (id: string) => {
+    setLoading(true)
+    setError(null)
+    try {
+      await lotteryRepository.deleteRoom(id)
+    } catch (err) {
+      setError(err as Error)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return { createRoom, updateRoom, deleteRoom, loading, error }
+}
+```
+
+**2. usePrizeActions.ts** - Similar pattern for prizes
+
+**3. useParticipantActions.ts** - Similar pattern for participants
+
+### Validation (Phase 2)
+
+Create test component to verify hooks:
+
+**`src/components/test/HookTest.tsx`:**
+```typescript
+export function HookTest() {
+  const { room } = useRoomByPublicId('NY2025-001')
+  const { prizes } = usePrizes(room?.id)
+  const { participants } = useParticipants(room?.id)
+  const { createRoom } = useRoomActions()
+
+  return (
+    <div>
+      <p>Room: {room?.name || 'Loading...'}</p>
+      <p>Prizes: {prizes?.length || 0}</p>
+      <p>Participants: {participants?.length || 0}</p>
+      <button onClick={() => createRoom({ name: 'Test' })}>
+        Create Room
+      </button>
+    </div>
+  )
+}
+```
+
+**Validation checklist:**
+- ✓ Hooks load data correctly
+- ✓ Real-time updates reflect in UI
+- ✓ Loading states work
+- ✓ Error handling works
+- ✓ No console errors
 
 ---
 
@@ -193,7 +390,7 @@ export function useRoom(roomId: string | undefined) {
 ### Install shadcn/ui Components
 **Agent:** `component-creator`
 
-Run: `npx shadcn@latest add button input card dialog label badge separator skeleton`
+Run: `npx shadcn@latest add button input card dialog label badge separator skeleton toast`
 
 ### Lottery Components (`src/components/lottery/`)
 **Agent:** `component-creator`
@@ -355,76 +552,31 @@ import { QRCodeSVG } from 'qrcode.react'
 
 **Approach:** Phase-by-phase validation with clear checkpoints to catch errors early and build incremental confidence.
 
-### Phase 0 Validation ✓
+### Phase 0 Validation ✅ COMPLETE
 ```bash
 pnpm build  # Must pass with 0 errors
 ```
-- ✓ TypeScript compiles successfully
-- ✓ Supabase tables exist (verify via Supabase dashboard or SQL query)
-- ✓ RLS policies enabled on all tables
-- ✓ Realtime enabled on rooms, prizes, participants
-- ✓ Indexes created on public_id, secret_id
+- ✅ TypeScript compiles successfully
+- ✅ Supabase tables exist (verified via MCP)
+- ✅ RLS policies enabled on all tables
+- ✅ Realtime enabled on rooms, prizes, participants
+- ✅ Indexes created on public_id, secret_id
 
-### Phase 1 Validation ✓
-**Create test script:** `src/scripts/test-repository.ts`
-
-```typescript
-// Quick validation of repository methods
-const room = await lotteryRepository.createRoom({ name: 'Test Room' })
-console.log('✓ Room created:', room.publicId)
-
-const fetched = await lotteryRepository.getRoomByPublicId(room.publicId)
-console.log('✓ Room fetched:', fetched?.name)
-
-const prize = await lotteryRepository.addPrize(room.id, { name: 'Test Prize', sortOrder: 1 })
-console.log('✓ Prize added:', prize.id)
-
-const participant = await lotteryRepository.addParticipant(room.id, { name: 'Alice' })
-console.log('✓ Participant added:', participant.name)
-
-// Test uniqueness constraint
-try {
-  await lotteryRepository.addParticipant(room.id, { name: 'alice' }) // lowercase
-  console.log('✗ FAIL: Should reject duplicate name')
-} catch (e) {
-  console.log('✓ Uniqueness constraint works')
-}
-
-// Test realtime subscription
-const unsub = lotteryRepository.subscribeToRoom(room.id, (updated) => {
-  console.log('✓ Realtime update received:', updated.status)
-})
-await lotteryRepository.updateRoom(room.id, { status: 'drawing' })
-setTimeout(unsub, 2000)
-```
+### Phase 1 Validation ✅ COMPLETE
+**Test script:** `src/scripts/test-repository.ts`
 
 **Run:** `npx tsx src/scripts/test-repository.ts`
 
-**Checklist:**
-- ✓ All CRUD operations work
-- ✓ Case-insensitive name uniqueness enforced
-- ✓ Realtime subscriptions fire on updates
-- ✓ Snake_case ↔ camelCase mapping correct
-- ✓ No TypeScript errors
+**Results:**
+- ✅ All CRUD operations work
+- ✅ Case-insensitive name uniqueness enforced
+- ✅ Realtime subscriptions fire on updates
+- ✅ Snake_case ↔ camelCase mapping correct
+- ✅ No TypeScript errors
+- ✅ 15/15 tests passing
 
-### Phase 2 Validation ✓
+### Phase 2 Validation ⬅️ NEXT
 **Create test component:** `src/components/test/HookTest.tsx`
-
-```typescript
-export function HookTest() {
-  const { room } = useRoomByPublicId('NY2025-001')
-  const { prizes } = usePrizes(room?.id)
-  const { participants } = useParticipants(room?.id)
-
-  return (
-    <div>
-      <p>Room: {room?.name || 'Loading...'}</p>
-      <p>Prizes: {prizes?.length || 0}</p>
-      <p>Participants: {participants?.length || 0}</p>
-    </div>
-  )
-}
-```
 
 **Add to App.tsx temporarily, run `pnpm dev`**
 
@@ -434,7 +586,7 @@ export function HookTest() {
 - ✓ Loading states work
 - ✓ No console errors
 
-### Phase 3-4 Validation ✓
+### Phase 3-4 Validation
 ```bash
 pnpm dev  # Start dev server
 ```
@@ -464,7 +616,7 @@ pnpm dev  # Start dev server
 - ✓ Navigation works
 - ✓ No TypeScript/ESLint warnings
 
-### Phase 5 Validation ✓ (CRITICAL)
+### Phase 5 Validation (CRITICAL)
 **Multi-device testing:**
 
 1. Open 2 browser windows:
@@ -491,7 +643,7 @@ pnpm dev  # Start dev server
 - ✓ No participant wins twice
 - ✓ No race conditions
 
-### Phase 6 Validation ✓
+### Phase 6 Validation
 **Visual QA:**
 ```bash
 pnpm dev
@@ -511,7 +663,7 @@ pnpm dev
 - ✓ Error messages display in Russian (i18n)
 - ✓ Network errors handled gracefully
 
-### Phase 7 Validation ✓
+### Phase 7 Validation
 **Automated tests:**
 ```bash
 pnpm test  # Run full test suite
@@ -548,35 +700,56 @@ pnpm test  # Run full test suite
 
 ## Critical Files
 
-1. `src/repositories/supabase.lottery.repository.ts` - Core data layer
-2. `src/hooks/useRoom.ts` - Primary room state management
-3. `src/pages/AdminDashboard.tsx` - Organizer interface
-4. `src/pages/ParticipantRoom.tsx` - Participant interface
-5. `src/hooks/useDrawing.ts` - Drawing orchestration
+1. `src/repositories/supabase.lottery.repository.ts` - Core data layer (COMPLETE)
+2. `src/hooks/useRoom.ts` - Primary room state management (TODO)
+3. `src/pages/AdminDashboard.tsx` - Organizer interface (TODO)
+4. `src/pages/ParticipantRoom.tsx` - Participant interface (TODO)
+5. `src/hooks/useDrawing.ts` - Drawing orchestration (TODO)
 
 ---
 
 ## Success Criteria
 
-- TypeScript builds without errors
-- All repository methods implemented
-- Real-time updates work across devices
-- Complete lottery flow works end-to-end
-- Drawing syncs with animation
-- New Year theme applied
-- Works on mobile (iOS Safari, Android Chrome)
-- Deployed to Vercel
+- ✅ TypeScript builds without errors
+- ✅ All repository methods implemented
+- ⬜ Real-time updates work across devices
+- ⬜ Complete lottery flow works end-to-end
+- ⬜ Drawing syncs with animation
+- ⬜ New Year theme applied
+- ⬜ Works on mobile (iOS Safari, Android Chrome)
+- ⬜ Deployed to Vercel
 
 ---
 
 ## Execution Order
 
-1. Phase 0 (CRITICAL BLOCKER)
-2. Phase 1 → Phase 2 (sequential)
-3. Phase 3 (can parallelize shadcn install)
-4. Phase 4 (needs Phase 2 + 3)
-5. Phase 5 (needs Phase 4)
-6. Phase 6 (can parallelize theme work)
-7. Phase 7 (final)
+1. ✅ Phase 0 (CRITICAL BLOCKER) - COMPLETE
+2. ✅ Phase 1 (Repository) - COMPLETE
+3. ⬅️ **Phase 2 (React Hooks)** - START HERE
+4. Phase 3 (UI Components - can parallelize shadcn install)
+5. Phase 4 (Pages - needs Phase 2 + 3)
+6. Phase 5 (Drawing Logic - needs Phase 4)
+7. Phase 6 (Theme & Polish - can parallelize theme work)
+8. Phase 7 (Testing & Deployment - final)
 
-**Estimated:** 4-5 days focused work
+**Estimated remaining:** 3-4 days focused work
+
+---
+
+## Quick Start for New Session
+
+```bash
+# 1. Verify environment
+pnpm build              # Should pass with 0 errors
+npx tsx src/scripts/test-repository.ts  # Should show 15/15 tests passing
+
+# 2. Start Phase 2
+mkdir -p src/hooks
+# Create hooks following patterns in handoff
+
+# 3. Test hooks
+pnpm dev
+# Create test component, verify real-time updates work
+```
+
+**Next immediate task:** Create `src/hooks/useRoom.ts` following the pattern above.
