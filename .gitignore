@@ -31,3 +31,7 @@ dist-ssr
 
 # Temporary files
 tmp/
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/logs/
