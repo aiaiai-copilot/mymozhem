@@ -27,5 +27,6 @@
     }
   },
   "include": ["src"],
+  "exclude": ["src/scripts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

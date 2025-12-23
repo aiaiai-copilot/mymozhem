@@ -4,7 +4,7 @@ export const classicGame: GameType = {
   id: 'classic',
   name: 'Classic Lottery',
 
-  configure(settings: GameSettings): void {
+  configure(_settings: GameSettings): void {
     // Configuration logic will be implemented later
   },
 

@@ -351,6 +351,201 @@ import { QRCodeSVG } from 'qrcode.react'
 
 ---
 
+## Validation Strategy
+
+**Approach:** Phase-by-phase validation with clear checkpoints to catch errors early and build incremental confidence.
+
+### Phase 0 Validation ✓
+```bash
+pnpm build  # Must pass with 0 errors
+```
+- ✓ TypeScript compiles successfully
+- ✓ Supabase tables exist (verify via Supabase dashboard or SQL query)
+- ✓ RLS policies enabled on all tables
+- ✓ Realtime enabled on rooms, prizes, participants
+- ✓ Indexes created on public_id, secret_id
+
+### Phase 1 Validation ✓
+**Create test script:** `src/scripts/test-repository.ts`
+
+```typescript
+// Quick validation of repository methods
+const room = await lotteryRepository.createRoom({ name: 'Test Room' })
+console.log('✓ Room created:', room.publicId)
+
+const fetched = await lotteryRepository.getRoomByPublicId(room.publicId)
+console.log('✓ Room fetched:', fetched?.name)
+
+const prize = await lotteryRepository.addPrize(room.id, { name: 'Test Prize', sortOrder: 1 })
+console.log('✓ Prize added:', prize.id)
+
+const participant = await lotteryRepository.addParticipant(room.id, { name: 'Alice' })
+console.log('✓ Participant added:', participant.name)
+
+// Test uniqueness constraint
+try {
+  await lotteryRepository.addParticipant(room.id, { name: 'alice' }) // lowercase
+  console.log('✗ FAIL: Should reject duplicate name')
+} catch (e) {
+  console.log('✓ Uniqueness constraint works')
+}
+
+// Test realtime subscription
+const unsub = lotteryRepository.subscribeToRoom(room.id, (updated) => {
+  console.log('✓ Realtime update received:', updated.status)
+})
+await lotteryRepository.updateRoom(room.id, { status: 'drawing' })
+setTimeout(unsub, 2000)
+```
+
+**Run:** `npx tsx src/scripts/test-repository.ts`
+
+**Checklist:**
+- ✓ All CRUD operations work
+- ✓ Case-insensitive name uniqueness enforced
+- ✓ Realtime subscriptions fire on updates
+- ✓ Snake_case ↔ camelCase mapping correct
+- ✓ No TypeScript errors
+
+### Phase 2 Validation ✓
+**Create test component:** `src/components/test/HookTest.tsx`
+
+```typescript
+export function HookTest() {
+  const { room } = useRoomByPublicId('NY2025-001')
+  const { prizes } = usePrizes(room?.id)
+  const { participants } = useParticipants(room?.id)
+
+  return (
+    <div>
+      <p>Room: {room?.name || 'Loading...'}</p>
+      <p>Prizes: {prizes?.length || 0}</p>
+      <p>Participants: {participants?.length || 0}</p>
+    </div>
+  )
+}
+```
+
+**Add to App.tsx temporarily, run `pnpm dev`**
+
+**Checklist:**
+- ✓ Hooks load data correctly
+- ✓ Real-time updates reflect in UI (update DB via Supabase dashboard)
+- ✓ Loading states work
+- ✓ No console errors
+
+### Phase 3-4 Validation ✓
+```bash
+pnpm dev  # Start dev server
+```
+
+**Manual browser testing:**
+1. Navigate to `/` (Landing)
+   - ✓ Room creation form visible
+   - ✓ Submit creates room
+   - ✓ Redirects to `/admin/:secretId`
+
+2. Admin Dashboard (`/admin/:secretId`)
+   - ✓ Room info displays (public link, QR code)
+   - ✓ Add prize form works
+   - ✓ Prize list updates in real-time
+   - ✓ Participant registration toggle works
+   - ✓ Participant list shows count
+
+3. Participant Room (`/room/:publicId`)
+   - ✓ Registration form appears when open
+   - ✓ Submit adds participant
+   - ✓ Name appears in list immediately
+   - ✓ Waiting screen shows when registration closed
+
+**Checklist:**
+- ✓ All components render without errors
+- ✓ Forms submit successfully
+- ✓ Navigation works
+- ✓ No TypeScript/ESLint warnings
+
+### Phase 5 Validation ✓ (CRITICAL)
+**Multi-device testing:**
+
+1. Open 2 browser windows:
+   - Window A: `/admin/:secretId` (organizer)
+   - Window B: `/room/:publicId` (participant)
+
+2. Execute full lottery flow:
+   - ✓ Admin adds 3 prizes
+   - ✓ Participant joins (sees name in list)
+   - ✓ Admin closes registration
+   - ✓ Participant sees "waiting" screen
+   - ✓ Admin clicks "Start Drawing"
+   - ✓ **Both windows** show drawing animation
+   - ✓ Winner revealed simultaneously on both screens
+   - ✓ Process repeats for all 3 prizes
+   - ✓ Room status changes to "finished"
+   - ✓ Results screen shows all winners
+
+**Checklist:**
+- ✓ Drawing logic executes sequentially
+- ✓ Animations sync across devices
+- ✓ Winner selection uses classicGame plugin
+- ✓ Database updates correctly (hasWon, prizeId, winnerId)
+- ✓ No participant wins twice
+- ✓ No race conditions
+
+### Phase 6 Validation ✓
+**Visual QA:**
+```bash
+pnpm dev
+# Open DevTools → Toggle device toolbar → iPhone 12 Pro (390x844)
+```
+
+**Mobile testing checklist:**
+- ✓ All pages work at 375px width
+- ✓ QR code displays and scales correctly
+- ✓ Buttons are touch-friendly (min 44x44px)
+- ✓ Forms usable on mobile keyboard
+- ✓ New Year theme applied (snowflakes, gold accents)
+- ✓ Animations perform smoothly
+
+**Error handling:**
+- ✓ Skeleton loaders show while data loading
+- ✓ Error messages display in Russian (i18n)
+- ✓ Network errors handled gracefully
+
+### Phase 7 Validation ✓
+**Automated tests:**
+```bash
+pnpm test  # Run full test suite
+```
+
+**E2E scenarios:**
+1. ✓ Happy path (create → add → join → draw → results)
+2. ✓ Duplicate name rejection
+3. ✓ Registration closed prevents join
+4. ✓ Insufficient participants/prizes prevents start
+
+**Production deployment:**
+```bash
+# Supabase production project
+# - Tables created via migrations
+# - Realtime enabled
+# - RLS policies active
+
+# Vercel deployment
+# - Environment variables set
+# - Build succeeds
+# - Deployed URL accessible
+```
+
+**Smoke test on production:**
+- ✓ Create room works
+- ✓ Add prize works
+- ✓ Participant can join
+- ✓ Drawing completes
+- ✓ HTTPS certificate valid
+- ✓ Mobile browsers work (iOS Safari, Android Chrome)
+
+---
+
 ## Critical Files
 
 1. `src/repositories/supabase.lottery.repository.ts` - Core data layer

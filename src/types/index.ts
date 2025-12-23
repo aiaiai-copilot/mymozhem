@@ -1,40 +1,42 @@
 // Core data types based on PRD
+// These use camelCase for application layer (transformed from database snake_case)
 
 export interface Room {
-  id: string;
-  publicId: string;
-  secretId: string;
-  name: string;
-  registrationOpen: boolean;
-  status: 'waiting' | 'drawing' | 'finished';
-  currentPrizeIndex: number;
-  createdAt: Date;
-  settings: RoomSettings;
+  id: string
+  publicId: string
+  secretId: string
+  name: string
+  registrationOpen: boolean
+  status: 'waiting' | 'drawing' | 'finished'
+  currentPrizeIndex: number
+  createdAt: Date
+  settings: RoomSettings
 }
 
 export interface RoomSettings {
-  gameType: string;
-  visualization: string;
-  theme: string;
-  prizeOrder: 'small-to-large' | 'large-to-small' | 'random';
+  gameType: string
+  visualization: string
+  theme: string
+  prizeOrder: 'small-to-large' | 'large-to-small' | 'random'
 }
 
 export interface Prize {
-  id: string;
-  roomId: string;
-  name: string;
-  description?: string;
-  order: number;
-  winnerId?: string;
+  id: string
+  roomId: string
+  name: string
+  description?: string
+  sortOrder: number
+  winnerId?: string
+  createdAt: Date
 }
 
 export interface Participant {
-  id: string;
-  roomId: string;
-  name: string;
-  joinedAt: Date;
-  hasWon: boolean;
-  prizeId?: string;
+  id: string
+  roomId: string
+  name: string
+  joinedAt: Date
+  hasWon: boolean
+  prizeId?: string
 }
 
 export interface WinnerResult {
