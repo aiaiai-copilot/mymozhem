@@ -1,7 +1,0 @@
-{
-  "enabledMcpjsonServers": [
-    "supabase",
-    "playwright",
-    "context7"
-  ]
-}
