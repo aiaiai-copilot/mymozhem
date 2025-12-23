@@ -5,13 +5,13 @@
 **Project:** MyMozhem - Interactive entertainment platform for events
 **Current Module:** Lottery (first game, prototype v0.1)
 **Repository:** https://github.com/aiaiai-copilot/mymozhem
-**Status:** Phase 0 & 1 complete, ready for Phase 2 (React hooks)
-**Branch:** master (1 commit ahead, just pushed)
-**Latest Commit:** `53b647f` - Implement Phase 0 and Phase 1: Database schema and repository layer
+**Status:** Phase 4 complete, ready for Phase 5 (Drawing Logic)
+**Branch:** master
+**Latest Work:** All page components implemented and tested
 
 ### What's Done
 
-**Foundation (Phases 0-1 Complete):**
+**Foundation (Phases 0-4 Complete):**
 - ✅ Project scaffolding (Vite + React + TypeScript + Supabase)
 - ✅ Git repository initialized and pushed to GitHub
 - ✅ Complete type system (Room, Prize, Participant, plugins)
@@ -22,7 +22,7 @@
 - ✅ PRD documentation complete
 - ✅ Specialized agents configured
 
-**Phase 0 - Database & Schema:**
+**Phase 0 - Database & Schema: ✅ COMPLETE**
 - ✅ Fixed 29 TypeScript build errors
 - ✅ Supabase project created ("mymozhem", us-west-2)
 - ✅ Database migration applied successfully
@@ -32,13 +32,78 @@
 - ✅ Database type definitions (`src/types/database.ts`)
 - ✅ Type mappers (`src/lib/mappers.ts`)
 
-**Phase 1 - Repository Implementation:**
+**Phase 1 - Repository Implementation: ✅ COMPLETE**
 - ✅ All CRUD methods implemented
 - ✅ Public ID generation (NY2025-XXX format)
 - ✅ Realtime subscriptions (rooms, prizes, participants)
 - ✅ Auto-incrementing prize sort_order
 - ✅ Validation test script (15/15 tests passing)
 - ✅ Supabase client supports Vite + Node.js
+
+**Phase 2 - React Hooks: ✅ COMPLETE**
+- ✅ Data hooks implemented (5 hooks):
+  - `useRoom.ts` - Fetch + subscribe to room by ID
+  - `useRoomByPublicId.ts` - For participant view
+  - `useRoomBySecretId.ts` - For admin dashboard
+  - `usePrizes.ts` - Real-time prize list
+  - `useParticipants.ts` - Real-time participant list
+- ✅ Action hooks implemented (3 hooks):
+  - `useRoomActions.ts` - createRoom, updateRoom, deleteRoom
+  - `usePrizeActions.ts` - addPrize, updatePrize, deletePrize
+  - `useParticipantActions.ts` - addParticipant, updateParticipant
+- ✅ Test component created (`HookTest.tsx`)
+- ✅ All hooks follow project patterns with loading/error states
+- ✅ TypeScript builds with 0 errors
+
+**Phase 3 - UI Components: ✅ COMPLETE**
+- ✅ shadcn/ui components installed (button, input, card, dialog, label, badge, separator, skeleton, toast)
+- ✅ Lottery components (8 components):
+  - `RoomCreationForm.tsx` - Create new lottery room with validation
+  - `RoomInfoCard.tsx` - Display room info with QR code (uses qrcode.react)
+  - `PrizeList.tsx` - List prizes with winners, sorted by sortOrder
+  - `PrizeForm.tsx` - Add/edit prize dialog
+  - `ParticipantList.tsx` - Real-time participant list with winner badges
+  - `ParticipantRegistration.tsx` - Join room form with duplicate name handling
+  - `DrawingControls.tsx` - Start drawing button with validation
+  - `WinnerDisplay.tsx` - Animated winner reveal (uses framer-motion)
+- ✅ Admin components (4 components):
+  - `DashboardLayout.tsx` - Admin dashboard layout with header/sections
+  - `PrizeManagement.tsx` - Combines PrizeList and PrizeForm
+  - `ParticipantManagement.tsx` - Participant list with registration toggle
+  - `DrawingPanel.tsx` - Drawing controls and results display
+- ✅ Dependencies installed: qrcode.react, framer-motion
+- ✅ All components use i18n for text
+- ✅ All components follow project conventions (named exports, TypeScript, mobile-first)
+- ✅ TypeScript builds with 0 errors
+
+**Phase 4 - Pages: ✅ COMPLETE**
+- ✅ Toaster component added to App.tsx
+- ✅ Landing page (`Landing.tsx`):
+  - Clean, centered layout with New Year theme
+  - Room creation form with validation
+  - Navigation to admin dashboard on success
+  - Mobile-responsive design
+- ✅ Admin Dashboard (`AdminDashboard.tsx`):
+  - Loads room via secretId from URL params
+  - Four sections: Room Info, Prizes, Participants, Drawing
+  - QR code generation and public link sharing
+  - Real-time updates for prizes and participants
+  - Registration toggle functionality
+  - Loading states with Skeleton components
+  - Error handling for invalid secretId
+- ✅ Participant Room (`ParticipantRoom.tsx`):
+  - Loads room via publicId from URL params
+  - State machine based on room status:
+    - `waiting + registrationOpen` → Registration form
+    - `waiting + !registrationOpen` → Waiting screen
+    - `drawing` → Winner display (ready for Phase 5)
+    - `finished` → Results with all winners
+  - Real-time participant list updates
+  - Mobile-responsive design
+  - Error handling for invalid publicId
+- ✅ All pages use i18n for text
+- ✅ Component props fixed and validated
+- ✅ TypeScript builds with 0 errors
 
 ### Current Status
 
@@ -47,38 +112,147 @@
 - ✅ Complete data layer (repository + database)
 - ✅ All repository methods tested and validated
 - ✅ Realtime synchronization functional
+- ✅ Complete React hooks for data management
+- ✅ All UI components implemented and building
+- ✅ All page components implemented and wired up
+- ✅ Full navigation flow working (Landing → Admin → Participant)
+- ✅ QR code generation working
+- ✅ Real-time updates across multiple windows
 - ✅ Environment variables configured (.env)
 
 **What's Missing:**
-- ❌ No React hooks for data management
-- ❌ No UI components
-- ❌ No pages (Landing, AdminDashboard, ParticipantRoom)
-- ❌ No drawing logic implementation
-- ❌ No theme integration
+- ❌ No drawing logic implementation (Phase 5)
+- ❌ Plugins not registered (games, visualizations, themes)
+- ❌ No winner animation coordination
+- ❌ Theme not fully applied (Phase 6)
+- ❌ Some i18n text still says "lottery" instead of generic "room"
 
-### Immediate Next Steps (Phase 2)
+### Immediate Next Steps
 
-**Priority:** Create React hooks to connect repository to UI
+**Priority 1: Generic i18n Text (Option A - 30 min)**
 
-1. **Data Hooks** (30-45 min each):
-   - `useRoom.ts` - Fetch + subscribe to room by ID
-   - `useRoomByPublicId.ts` - For participant view
-   - `useRoomBySecretId.ts` - For admin dashboard
-   - `usePrizes.ts` - Real-time prize list
-   - `useParticipants.ts` - Real-time participant list
+Make UI text generic to support future game types while keeping v0.1 as lottery prototype:
 
-2. **Action Hooks** (20-30 min each):
-   - `useRoomActions.ts` - createRoom, updateRoom, deleteRoom
-   - `usePrizeActions.ts` - addPrize, updatePrize, deletePrize
-   - `useParticipantActions.ts` - addParticipant
+Update `src/i18n/ru.ts`:
+```typescript
+landing: {
+  title: 'MyMozhem',
+  subtitle: 'Интерактивные развлечения для мероприятий',  // Already generic ✓
+  createRoom: 'Создать комнату',  // Changed from 'Создать лотерею'
+  description: 'Создайте комнату для вашего мероприятия',  // Changed
+},
+room: {
+  create: {
+    title: 'Создание комнаты',  // Changed from 'Создание лотереи'
+    roomName: 'Название',  // Already generic ✓
+    roomNamePlaceholder: 'Новогодняя лотерея 2025',  // Specific example is OK
+  },
+  // ... rest unchanged
+}
+```
 
-3. **Validation:**
-   - Create test component to verify hooks work
-   - Test real-time updates in browser
+**Note:** Architecture already supports multiple game types via plugin system. This change just makes UI text more generic. Default gameType remains 'classic' (lottery).
+
+**Priority 2: Phase 5 - Drawing Logic (3-4 hours)**
+
+Implement the drawing flow to make the lottery functional:
+
+1. **Create Drawing Hook** (`src/hooks/useDrawing.ts`):
+   - Validate: at least 1 prize, at least 1 participant, registration closed
+   - Start: Set room.status = 'drawing', currentPrizeIndex = 0
+   - For each prize (by sortOrder):
+     - Select random eligible participant (not already won)
+     - Update participant: hasWon = true, prizeId
+     - Update prize: winnerId
+     - Wait 3-5 seconds for animation
+     - Increment room.currentPrizeIndex
+   - End: Set room.status = 'finished'
+
+2. **Register Plugins**:
+   - Uncomment in `src/plugins/games/index.ts`
+   - Uncomment in `src/plugins/visualizations/index.ts`
+   - Uncomment in `src/plugins/themes/index.ts`
+
+3. **Wire Drawing to AdminDashboard**:
+   - Replace `handleStartDrawing` placeholder with actual hook
+   - Add error handling and validation
+   - Show progress/status during drawing
+
+4. **Test Multi-Device Drawing**:
+   - Open admin in one window
+   - Open participant in another
+   - Verify both see winner reveal simultaneously
+
+### Architecture Notes
+
+**Multi-Game Support Status:**
+
+The system is **architecturally ready** for multiple game types:
+
+✅ **Data Model:**
+- `Room.settings.gameType` field exists
+- Default: 'classic' (lottery)
+- Supports any game type string
+
+✅ **Plugin System:**
+- `GameType` interface defined
+- Registry functions ready: `registerGameType()`, `getGameType()`, `getAllGameTypes()`
+- Currently only `classic.ts` implemented
+
+✅ **Repository Layer:**
+- Creates generic "rooms" (not "lotteries")
+- Game type stored in settings JSONB column
+
+❌ **UI Layer (v0.1):**
+- RoomCreationForm doesn't have game type selector (using default)
+- Some i18n text says "lottery" (being changed to "room")
+- Components work for any prize-based game
+
+**Adding New Game Type (Future v0.2+):**
+1. Create `src/plugins/games/secret-santa.ts`
+2. Implement `GameType` interface
+3. Register in `src/plugins/games/index.ts`
+4. Add game type selector to RoomCreationForm
+5. Add game-specific UI/instructions if needed
+
+**Current Decision:** Keep v0.1 simple with single game type (lottery), make UI text generic, add game type selection in v0.2 after core functionality proven.
 
 ### Key Files to Know
 
-**Core Implementation:**
+**Phase 4 - Pages** (3 files):
+- `src/pages/Landing.tsx` - Landing page with room creation
+- `src/pages/AdminDashboard.tsx` - Admin dashboard with all sections
+- `src/pages/ParticipantRoom.tsx` - Participant view with state machine
+- `src/App.tsx` - Routing and Toaster
+
+**Phase 3 - Components** (14 files):
+- `src/components/lottery/RoomCreationForm.tsx`
+- `src/components/lottery/RoomInfoCard.tsx`
+- `src/components/lottery/PrizeList.tsx`
+- `src/components/lottery/PrizeForm.tsx`
+- `src/components/lottery/ParticipantList.tsx`
+- `src/components/lottery/ParticipantRegistration.tsx`
+- `src/components/lottery/DrawingControls.tsx`
+- `src/components/lottery/WinnerDisplay.tsx`
+- `src/components/lottery/index.ts`
+- `src/components/admin/DashboardLayout.tsx`
+- `src/components/admin/PrizeManagement.tsx`
+- `src/components/admin/ParticipantManagement.tsx`
+- `src/components/admin/DrawingPanel.tsx`
+- `src/components/admin/index.ts`
+
+**Phase 2 - Hooks** (8 files):
+- `src/hooks/useRoom.ts`
+- `src/hooks/useRoomByPublicId.ts`
+- `src/hooks/useRoomBySecretId.ts`
+- `src/hooks/usePrizes.ts`
+- `src/hooks/useParticipants.ts`
+- `src/hooks/useRoomActions.ts`
+- `src/hooks/usePrizeActions.ts`
+- `src/hooks/useParticipantActions.ts`
+- `src/hooks/use-toast.ts` (shadcn)
+
+**Phase 1 - Repository & Types:**
 - `src/repositories/supabase.lottery.repository.ts` - Complete repository (316 lines)
 - `src/lib/mappers.ts` - snake_case ↔ camelCase conversion
 - `src/types/database.ts` - Database schema types
@@ -93,6 +267,7 @@
 **Testing:**
 - `src/scripts/test-repository.ts` - Phase 1 validation (all passing)
 - Run: `npx tsx src/scripts/test-repository.ts`
+- `src/components/test/HookTest.tsx` - Phase 2 hook testing
 
 **Documentation:**
 - `docs/PRD.md` - Product requirements (source of truth)
@@ -126,364 +301,251 @@
 
 ---
 
-## Overview
+## Phase 5: Drawing Logic ⬅️ START HERE
 
-Complete the lottery prototype with full end-to-end functionality: room creation, prize management, participant registration, real-time synchronization, and drawing with animations.
+### 1. Update i18n for Generic Text (30 min)
 
----
+**File:** `src/i18n/ru.ts`
 
-## Phase 0: Foundation ✅ COMPLETE
+Change lottery-specific text to generic room text:
 
-### ✅ Fix TypeScript Build Errors
-**Status:** DONE (commit 53b647f)
-- Fixed 28 unused parameters in `supabase.lottery.repository.ts`
-- Fixed 1 unused parameter in `classic.ts`
-- Build passes with 0 errors
-
-### ✅ Database Schema Setup
-**Status:** DONE (commit 53b647f)
-**Agent:** `supabase-schema`
-
-**Tables created:**
-```sql
-rooms (
-  id UUID PRIMARY KEY,
-  public_id VARCHAR(20) UNIQUE,
-  secret_id UUID UNIQUE,
-  name VARCHAR(255),
-  registration_open BOOLEAN DEFAULT true,
-  status VARCHAR(20) DEFAULT 'waiting',
-  current_prize_index INTEGER DEFAULT 0,
-  settings JSONB,
-  created_at TIMESTAMPTZ
-)
-
-prizes (
-  id UUID PRIMARY KEY,
-  room_id UUID REFERENCES rooms ON DELETE CASCADE,
-  name VARCHAR(255),
-  description TEXT,
-  sort_order INTEGER,
-  winner_id UUID REFERENCES participants,
-  created_at TIMESTAMPTZ
-)
-
-participants (
-  id UUID PRIMARY KEY,
-  room_id UUID REFERENCES rooms ON DELETE CASCADE,
-  name VARCHAR(255),
-  has_won BOOLEAN DEFAULT false,
-  prize_id UUID REFERENCES prizes,
-  joined_at TIMESTAMPTZ
-)
-```
-
-**Note:** Case-insensitive unique constraint implemented via index:
-```sql
-CREATE UNIQUE INDEX idx_participants_unique_name
-ON participants(room_id, LOWER(name));
-```
-
-**Enabled:**
-- ✅ RLS policies (public access for prototype)
-- ✅ Realtime on all tables
-- ✅ Indexes on public_id, secret_id
-
----
-
-## Phase 1: Repository Implementation ✅ COMPLETE
-
-### ✅ Implement All CRUD Methods
-**Status:** DONE (commit 53b647f)
-**File:** `src/repositories/supabase.lottery.repository.ts`
-
-**Implemented methods:**
-1. ✅ `createRoom()` - Generates publicId format "NY2025-XXX", secretId UUID
-2. ✅ `getRoom()`, `getRoomByPublicId()`, `getRoomBySecretId()`
-3. ✅ `updateRoom()` - Status changes, registration toggle
-4. ✅ `addPrize()`, `getPrizes()`, `updatePrize()`, `deletePrize()`
-5. ✅ `addParticipant()` - Enforces case-insensitive name uniqueness
-6. ✅ `getParticipants()`, `updateParticipant()`
-7. ✅ `deleteRoom()` - Cascade handled by DB
-
-**Features:**
-- snake_case ↔ camelCase mapping via mappers
-- Auto-incrementing prize sort_order
-- Custom error messages for unique constraint violations
-- Proper cleanup functions for subscriptions
-
-### ✅ Implement Realtime Subscriptions
-**Status:** DONE (commit 53b647f)
-**Consulted:** `supabase-realtime` skill
-
-**Methods:**
-- ✅ `subscribeToRoom(roomId, callback)` - Room status updates
-- ✅ `subscribeToPrizes(roomId, callback)` - Prize changes
-- ✅ `subscribeToParticipants(roomId, callback)` - Participant joins/wins
-
-**Pattern used:**
 ```typescript
-const channel = supabase
-  .channel(`room:${roomId}`)
-  .on('postgres_changes', {
-    event: 'UPDATE',
-    schema: 'public',
-    table: 'rooms',
-    filter: `id=eq.${roomId}`
-  }, payload => callback(mapRoomFromDb(payload.new)))
-  .subscribe()
-
-return () => { channel.unsubscribe() }
+export const ru = {
+  common: {
+    // ... unchanged
+  },
+  landing: {
+    title: 'MyMozhem',
+    subtitle: 'Интерактивные развлечения для мероприятий',
+    createRoom: 'Создать комнату',  // Changed from createLottery
+    description: 'Создайте комнату для вашего мероприятия',  // Changed
+  },
+  room: {
+    create: {
+      title: 'Создание комнаты',  // Changed from 'Создание лотереи'
+      roomName: 'Название',
+      roomNamePlaceholder: 'Новогодняя лотерея 2025',
+    },
+    created: {
+      title: 'Комната создана!',
+      publicLink: 'Ссылка для участников',
+      adminLink: 'Ссылка организатора',
+      copyLink: 'Скопировать ссылку',
+      qrCode: 'QR код для входа',
+    },
+  },
+  // ... rest unchanged
+}
 ```
 
----
+**Update Landing.tsx references:**
+- Change `t.landing.createLottery` to `t.landing.createRoom`
 
-## Phase 2: React Hooks ⬅️ START HERE
+### 2. Create Drawing Hook (`src/hooks/useDrawing.ts`)
 
-### Data Hooks (Create in `src/hooks/`)
+**Implementation requirements:**
 
-**1. useRoom.ts**
 ```typescript
-export function useRoom(roomId: string | undefined) {
-  const [room, setRoom] = useState<Room | null>(null)
-  const [loading, setLoading] = useState(true)
+import { useState, useCallback } from 'react'
+import { useRoomActions } from './useRoomActions'
+import { usePrizeActions } from './usePrizeActions'
+import { useParticipantActions } from './useParticipantActions'
+import { getGameType } from '@/plugins/games'
+import type { Room, Prize, Participant } from '@/types'
+
+export function useDrawing(
+  room: Room,
+  prizes: Prize[],
+  participants: Participant[]
+) {
+  const [isDrawing, setIsDrawing] = useState(false)
+  const [currentPrizeIndex, setCurrentPrizeIndex] = useState(0)
   const [error, setError] = useState<Error | null>(null)
 
-  useEffect(() => {
-    if (!roomId) return
+  const { updateRoom } = useRoomActions()
+  const { updatePrize } = usePrizeActions()
+  const { updateParticipant } = useParticipantActions()
 
-    setLoading(true)
-    lotteryRepository.getRoom(roomId)
-      .then(setRoom)
-      .catch(setError)
-      .finally(() => setLoading(false))
+  const validate = useCallback(() => {
+    if (prizes.length === 0) {
+      throw new Error('No prizes to draw')
+    }
+    if (participants.length === 0) {
+      throw new Error('No participants')
+    }
+    if (room.registrationOpen) {
+      throw new Error('Registration must be closed')
+    }
+  }, [prizes, participants, room.registrationOpen])
 
-    const unsub = lotteryRepository.subscribeToRoom(roomId, setRoom)
-    return unsub
-  }, [roomId])
-
-  return { room, loading, error }
-}
-```
-
-**2. useRoomByPublicId.ts** - Same pattern, use `getRoomByPublicId()`
-
-**3. useRoomBySecretId.ts** - Same pattern, use `getRoomBySecretId()`
-
-**4. usePrizes.ts**
-```typescript
-export function usePrizes(roomId: string | undefined) {
-  const [prizes, setPrizes] = useState<Prize[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-
-  useEffect(() => {
-    if (!roomId) return
-
-    setLoading(true)
-    lotteryRepository.getPrizes(roomId)
-      .then(setPrizes)
-      .catch(setError)
-      .finally(() => setLoading(false))
-
-    const unsub = lotteryRepository.subscribeToPrizes(roomId, setPrizes)
-    return unsub
-  }, [roomId])
-
-  return { prizes, loading, error }
-}
-```
-
-**5. useParticipants.ts** - Same pattern for participants
-
-### Action Hooks
-
-**1. useRoomActions.ts**
-```typescript
-export function useRoomActions() {
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
-
-  const createRoom = useCallback(async (data: CreateRoomData) => {
-    setLoading(true)
-    setError(null)
+  const startDrawing = useCallback(async () => {
     try {
-      return await lotteryRepository.createRoom(data)
+      validate()
+      setIsDrawing(true)
+      setError(null)
+
+      // Set room status to drawing
+      await updateRoom(room.id, { status: 'drawing', currentPrizeIndex: 0 })
+
+      // Get game type plugin
+      const gameType = getGameType(room.settings.gameType)
+      if (!gameType) {
+        throw new Error(`Game type ${room.settings.gameType} not found`)
+      }
+
+      // Sort prizes by sortOrder
+      const sortedPrizes = [...prizes].sort((a, b) => a.sortOrder - b.sortOrder)
+
+      // Draw for each prize
+      for (let i = 0; i < sortedPrizes.length; i++) {
+        const prize = sortedPrizes[i]
+        setCurrentPrizeIndex(i)
+
+        // Update room's current prize index
+        await updateRoom(room.id, { currentPrizeIndex: i })
+
+        // Get eligible participants (not already won)
+        const eligibleParticipants = participants.filter(p => !p.hasWon)
+
+        if (eligibleParticipants.length === 0) {
+          throw new Error('No more eligible participants')
+        }
+
+        // Use game type to select winner(s)
+        const results = gameType.selectWinners(eligibleParticipants, [prize])
+        const winner = results[0]
+
+        if (!winner) {
+          throw new Error('No winner selected')
+        }
+
+        // Update participant
+        await updateParticipant(winner.participantId, {
+          hasWon: true,
+          prizeId: prize.id,
+        })
+
+        // Update prize
+        await updatePrize(prize.id, {
+          winnerId: winner.participantId,
+        })
+
+        // Wait for animation (3-5 seconds)
+        await new Promise(resolve => setTimeout(resolve, 4000))
+      }
+
+      // Set room status to finished
+      await updateRoom(room.id, { status: 'finished' })
+
+      setIsDrawing(false)
     } catch (err) {
       setError(err as Error)
+      setIsDrawing(false)
       throw err
-    } finally {
-      setLoading(false)
     }
-  }, [])
+  }, [room, prizes, participants, updateRoom, updatePrize, updateParticipant, validate])
 
-  const updateRoom = useCallback(async (id: string, data: Partial<Room>) => {
-    setLoading(true)
-    setError(null)
-    try {
-      return await lotteryRepository.updateRoom(id, data)
-    } catch (err) {
-      setError(err as Error)
-      throw err
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  const deleteRoom = useCallback(async (id: string) => {
-    setLoading(true)
-    setError(null)
-    try {
-      await lotteryRepository.deleteRoom(id)
-    } catch (err) {
-      setError(err as Error)
-      throw err
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  return { createRoom, updateRoom, deleteRoom, loading, error }
+  return {
+    startDrawing,
+    isDrawing,
+    currentPrizeIndex,
+    error,
+  }
 }
 ```
 
-**2. usePrizeActions.ts** - Similar pattern for prizes
+### 3. Register Classic Game Plugin
 
-**3. useParticipantActions.ts** - Similar pattern for participants
+**File:** `src/plugins/games/index.ts`
 
-### Validation (Phase 2)
+Uncomment the imports:
 
-Create test component to verify hooks:
-
-**`src/components/test/HookTest.tsx`:**
 ```typescript
-export function HookTest() {
-  const { room } = useRoomByPublicId('NY2025-001')
-  const { prizes } = usePrizes(room?.id)
-  const { participants } = useParticipants(room?.id)
-  const { createRoom } = useRoomActions()
+import { GameType } from '@/types'
 
-  return (
-    <div>
-      <p>Room: {room?.name || 'Loading...'}</p>
-      <p>Prizes: {prizes?.length || 0}</p>
-      <p>Participants: {participants?.length || 0}</p>
-      <button onClick={() => createRoom({ name: 'Test' })}>
-        Create Room
-      </button>
-    </div>
-  )
+const gameTypes = new Map<string, GameType>()
+
+export function registerGameType(gameType: GameType) {
+  gameTypes.set(gameType.id, gameType)
 }
+
+export function getGameType(id: string): GameType | undefined {
+  return gameTypes.get(id)
+}
+
+export function getAllGameTypes(): GameType[] {
+  return Array.from(gameTypes.values())
+}
+
+// Register game types
+import { classicGame } from './classic'
+registerGameType(classicGame)
 ```
 
-**Validation checklist:**
-- ✓ Hooks load data correctly
-- ✓ Real-time updates reflect in UI
-- ✓ Loading states work
-- ✓ Error handling works
-- ✓ No console errors
+### 4. Update AdminDashboard to Use Drawing Hook
 
----
+**File:** `src/pages/AdminDashboard.tsx`
 
-## Phase 3: UI Components
-
-### Install shadcn/ui Components
-**Agent:** `component-creator`
-
-Run: `npx shadcn@latest add button input card dialog label badge separator skeleton toast`
-
-### Lottery Components (`src/components/lottery/`)
-**Agent:** `component-creator`
-**Consult:** `react-components` skill
-
-1. **RoomCreationForm** - Name input, submit handler
-2. **RoomInfoCard** - Public link, QR code, copy button
-3. **PrizeList** - Display prizes with winners
-4. **PrizeForm** - Add/edit dialog
-5. **ParticipantList** - Real-time list with count
-6. **ParticipantRegistration** - Name form with validation
-7. **DrawingControls** - Start button, validation
-8. **WinnerDisplay** - Animation container
-
-### Admin Components (`src/components/admin/`)
-1. **DashboardLayout** - Header, sections
-2. **PrizeManagement** - Combines list + form
-3. **ParticipantManagement** - List + registration toggle
-4. **DrawingPanel** - Controls + status
-
----
-
-## Phase 4: Pages
-
-### Landing Page (`src/pages/Landing.tsx`)
-**Agent:** `component-creator`
-
-- RoomCreationForm in dialog
-- On success → navigate to `/admin/:secretId`
-- New Year theme applied
-
-### Admin Dashboard (`src/pages/AdminDashboard.tsx`)
-**Agent:** `component-creator`
+Replace placeholder with actual hook:
 
 ```typescript
+import { useDrawing } from '@/hooks/useDrawing'
+
 export function AdminDashboard() {
-  const { secretId } = useParams()
-  const { room } = useRoomBySecretId(secretId)
-  const { prizes } = usePrizes(room?.id)
-  const { participants } = useParticipants(room?.id)
+  // ... existing code ...
 
-  return (
-    <DashboardLayout>
-      <RoomInfoCard room={room} />
-      <PrizeManagement roomId={room?.id} prizes={prizes} />
-      <ParticipantManagement roomId={room?.id} participants={participants} />
-      <DrawingPanel room={room} prizes={prizes} participants={participants} />
-    </DashboardLayout>
+  const { startDrawing, isDrawing, error: drawingError } = useDrawing(
+    room,
+    prizes || [],
+    participants || []
   )
+
+  const handleStartDrawing = async () => {
+    try {
+      await startDrawing()
+      // Optional: show success toast
+    } catch (err) {
+      console.error('Drawing failed:', err)
+      // Optional: show error toast
+    }
+  }
+
+  // ... rest of component
 }
 ```
 
-### Participant Room (`src/pages/ParticipantRoom.tsx`)
-**Agent:** `component-creator`
+### 5. Validation Strategy
 
-**State machine:**
-- `waiting + registrationOpen` → ParticipantRegistration
-- `waiting + registrationClosed` → Waiting screen
-- `drawing` → WinnerDisplay
-- `finished` → Results
+**Multi-Window Testing (CRITICAL):**
 
----
+1. **Setup:**
+   - Window A: Admin dashboard (`/admin/:secretId`)
+   - Window B: Participant room (`/room/:publicId`)
+   - Window C: Another participant (optional)
 
-## Phase 5: Drawing Logic
+2. **Test Sequence:**
+   - Add 3 prizes in admin
+   - Join as 3+ participants
+   - Close registration in admin
+   - Verify participant sees "waiting" screen
+   - Click "Start Drawing" in admin
+   - **Both windows should show:**
+     - Prize 1 winner reveal (4 seconds)
+     - Prize 2 winner reveal (4 seconds)
+     - Prize 3 winner reveal (4 seconds)
+     - Final results screen
 
-### Create Drawing Hook (`src/hooks/useDrawing.ts`)
+3. **Verify:**
+   - ✓ Winner reveals are synchronized
+   - ✓ Each participant wins maximum once
+   - ✓ All prizes are assigned
+   - ✓ Room status changes to 'finished'
+   - ✓ Results screen shows all winners
 
-**Flow:**
-1. Start: Set room.status = 'drawing'
-2. For each prize (by sort_order):
-   - Call `classicGame.selectWinners()` for 1 prize
-   - Update participant: hasWon = true, prizeId
-   - Update prize: winnerId
-   - Increment room.currentPrizeIndex
-   - Trigger visualization
-   - Wait 3-5 seconds
-3. End: Set room.status = 'finished'
-
-### Register Plugins
-
-**Files:**
-- `src/plugins/games/index.ts`
-- `src/plugins/visualizations/index.ts`
-- `src/plugins/themes/index.ts`
-
-**Action:** Uncomment imports and registration calls
-
-### Enhance Visualization (`src/plugins/visualizations/name-reveal.ts`)
-**Agent:** `component-creator`
-
-- Use framer-motion for animations
-- Add confetti effect
-- Coordinate timing across devices
+**Database Verification:**
+- Check participants table: hasWon = true, prizeId set
+- Check prizes table: winnerId set
+- Check rooms table: status = 'finished'
 
 ---
 
@@ -494,31 +556,21 @@ export function AdminDashboard() {
 
 - Enhance `src/plugins/themes/new-year.ts` with full CSS variables
 - Add snowflake SVG animations to `src/index.css`
-- Gold accents, blue gradients
-- Festive typography
-
-### QR Code (`src/components/lottery/RoomInfoCard.tsx`)
-
-```typescript
-import { QRCodeSVG } from 'qrcode.react'
-
-<QRCodeSVG
-  value={`${window.location.origin}/room/${room.publicId}`}
-  size={200}
-/>
-```
+- Gold accents (#FFD700), blue gradients (#1E3A8A to #3B82F6)
+- Festive typography (consider Google Fonts)
+- Apply theme to all pages
 
 ### Error Handling
-- Add Skeleton loaders to all components
-- Error boundaries for runtime errors
-- User-friendly i18n error messages
-- Toast notifications for actions
+- Toast notifications for actions (use useToast hook)
+- Better error messages for drawing failures
+- Loading indicators during drawing
+- Graceful handling of network issues
 
 ### Mobile Responsiveness
-- Test all pages at 375px width
-- Single-column layout on mobile
+- Test all pages at 375px width (iPhone SE)
+- Test QR code scanning on real device
 - Touch-friendly buttons (44x44px min)
-- Responsive QR code sizing
+- Test on iOS Safari, Android Chrome
 
 ---
 
@@ -527,184 +579,31 @@ import { QRCodeSVG } from 'qrcode.react'
 ### Testing
 **Agent:** `test-writer`
 
-**Scenarios:**
+**Critical Scenarios:**
 1. Happy path: Create → Add prizes → Join → Draw → Results
-2. Duplicate names (should fail)
+2. Duplicate names (should fail with friendly message)
 3. Registration closed (can't join)
-4. Insufficient participants/prizes (can't start)
+4. Insufficient participants/prizes (can't start drawing)
+5. Invalid URLs (404 handling)
+6. Mid-drawing participant disconnect (resilience)
 
 ### Supabase Production
 **Agent:** `supabase-schema`
 
-- Create production project
-- Run migrations
+- Use current project or create production project
+- Run migrations in production
 - Verify Realtime enabled
-- Update env vars
+- Update env vars for production
 
 ### Vercel Deployment
-- Connect GitHub repo
-- Set env vars: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
-- Deploy and test
-
----
-
-## Validation Strategy
-
-**Approach:** Phase-by-phase validation with clear checkpoints to catch errors early and build incremental confidence.
-
-### Phase 0 Validation ✅ COMPLETE
-```bash
-pnpm build  # Must pass with 0 errors
-```
-- ✅ TypeScript compiles successfully
-- ✅ Supabase tables exist (verified via MCP)
-- ✅ RLS policies enabled on all tables
-- ✅ Realtime enabled on rooms, prizes, participants
-- ✅ Indexes created on public_id, secret_id
-
-### Phase 1 Validation ✅ COMPLETE
-**Test script:** `src/scripts/test-repository.ts`
-
-**Run:** `npx tsx src/scripts/test-repository.ts`
-
-**Results:**
-- ✅ All CRUD operations work
-- ✅ Case-insensitive name uniqueness enforced
-- ✅ Realtime subscriptions fire on updates
-- ✅ Snake_case ↔ camelCase mapping correct
-- ✅ No TypeScript errors
-- ✅ 15/15 tests passing
-
-### Phase 2 Validation ⬅️ NEXT
-**Create test component:** `src/components/test/HookTest.tsx`
-
-**Add to App.tsx temporarily, run `pnpm dev`**
-
-**Checklist:**
-- ✓ Hooks load data correctly
-- ✓ Real-time updates reflect in UI (update DB via Supabase dashboard)
-- ✓ Loading states work
-- ✓ No console errors
-
-### Phase 3-4 Validation
-```bash
-pnpm dev  # Start dev server
-```
-
-**Manual browser testing:**
-1. Navigate to `/` (Landing)
-   - ✓ Room creation form visible
-   - ✓ Submit creates room
-   - ✓ Redirects to `/admin/:secretId`
-
-2. Admin Dashboard (`/admin/:secretId`)
-   - ✓ Room info displays (public link, QR code)
-   - ✓ Add prize form works
-   - ✓ Prize list updates in real-time
-   - ✓ Participant registration toggle works
-   - ✓ Participant list shows count
-
-3. Participant Room (`/room/:publicId`)
-   - ✓ Registration form appears when open
-   - ✓ Submit adds participant
-   - ✓ Name appears in list immediately
-   - ✓ Waiting screen shows when registration closed
-
-**Checklist:**
-- ✓ All components render without errors
-- ✓ Forms submit successfully
-- ✓ Navigation works
-- ✓ No TypeScript/ESLint warnings
-
-### Phase 5 Validation (CRITICAL)
-**Multi-device testing:**
-
-1. Open 2 browser windows:
-   - Window A: `/admin/:secretId` (organizer)
-   - Window B: `/room/:publicId` (participant)
-
-2. Execute full lottery flow:
-   - ✓ Admin adds 3 prizes
-   - ✓ Participant joins (sees name in list)
-   - ✓ Admin closes registration
-   - ✓ Participant sees "waiting" screen
-   - ✓ Admin clicks "Start Drawing"
-   - ✓ **Both windows** show drawing animation
-   - ✓ Winner revealed simultaneously on both screens
-   - ✓ Process repeats for all 3 prizes
-   - ✓ Room status changes to "finished"
-   - ✓ Results screen shows all winners
-
-**Checklist:**
-- ✓ Drawing logic executes sequentially
-- ✓ Animations sync across devices
-- ✓ Winner selection uses classicGame plugin
-- ✓ Database updates correctly (hasWon, prizeId, winnerId)
-- ✓ No participant wins twice
-- ✓ No race conditions
-
-### Phase 6 Validation
-**Visual QA:**
-```bash
-pnpm dev
-# Open DevTools → Toggle device toolbar → iPhone 12 Pro (390x844)
-```
-
-**Mobile testing checklist:**
-- ✓ All pages work at 375px width
-- ✓ QR code displays and scales correctly
-- ✓ Buttons are touch-friendly (min 44x44px)
-- ✓ Forms usable on mobile keyboard
-- ✓ New Year theme applied (snowflakes, gold accents)
-- ✓ Animations perform smoothly
-
-**Error handling:**
-- ✓ Skeleton loaders show while data loading
-- ✓ Error messages display in Russian (i18n)
-- ✓ Network errors handled gracefully
-
-### Phase 7 Validation
-**Automated tests:**
-```bash
-pnpm test  # Run full test suite
-```
-
-**E2E scenarios:**
-1. ✓ Happy path (create → add → join → draw → results)
-2. ✓ Duplicate name rejection
-3. ✓ Registration closed prevents join
-4. ✓ Insufficient participants/prizes prevents start
-
-**Production deployment:**
-```bash
-# Supabase production project
-# - Tables created via migrations
-# - Realtime enabled
-# - RLS policies active
-
-# Vercel deployment
-# - Environment variables set
-# - Build succeeds
-# - Deployed URL accessible
-```
-
-**Smoke test on production:**
-- ✓ Create room works
-- ✓ Add prize works
-- ✓ Participant can join
-- ✓ Drawing completes
-- ✓ HTTPS certificate valid
-- ✓ Mobile browsers work (iOS Safari, Android Chrome)
-
----
-
-## Critical Files
-
-1. `src/repositories/supabase.lottery.repository.ts` - Core data layer (COMPLETE)
-2. `src/hooks/useRoom.ts` - Primary room state management (TODO)
-3. `src/pages/AdminDashboard.tsx` - Organizer interface (TODO)
-4. `src/pages/ParticipantRoom.tsx` - Participant interface (TODO)
-5. `src/hooks/useDrawing.ts` - Drawing orchestration (TODO)
+- Connect GitHub repo to Vercel
+- Set environment variables:
+  - `VITE_SUPABASE_URL`
+  - `VITE_SUPABASE_ANON_KEY`
+- Deploy and test production build
+- Verify HTTPS works
+- Test on mobile devices
+- Share with real users for feedback
 
 ---
 
@@ -712,7 +611,10 @@ pnpm test  # Run full test suite
 
 - ✅ TypeScript builds without errors
 - ✅ All repository methods implemented
-- ⬜ Real-time updates work across devices
+- ✅ React hooks implemented
+- ✅ UI components implemented
+- ✅ Pages implemented and routing works
+- ✅ Real-time updates work across devices
 - ⬜ Complete lottery flow works end-to-end
 - ⬜ Drawing syncs with animation
 - ⬜ New Year theme applied
@@ -723,16 +625,16 @@ pnpm test  # Run full test suite
 
 ## Execution Order
 
-1. ✅ Phase 0 (CRITICAL BLOCKER) - COMPLETE
+1. ✅ Phase 0 (Database) - COMPLETE
 2. ✅ Phase 1 (Repository) - COMPLETE
-3. ⬅️ **Phase 2 (React Hooks)** - START HERE
-4. Phase 3 (UI Components - can parallelize shadcn install)
-5. Phase 4 (Pages - needs Phase 2 + 3)
-6. Phase 5 (Drawing Logic - needs Phase 4)
-7. Phase 6 (Theme & Polish - can parallelize theme work)
-8. Phase 7 (Testing & Deployment - final)
+3. ✅ Phase 2 (React Hooks) - COMPLETE
+4. ✅ Phase 3 (UI Components) - COMPLETE
+5. ✅ Phase 4 (Pages) - COMPLETE
+6. ⬅️ **Phase 5 (Drawing Logic)** - START HERE
+7. Phase 6 (Theme & Polish)
+8. Phase 7 (Testing & Deployment)
 
-**Estimated remaining:** 3-4 days focused work
+**Estimated remaining:** 1-2 days focused work
 
 ---
 
@@ -743,13 +645,55 @@ pnpm test  # Run full test suite
 pnpm build              # Should pass with 0 errors
 npx tsx src/scripts/test-repository.ts  # Should show 15/15 tests passing
 
-# 2. Start Phase 2
-mkdir -p src/hooks
-# Create hooks following patterns in handoff
-
-# 3. Test hooks
+# 2. Test current state
 pnpm dev
-# Create test component, verify real-time updates work
+# Navigate to http://localhost:5173
+# Create room → add prizes → join as participant → verify UI works
+
+# 3. Start Phase 5
+# a. Update i18n (make text generic)
+# b. Create useDrawing.ts hook
+# c. Register classic game plugin
+# d. Wire hook to AdminDashboard
+# e. Test multi-window drawing
+
+# 4. Validation
+# Open 2 windows, test full drawing flow
 ```
 
-**Next immediate task:** Create `src/hooks/useRoom.ts` following the pattern above.
+**Next immediate task:** Update `src/i18n/ru.ts` to use generic "room" text instead of "lottery".
+
+---
+
+## Important Notes
+
+**Agent Usage:**
+- Use `component-creator` agent for any new components
+- Consult `react-components` skill for patterns
+- Use `theme-designer` for New Year theme work
+- Use `test-writer` for test creation
+
+**Multi-Game Architecture:**
+- ✅ System architecturally supports multiple game types
+- ✅ Plugin registry ready for new games
+- ✅ Data model supports gameType field
+- ❌ UI only shows single game type (by design for v0.1)
+- 📋 To add new game: create plugin, register, update UI selector (v0.2+)
+
+**Testing Strategy:**
+- Phase 5: Critical multi-device testing for drawing sync
+- Real users testing recommended before Phase 7
+- Test on real mobile devices (QR code scanning)
+
+**Common Issues:**
+- If hooks don't update: verify Realtime is enabled in Supabase
+- If build fails: check all imports use `@/` path alias
+- If types error: ensure database types are current
+- If toast doesn't show: verify Toaster is in App.tsx
+- If drawing doesn't sync: check Realtime WebSocket connection
+
+**Performance Notes:**
+- Current bundle: 582 KB (warning about chunk size)
+- Consider code splitting in Phase 6 if needed
+- Supabase Realtime handles sync efficiently
+- 4-second delay per prize keeps animation smooth
