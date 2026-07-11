@@ -1,0 +1,20 @@
+# Нормализация окончаний строк: в репозитории всегда LF, независимо от ОС
+* text=auto eol=lf
+
+# Скрипты, которым LF критичен на Unix/Mac (иначе ломается shebang и исполнение)
+*.sh text eol=lf
+
+# Windows-специфичные скрипты оставляем с CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Бинарные форматы — не трогать, не нормализовать, не diff'ить как текст
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.zip binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
