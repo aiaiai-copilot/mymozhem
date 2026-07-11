@@ -41,3 +41,11 @@ docs/
 ## Целевой стек (ADR-006)
 
 NestJS (Fastify-адаптер) · Prisma (PostgreSQL, multiSchema) · zod-контракт в SDK-пакете как единственный источник истины · Socket.io за контрактом ядра · pnpm workspaces + turbo (или nx — развилка фазы 0).
+
+## Координаты репозитория
+
+- **Repository:** https://github.com/aiaiai-copilot/mymozhem
+- **Default branch:** `main`
+- **npm-scope пакетов монорепо:** `@mymozhem/*` — например `@mymozhem/core`, `@mymozhem/sdk`, `@mymozhem/app-quiz`, `@mymozhem/app-lottery`. Имя scope совпадает с именем продукта; закреплено вместе с выбором имени репозитория.
+
+Имя `mymozhem` — латинская транслитерация «мы можем», выбрана осознанно: русскоязычный рынок в традициях международной разработки. Возможный будущий кириллический бренд «Мы можем!» — продуктовый слой, не затрагивает имя репозитория и scope. Перенос в GitHub-организацию `mymozhem` (при переходе к этапу платформы) выполняется через Transfer с сохранением редиректов; в этом README и в `package.json` меняется один URL.
