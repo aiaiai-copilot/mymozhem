@@ -446,6 +446,13 @@ module.exports = {
       from: {},
       to: { circular: true },
     },
+    {
+      name: 'not-to-unresolvable',
+      comment: 'Импорт несуществующего модуля — ошибка (ловит опечатки; делает gate-probe независимым от порядка задач).',
+      severity: 'error',
+      from: {},
+      to: { couldNotResolve: true },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },
@@ -454,6 +461,8 @@ module.exports = {
   },
 };
 ```
+
+Note on the `not-to-unresolvable` rule: it makes the gate-checks-the-gate boundary probe fire regardless of task order — before `packages/core` exists the probe import is unresolvable (fires here), and once it exists the import resolves under `^packages/core/` and fires on `sdk-is-leaf`. Either way `depcruise` exits non-zero, which is what the script asserts.
 
 - [ ] **Step 2: Create `eslint.config.js` (flat config, bans module-level mutable state)**
 
