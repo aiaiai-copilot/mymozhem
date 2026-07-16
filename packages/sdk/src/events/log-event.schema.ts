@@ -1,12 +1,10 @@
 import { z } from 'zod';
-
-// Visibility levels of room state, log events and appSettings (REQ-CORE-005).
-export const VISIBILITY_LEVELS = ['public', 'organizer', 'module-private'] as const;
-export const visibilitySchema = z.enum(VISIBILITY_LEVELS);
-export type Visibility = z.infer<typeof visibilitySchema>;
+import { visibilitySchema } from '../visibility/visibility';
 
 // Append-only log event envelope (form of REQ-RT-001). seq is server-assigned;
 // actorId is null only for system/lifecycle events.
+// Internal to the core↔module contract: it carries seq and MUST NOT be sent to a
+// client — the outward form is projectedEventSchema (design §4.3, REQ-RT-011a).
 export const logEventSchema = z.object({
   roomId: z.uuid(),
   seq: z.number().int().nonnegative(),
