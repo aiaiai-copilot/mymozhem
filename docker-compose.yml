@@ -5,8 +5,9 @@ services:
       POSTGRES_USER: mymozhem
       POSTGRES_PASSWORD: mymozhem
       POSTGRES_DB: mymozhem
-    ports:
-      - "5432:5432"
+    # No host port mapping by design: the server reaches postgres over the internal
+    # compose network, so publishing 5432 on the host is unnecessary and would collide
+    # with any local Postgres. Add a mapping ad-hoc if you need an external DB client.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mymozhem"]
       interval: 2s
