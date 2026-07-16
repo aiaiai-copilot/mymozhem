@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { visibilitySchema } from '../visibility/visibility';
+import { eventTypeSchema } from './event-type';
 
 // Append-only log event envelope (form of REQ-RT-001). seq is server-assigned;
 // actorId is null only for system/lifecycle events.
@@ -8,7 +9,7 @@ import { visibilitySchema } from '../visibility/visibility';
 export const logEventSchema = z.object({
   roomId: z.uuid(),
   seq: z.number().int().nonnegative(),
-  type: z.string().min(1),
+  type: eventTypeSchema,
   payload: z.record(z.string(), z.unknown()),
   actorId: z.uuid().nullable(),
   visibility: visibilitySchema,

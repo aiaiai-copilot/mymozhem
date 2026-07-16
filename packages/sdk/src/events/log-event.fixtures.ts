@@ -4,8 +4,8 @@ export const validLogEvents: LogEvent[] = [
   {
     roomId: '11111111-1111-4111-8111-111111111111',
     seq: 0,
-    type: 'room.created',
-    payload: { policy: 'guests' },
+    type: 'core.room.activated',
+    payload: { appId: 'quiz', manifestVersion: 1 },
     actorId: null,
     visibility: 'public',
     schemaVersion: 1,
@@ -41,5 +41,9 @@ export const invalidLogEventCases: { name: string; value: unknown }[] = [
   {
     name: 'non-uuid roomId',
     value: { ...validLogEvents[0], roomId: 'not-a-uuid' },
+  },
+  {
+    name: 'event type without an owning namespace',
+    value: { ...validLogEvents[0], type: 'created' },
   },
 ];
