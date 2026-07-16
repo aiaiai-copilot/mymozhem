@@ -16,6 +16,14 @@ module.exports = {
       to: { path: '^packages/core/' },
     },
     {
+      name: 'apps-only-through-core-entrypoint',
+      comment:
+        'apps/* обращаются к ядру только через пакетный entrypoint @mymozhem/core, не в его src-внутренности (ADR-002, REQ-DEV-001).',
+      severity: 'error',
+      from: { path: '^apps/' },
+      to: { path: '^packages/core/src' },
+    },
+    {
       name: 'socketio-only-in-realtime',
       comment: 'socket.io импортируется только из Realtime-модуля ядра (REQ-RT-006).',
       severity: 'error',

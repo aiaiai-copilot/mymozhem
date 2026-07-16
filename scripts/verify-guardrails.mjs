@@ -27,6 +27,14 @@ mkdirSync('scripts/__probe__', { recursive: true });
 const mutableProbe = 'scripts/__probe__/mutable.ts';
 writeFileSync(mutableProbe, 'export let leaked = 1;\nleaked = 2;\n');
 
+// 3) Apps-boundary probe: a file in apps/server deep-importing core's src
+// internals instead of the package entrypoint (forbidden: apps-only-through-core-entrypoint).
+const appsProbe = 'apps/server/src/__guardrail_probe__.ts';
+writeFileSync(
+  appsProbe,
+  "import '../../../packages/core/src/health/health.module';\nexport const probe = 1;\n",
+);
+
 try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
@@ -36,9 +44,14 @@ try {
     'module-level mutable export (eslint)',
     `pnpm exec eslint ${mutableProbe} --no-ignore`,
   );
+  expectFailure(
+    'apps → core src-internals import (dependency-cruiser)',
+    `pnpm exec depcruise ${appsProbe} --config .dependency-cruiser.cjs`,
+  );
 } finally {
   rmSync(boundaryProbe, { force: true });
   rmSync('scripts/__probe__', { recursive: true, force: true });
+  rmSync(appsProbe, { force: true });
 }
 
 if (process.exitCode) {
