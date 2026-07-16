@@ -30,6 +30,7 @@ export const invalidLogEventCases: { name: string; value: unknown }[] = [
     name: 'missing seq',
     value: (() => {
       const { seq, ...rest } = validLogEvents[0];
+      void seq;
       return rest;
     })(),
   },
