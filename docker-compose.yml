@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: mymozhem
+      POSTGRES_PASSWORD: mymozhem
+      POSTGRES_DB: mymozhem
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mymozhem"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://mymozhem:mymozhem@postgres:5432/mymozhem?schema=public
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
