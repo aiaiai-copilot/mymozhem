@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { validRange } from 'semver';
 import { visibilitySchema } from '../visibility/visibility';
 import { appIdSchema, shortEventNameSchema } from '../events/event-type';
+import { admitsUnboundedContractMajor } from '../contract-version';
 
 // A serialized JSON Schema as carried inside the manifest. ADR-006: the settings and
 // event-type schemas of a given app "переносятся как сериализуемая JSON Schema
@@ -17,7 +18,13 @@ export type JsonSchemaObject = z.infer<typeof jsonSchemaObjectSchema>;
 // is never converted — there is nothing to lose. Do not "fix" this.
 export const contractRangeSchema = z
   .string()
-  .refine((range) => validRange(range) !== null, { message: 'not a valid semver range' });
+  .refine((range) => validRange(range) !== null, { message: 'not a valid semver range' })
+  // REQ-CTR-004: the declared range must be bounded above — an unbounded range claims
+  // compatibility with a contract major that does not exist yet (see
+  // admitsUnboundedContractMajor). This is the single home of that invariant.
+  .refine((range) => !admitsUnboundedContractMajor(range), {
+    message: 'contract range must be bounded above (it must not admit a contract major that does not exist yet)',
+  });
 
 // Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2).
 export const manifestEventSchema = z.strictObject({

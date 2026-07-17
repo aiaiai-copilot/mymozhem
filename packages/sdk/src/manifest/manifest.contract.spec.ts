@@ -16,9 +16,23 @@ describe('app manifest contract', () => {
     },
   );
 
-  it('accepts any well-formed semver range and refuses nonsense', () => {
+  it('accepts a bounded-above semver range', () => {
     expect(contractRangeSchema.safeParse('^1.0.0').success).toBe(true);
+    expect(contractRangeSchema.safeParse('~1.0.0').success).toBe(true);
     expect(contractRangeSchema.safeParse('>=1.0.0 <2.0.0').success).toBe(true);
+  });
+
+  // REQ-CTR-004: a range with no upper bound is not a compatibility declaration —
+  // it claims a contract major that does not exist yet (owner decision 2026-07-18).
+  // '>=0.0.0-0' is the sharp case: it constrains almost nothing yet does not
+  // normalize to '*', so a '*'-only check would miss it.
+  it('rejects a well-formed range that is not bounded above', () => {
+    expect(contractRangeSchema.safeParse('>=1.0.0').success).toBe(false);
+    expect(contractRangeSchema.safeParse('>=0.0.0-0').success).toBe(false);
+    expect(contractRangeSchema.safeParse('*').success).toBe(false);
+  });
+
+  it('refuses a malformed range', () => {
     expect(contractRangeSchema.safeParse('garbage!!').success).toBe(false);
   });
 });

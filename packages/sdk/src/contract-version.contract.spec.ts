@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { valid } from 'semver';
 import {
   CONTRACT_VERSION,
+  admitsUnboundedContractMajor,
   assertContractRangeSatisfied,
   isContractRangeSatisfied,
 } from './contract-version';
@@ -36,6 +37,29 @@ describe('contract version', () => {
       expect(isContractRangeSatisfied(range)).toBe(false);
     },
   );
+
+  // REQ-CTR-004: a manifest declares a *compatible* range. A range with no upper
+  // bound claims compatibility with a contract major that does not exist yet — the
+  // version gate would silently stop gating at the exact moment a breaking major
+  // ships. The manifest schema refuses such ranges (owner decision 2026-07-18); this
+  // is the predicate it delegates to.
+  it.each(['^1.0.0', '~1.0.0', '1.x', '>=1.0.0 <2.0.0', '1.0.0 - 2.0.0'])(
+    'a range bounded above admits no unbounded contract major: %s',
+    (range) => {
+      expect(admitsUnboundedContractMajor(range)).toBe(false);
+    },
+  );
+
+  it.each(['>=1.0.0', '>=0.0.0-0', '*', '>=2.0.0', '>=1.0.0 <2.0.0 || >=3'])(
+    'a range open above admits an unbounded contract major: %s',
+    (range) => {
+      expect(admitsUnboundedContractMajor(range)).toBe(true);
+    },
+  );
+
+  it('treats a malformed range as admitting no major (validity is a separate check)', () => {
+    expect(admitsUnboundedContractMajor('garbage!!')).toBe(false);
+  });
 
   it('asserts with a typed error the core can return outward', () => {
     expect(() => assertContractRangeSatisfied('^1.0.0')).not.toThrow();

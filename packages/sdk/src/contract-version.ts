@@ -21,6 +21,31 @@ export const isContractRangeSatisfied = (range: string): boolean => {
   return satisfies(CONTRACT_VERSION, range);
 };
 
+// REQ-CTR-004 requires a manifest to declare a *compatible* range. A range with no
+// upper bound (`>=1.0.0`, `*`, `>=0.0.0-0`) declares compatibility with a contract
+// major that does not exist yet: the day core ships a breaking 2.0.0, such a range
+// still admits it, and the version gate silently stops gating exactly when a breaking
+// change makes it matter most. So a legitimate range must be bounded above (owner
+// decision 2026-07-18; reading recorded in the SDK contract design §5). The manifest
+// schema (`contractRangeSchema`) delegates to this predicate to make an unbounded
+// range unrepresentable at authoring — that is the single home of the invariant, so
+// `isContractRangeSatisfied` below is left unchanged.
+//
+// "Bounded above" is judged by probing an unreachable major rather than parsing the
+// range's comparators: contract majors advance deliberately and slowly (ADR-002) and
+// will never approach this sentinel, so any range that still admits it has, in
+// practice, no ceiling. Using semver's own engine (as `isContractRangeSatisfied`
+// does) handles carets, tildes, x-ranges, hyphen and OR ranges uniformly, without an
+// incomplete enumeration of spellings.
+const UNREACHABLE_CONTRACT_MAJOR = '999999.0.0';
+
+export const admitsUnboundedContractMajor = (range: string): boolean => {
+  // A malformed range admits no version at all — validity is a separate check
+  // (`contractRangeSchema` refuses it with its own message). Not "unbounded".
+  if (validRange(range) === null) return false;
+  return satisfies(UNREACHABLE_CONTRACT_MAJOR, range);
+};
+
 // Exported so the registration service in the later core plan cannot express this
 // check any other way than with the typed error the norm requires.
 export const assertContractRangeSatisfied = (range: string): void => {

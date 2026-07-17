@@ -51,6 +51,14 @@ export const invalidManifestCases: { name: string; value: unknown }[] = [
     value: { ...validManifests[0], contractRange: 'whatever' },
   },
   {
+    name: 'contractRange is not bounded above (>=1.0.0 admits a future breaking major)',
+    value: { ...validManifests[0], contractRange: '>=1.0.0' },
+  },
+  {
+    name: 'contractRange constrains almost nothing yet is not literally * (>=0.0.0-0)',
+    value: { ...validManifests[0], contractRange: '>=0.0.0-0' },
+  },
+  {
     name: 'event short name would forge a namespace',
     value: {
       ...validManifests[0],
