@@ -35,9 +35,19 @@ type CheckInternals = { _zod?: { def?: { check?: string } } };
 // output, same silent-loss defect as a refinement. A denylist of the kinds known
 // today would miss the next one zod adds; an allowlist is fail-closed by
 // construction, so an unrecognised kind is refused rather than let through.
+//
+// This list is DERIVED, not enumerated by hand: for each zod check kind, convert a
+// base schema with the check applied and the same base without it, and compare the
+// two z.toJSONSchema outputs. A check that leaves a trace (the outputs differ) is
+// representable and belongs on the list; a check that leaves no trace (the outputs
+// are identical, e.g. 'custom' from .refine()/.superRefine(), 'overwrite' from
+// .trim()/.toLowerCase()) is a silent loss and must stay refused. Re-run that trace
+// test against the installed zod version before adding or removing a kind — this
+// comment records the method, not a substitute for running it.
 const REPRESENTABLE_CHECK_KINDS = new Set([
   'min_length',
   'max_length',
+  'length_equals',
   'string_format',
   'number_format',
   'greater_than',
@@ -45,10 +55,18 @@ const REPRESENTABLE_CHECK_KINDS = new Set([
   'multiple_of',
 ]);
 
-const hasUnrepresentableCheck = (schema: unknown): boolean =>
-  ((schema as ZodInternals)?._zod?.def?.checks ?? []).some(
-    (check) => !REPRESENTABLE_CHECK_KINDS.has((check as CheckInternals)?._zod?.def?.check ?? ''),
-  );
+// Returns the offending check kind (so the refusal message can name it) or
+// `undefined` if every check on this schema is on the allowlist.
+const findUnrepresentableCheckKind = (schema: unknown): string | undefined => {
+  const checks = (schema as ZodInternals)?._zod?.def?.checks ?? [];
+  for (const check of checks) {
+    const kind = (check as CheckInternals)?._zod?.def?.check;
+    if (!REPRESENTABLE_CHECK_KINDS.has(kind ?? '')) {
+      return kind ?? '(unknown check kind)';
+    }
+  }
+  return undefined;
+};
 
 // The conversion guard (design §6).
 //
@@ -67,10 +85,11 @@ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
     // nested refinements and refinements inside arrays included.
     const json = z.toJSONSchema(schema, {
       override: (ctx) => {
-        if (hasUnrepresentableCheck(ctx.zodSchema)) {
+        const unrepresentableKind = findUnrepresentableCheckKind(ctx.zodSchema);
+        if (unrepresentableKind !== undefined) {
           throw new ContractError(
             'SCHEMA_NOT_REPRESENTABLE',
-            'check cannot be represented in JSON Schema and would be dropped silently (e.g. .refine/.superRefine, or an overwrite check such as .trim()/.toLowerCase())',
+            `check kind '${unrepresentableKind}' cannot be represented in JSON Schema and would be dropped silently (not in the allowlist of check kinds known to convert intact, e.g. .refine/.superRefine ('custom'), or an overwrite check such as .trim()/.toLowerCase() ('overwrite'))`,
           );
         }
       },

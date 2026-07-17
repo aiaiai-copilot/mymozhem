@@ -7,6 +7,8 @@ export const representableSchemas: { name: string; schema: z.ZodType }[] = [
   { name: 'enum and optional', schema: z.object({ kind: z.enum(['a', 'b']), note: z.string().optional() }) },
   { name: 'nested object and array', schema: z.object({ rounds: z.array(z.object({ id: z.string() })) }) },
   { name: 'visibility annotation', schema: z.object({ title: z.string().meta({ 'x-visibility': 'public' }) }) },
+  { name: 'string .length() (fixed-length code, e.g. a room code)', schema: z.object({ code: z.string().length(6) }) },
+  { name: 'array .length() (fixed-size answer array)', schema: z.object({ answers: z.array(z.string()).length(3) }) },
 ];
 
 // Schemas that must be refused: each would either vanish silently or fail to convert.

@@ -37,6 +37,7 @@ describe('conversion guard', () => {
   it.each(unrepresentableSchemas.map((c) => [c.name, c.schema] as const))(
     'refuses a schema that would not survive conversion: %s',
     (_name, schema) => {
+      expect(() => toRegisteredSchema(schema)).toThrow(ContractError);
       expect(() => toRegisteredSchema(schema)).toThrow(
         expect.objectContaining({ code: 'SCHEMA_NOT_REPRESENTABLE' }),
       );
