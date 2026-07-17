@@ -8,3 +8,5 @@ export * from './events/log-event.schema';
 export * from './events/log-event.fixtures';
 export * from './events/projected-event.schema';
 export * from './events/projected-event.fixtures';
+export * from './manifest/manifest.schema';
+export * from './manifest/manifest.fixtures';
