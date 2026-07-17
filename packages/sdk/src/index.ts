@@ -11,3 +11,5 @@ export * from './events/projected-event.fixtures';
 export * from './manifest/manifest.schema';
 export * from './manifest/manifest.fixtures';
 export * from './manifest/app-settings-visibility';
+export * from './manifest/define-app';
+export * from './manifest/define-app.fixtures';
