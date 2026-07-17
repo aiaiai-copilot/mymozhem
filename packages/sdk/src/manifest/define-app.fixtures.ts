@@ -18,4 +18,6 @@ export const unrepresentableSchemas: { name: string; schema: z.ZodType }[] = [
   { name: 'z.date()', schema: z.object({ at: z.date() }) },
   { name: 'z.bigint()', schema: z.object({ n: z.bigint() }) },
   { name: '.transform()', schema: z.object({ s: z.string().transform((s) => s.length) }) },
+  { name: 'string .trim() (overwrite check, dropped silently)', schema: z.object({ s: z.string().trim().min(1) }) },
+  { name: 'string .toLowerCase() (overwrite check, dropped silently)', schema: z.object({ s: z.string().toLowerCase() }) },
 ];

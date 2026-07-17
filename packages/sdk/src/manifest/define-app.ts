@@ -27,20 +27,36 @@ export type AppDefinition = {
 type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
 type CheckInternals = { _zod?: { def?: { check?: string } } };
 
-// A custom refinement reports check === 'custom'; ordinary checks report their own
-// kind ('min_length', 'greater_than', …) and convert fine. Testing for a non-empty
-// checks array would reject legal schemas.
-const hasCustomCheck = (schema: unknown): boolean =>
+// The allowlist of check kinds known to survive z.toJSONSchema intact. Ordinary
+// bounds ('min_length', 'greater_than', …) convert fine — testing for a non-empty
+// checks array would reject legal schemas like .min(1). Everything NOT on this list
+// is refused, not just 'custom' (.refine()/.superRefine()): zod also has 'overwrite'
+// checks (.trim(), .toLowerCase(), …) that convert with NO trace in the JSON Schema
+// output, same silent-loss defect as a refinement. A denylist of the kinds known
+// today would miss the next one zod adds; an allowlist is fail-closed by
+// construction, so an unrecognised kind is refused rather than let through.
+const REPRESENTABLE_CHECK_KINDS = new Set([
+  'min_length',
+  'max_length',
+  'string_format',
+  'number_format',
+  'greater_than',
+  'less_than',
+  'multiple_of',
+]);
+
+const hasUnrepresentableCheck = (schema: unknown): boolean =>
   ((schema as ZodInternals)?._zod?.def?.checks ?? []).some(
-    (check) => (check as CheckInternals)?._zod?.def?.check === 'custom',
+    (check) => !REPRESENTABLE_CHECK_KINDS.has((check as CheckInternals)?._zod?.def?.check ?? ''),
   );
 
 // The conversion guard (design §6).
 //
-// z.toJSONSchema drops .refine()/.superRefine() SILENTLY while throwing on
-// date/bigint/transform. Silent loss is the defect class ADR-008 exists to prevent:
-// the app is convinced the core enforces its rule, and the core never received it.
-// So a manifest carrying one is refused outright.
+// z.toJSONSchema drops .refine()/.superRefine() and 'overwrite' checks (.trim(),
+// .toLowerCase(), …) SILENTLY while throwing on date/bigint/transform. Silent loss
+// is the defect class ADR-008 exists to prevent: the app is convinced the core
+// enforces its rule, and the core never received it. So a manifest carrying one is
+// refused outright.
 //
 // This reads a zod internal (_zod.def.checks) on purpose. The cure is the project's
 // own principle: the guard is covered by a fixture, so a zod upgrade that breaks
@@ -51,15 +67,15 @@ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
     // nested refinements and refinements inside arrays included.
     const json = z.toJSONSchema(schema, {
       override: (ctx) => {
-        if (hasCustomCheck(ctx.zodSchema)) {
+        if (hasUnrepresentableCheck(ctx.zodSchema)) {
           throw new ContractError(
             'SCHEMA_NOT_REPRESENTABLE',
-            'custom refinement (.refine/.superRefine) cannot be represented in JSON Schema and would be dropped silently',
+            'check cannot be represented in JSON Schema and would be dropped silently (e.g. .refine/.superRefine, or an overwrite check such as .trim()/.toLowerCase())',
           );
         }
       },
     });
-    return { ...json } as JsonSchemaObject;
+    return json as JsonSchemaObject;
   } catch (err) {
     if (err instanceof ContractError) {
       throw err;

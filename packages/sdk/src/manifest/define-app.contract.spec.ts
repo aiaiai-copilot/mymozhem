@@ -37,23 +37,26 @@ describe('conversion guard', () => {
   it.each(unrepresentableSchemas.map((c) => [c.name, c.schema] as const))(
     'refuses a schema that would not survive conversion: %s',
     (_name, schema) => {
-      expect(() => toRegisteredSchema(schema)).toThrow(ContractError);
-      try {
-        toRegisteredSchema(schema);
-      } catch (err) {
-        expect((err as ContractError).code).toBe('SCHEMA_NOT_REPRESENTABLE');
-      }
+      expect(() => toRegisteredSchema(schema)).toThrow(
+        expect.objectContaining({ code: 'SCHEMA_NOT_REPRESENTABLE' }),
+      );
     },
   );
 
   // This is the fixture that guards the guard (design §6). It rests on a zod
   // internal (_zod.def.checks); a zod upgrade that breaks detection must fail CI
   // loudly rather than quietly open the gate. Do not silence it — fix the detector.
+  //
+  // The premise check is that zod's own output for the refined schema is IDENTICAL
+  // to its output for the same schema with the refinement stripped — i.e. the
+  // refinement leaves no trace at all, under whatever keyword a future zod might
+  // use for it. Asserting the literal string 'refine' is absent would pass even if
+  // zod started representing refinements under a different keyword.
   it('still detects that zod drops .refine() silently', () => {
-    const refined = z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b);
-    const converted = JSON.stringify(z.toJSONSchema(refined));
+    const bare = z.object({ a: z.number(), b: z.number() });
+    const refined = bare.refine((v) => v.a < v.b);
 
-    expect(converted).not.toContain('refine');
+    expect(JSON.stringify(z.toJSONSchema(refined))).toBe(JSON.stringify(z.toJSONSchema(bare)));
     expect(() => toRegisteredSchema(refined)).toThrow(ContractError);
   });
 
