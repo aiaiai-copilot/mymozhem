@@ -2,6 +2,7 @@ export * from './errors/error-codes';
 export * from './visibility/visibility';
 export * from './visibility/visibility.fixtures';
 export * from './events/event-type';
+export * from './events/core-events';
 export * from './events/log-event.schema';
 export * from './events/log-event.fixtures';
 export * from './events/projected-event.schema';
