@@ -10,3 +10,4 @@ export * from './events/projected-event.schema';
 export * from './events/projected-event.fixtures';
 export * from './manifest/manifest.schema';
 export * from './manifest/manifest.fixtures';
+export * from './manifest/app-settings-visibility';
