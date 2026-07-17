@@ -1,3 +1,4 @@
+export * from './contract-version';
 export * from './errors/error-codes';
 export * from './visibility/visibility';
 export * from './visibility/visibility.fixtures';
