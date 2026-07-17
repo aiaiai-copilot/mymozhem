@@ -4,3 +4,5 @@ export * from './visibility/visibility.fixtures';
 export * from './events/event-type';
 export * from './events/log-event.schema';
 export * from './events/log-event.fixtures';
+export * from './events/projected-event.schema';
+export * from './events/projected-event.fixtures';
