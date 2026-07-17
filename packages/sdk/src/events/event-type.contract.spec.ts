@@ -59,4 +59,27 @@ describe('event type ownership', () => {
     expect(appIdSchema.safeParse(CORE_NAMESPACE).success).toBe(false);
     expect(appIdSchema.safeParse('quiz').success).toBe(true);
   });
+
+  // The regexes for appIdSchema, shortEventNameSchema and eventTypeSchema are built from
+  // shared segments (event-type.ts) precisely so this holds by construction, not by three
+  // regexes coincidentally agreeing. This test exercises the composition itself, not fixed
+  // example strings, so a future edit to one character class that breaks the other two
+  // would fail here even if it happened to still pass every fixed-string assertion above.
+  describe('composition invariant: an accepted appId + an accepted short name always compose into an accepted, round-trippable event type', () => {
+    const appIds = ['quiz', 'app-2', 'a'];
+    const shortNames = ['answer_scored', 'answer.submitted', 'started'];
+
+    const cases = appIds.flatMap((appId) =>
+      shortNames.map((shortName) => [appId, shortName] as const),
+    );
+
+    it.each(cases)('appId=%s, shortName=%s', (appId, shortName) => {
+      expect(appIdSchema.safeParse(appId).success).toBe(true);
+      expect(shortEventNameSchema.safeParse(shortName).success).toBe(true);
+
+      const type = composeEventType(appId, shortName);
+      expect(eventTypeSchema.safeParse(type).success).toBe(true);
+      expect(resolveTypeOwner(type)).toEqual({ kind: 'app', appId, shortName });
+    });
+  });
 });
