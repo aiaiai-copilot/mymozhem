@@ -1,17 +1,20 @@
 import { RoomTransitionError } from './room.errors';
 
-// Domain status type. Prisma's generated `RoomStatus` enum (Task 2) mirrors these
-// exact string members; the two are structurally interchangeable. This module stays
-// Prisma-free so it is a pure, dependency-light leaf (unit-testable without a DB).
+// Domain status type. The `RoomStatus` enum in the Prisma `room` schema mirrors these
+// exact string members, so a row's status is assignable here by a cast at the service
+// boundary. This module stays Prisma-free so it is a pure, dependency-light leaf
+// (unit-testable without a DB).
 export type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
 
-// Allow-list (REQ-RT-005). COMPLETED and CANCELLED are terminal — no outgoing edges.
-const ROOM_TRANSITIONS: ReadonlyArray<readonly [RoomStatus, RoomStatus]> = [
-  ['DRAFT', 'ACTIVE'],
-  ['DRAFT', 'CANCELLED'],
-  ['ACTIVE', 'COMPLETED'],
-  ['ACTIVE', 'CANCELLED'],
-];
+// Allow-list (REQ-RT-005), keyed by source status: adding a member to RoomStatus is a
+// compile error here until its outgoing edges are declared. COMPLETED and CANCELLED are
+// terminal — stated as empty sets in the data, not only in prose.
+const ROOM_TRANSITIONS: Readonly<Record<RoomStatus, ReadonlySet<RoomStatus>>> = {
+  DRAFT: new Set<RoomStatus>(['ACTIVE', 'CANCELLED']),
+  ACTIVE: new Set<RoomStatus>(['COMPLETED', 'CANCELLED']),
+  COMPLETED: new Set<RoomStatus>(),
+  CANCELLED: new Set<RoomStatus>(),
+};
 
 // Soft-delete allowed in DRAFT/COMPLETED/CANCELLED, forbidden in ACTIVE (REQ-RT-005).
 const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
@@ -21,7 +24,7 @@ const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
 ]);
 
 export function canTransition(from: RoomStatus, to: RoomStatus): boolean {
-  return ROOM_TRANSITIONS.some(([f, t]) => f === from && t === to);
+  return ROOM_TRANSITIONS[from].has(to);
 }
 
 export function assertTransition(from: RoomStatus, to: RoomStatus): void {
