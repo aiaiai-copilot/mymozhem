@@ -8,6 +8,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:int": "turbo run test:int",
     "boundary-check": "depcruise apps packages --config .dependency-cruiser.cjs",
     "guardrails": "node scripts/verify-guardrails.mjs"
   },

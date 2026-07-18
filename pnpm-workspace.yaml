@@ -1,6 +1,13 @@
 packages:
   - 'packages/*'
   - 'apps/*'
+# Build scripts are opt-in. The three testcontainers transitives below stay unbuilt:
+# ssh2 (and its optional cpu-features native accelerator) is only needed for the
+# remote-Docker/SSH port-forward path, which this repo does not use, and protobufjs's
+# postinstall only bootstraps its own CLI. All have working pure-JS fallbacks.
 allowBuilds:
   '@prisma/engines': false
+  cpu-features: false
   prisma: false
+  protobufjs: false
+  ssh2: false
