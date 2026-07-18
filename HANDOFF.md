@@ -1,7 +1,7 @@
 # HANDOFF
 
 **Date:** 2026-07-18
-**Branch:** `main` (чистая; фаза-1-ветки `phase-1-sdk-contract-core` и `phase-1-app-registry-registration` слиты fast-forward и удалены. `main` впереди `origin/main` на 48 коммитов, push по-прежнему отложен — решение владельца) — последний коммит `192d38b` feat(core): wire AppRegistryModule with empty phase-2 manifest seam (REQ-CORE-004, ADR-002)
+**Branch:** `main` (чистая; фаза-1-ветки `phase-1-sdk-contract-core` и `phase-1-app-registry-registration` слиты fast-forward и удалены. **Накопленный backlog запушен на `origin/main` 2026-07-18 по явному решению владельца — `main` синхронизирован с remote** (чистый fast-forward, было 49 коммитов); стоявшее с фазы 0 «push отложен» — снято) — последний содержательный коммит `192d38b` feat(core): wire AppRegistryModule with empty phase-2 manifest seam (REQ-CORE-004, ADR-002)
 
 **SDK contract core И сервис регистрации манифеста — ЗАВЕРШЕНЫ И СЛИТЫ в `main`.** SDK contract core исполнен (9/9). Затем **app-registry registration** (точка принуждения #1 из дизайна SDK §7) исполнен (2/2), финальное ревью всей ветки чистое (opus, 0 Critical / 0 Important, «Ready to merge: Yes»), 6/6 гейтов зелёные на слитом `main`. Первый настоящий core-side потребитель SDK-контракта: `registerManifest` (валидация манифеста + `assertContractRangeSatisfied`, REQ-CTR-004) и `buildAppRegistry` — boot-time immutable реестр (REQ-CORE-004, без Prisma), обёрнутый в `AppRegistryModule` с пустым DI-швом `APP_MANIFESTS=[]` для приложений фазы 2. Этап продукта — MVP. Метод — AI-Driven / Specification-Driven, спецификация в `docs/` — источник истины.
 
@@ -33,7 +33,7 @@
 
 **Forward-обязательство** для плана event-commit/Rooms: первый потребитель, отдающий `ContractError` наружу по HTTP/Socket.io, обязан идти через `toPayload()`, не `err.message` (REQ-SEC-006).
 
-Push и гейт юриста остаются отдельными решениями/действиями вне агента.
+Push выполнен 2026-07-18 (`main` синхронизирован с `origin/main`). Вне агента остаётся гейт юриста.
 
 ## Отложенные follow-up (не гейтят; полный список в леджере, раздел FOLLOW-UPS FILED)
 
@@ -43,7 +43,7 @@ Push и гейт юриста остаются отдельными решени
 
 ## Осталось недоделанным (шире плана)
 
-- **`origin/main` отстаёт на 43 коммита**, push не сделан — решение владельца.
+- **`origin/main` синхронизирован** с `main` — backlog запушен 2026-07-18 (было 49 коммитов).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный против настоящей БД). В фазе 1 не трогался: SDK — лист, рантайма не касается.
 
@@ -53,7 +53,7 @@ Push и гейт юриста остаются отдельными решени
 - Закрыт последний накопленный вопрос владельца по SDK contract core: **верхняя граница диапазона контракта (REQ-CTR-004)**. Прочтение A (fail-closed) — диапазон обязан быть ограничен сверху. Безграничный сверху (`>=1.0.0`, `*`, `>=0.0.0-0`) объявлял совместимость с мажором контракта, которого ещё не существует; версионный гейт тихо перестал бы гейтить ровно при первом ломающем 2.0.0. `>=0.0.0-0` — острый случай: ограничивает почти ничего, но в `*` не нормализуется, так что прежняя `*`-проверка его пропускала.
 - **Реализация:** предикат `admitsUnboundedContractMajor` (сентинел-проба `satisfies('999999.0.0', range)`, движок semver единообразно ест каретки/тильды/x-ranges/дефис/OR) в `contract-version.ts`; второй `.refine()` в `contractRangeSchema`. **Единственный дом инварианта — схема** (Вариант 1); `isContractRangeSatisfied` намеренно НЕ тронут — владелец отклонил defense-in-depth, корректный пайплайн валидирует манифест схемой до регистрации. Дизайн §5 амендирован.
 - TDD (RED→GREEN, тесты первыми — REQ-CTR-005), двухстадийное ревью двумя параллельными агентами (Standards 0 hard / Spec 0 находок). Все гейты зелёные: 142 теста SDK, весь монорепо (5/5 turbo — core, server e2e, sdk), typecheck, lint, boundary-check (123 модуля, 0 нарушений), guardrails.
-- Ветка `phase-1-sdk-contract-core` слита в `main` fast-forward и удалена (навык finishing-a-development-branch, Вариант 1: merge локально). Тесты на слитом `main` зелёные. Push отложен (стоящее с фазы 0 решение владельца).
+- Ветка `phase-1-sdk-contract-core` слита в `main` fast-forward и удалена (навык finishing-a-development-branch, Вариант 1: merge локально). Тесты на слитом `main` зелёные. (Push этого и всего накопленного выполнен позже в тот же день, 2026-07-18.)
 
 ### Коммиты этой сессии
 - `c4c586d` fix(sdk): contract range must be bounded above (REQ-CTR-004, owner decision 2026-07-18)
@@ -65,6 +65,6 @@ Push и гейт юриста остаются отдельными решени
 - Отчёты ревью-агентов эфемерны (фоновые агенты, в файлы проекта не сохранялись); их выводы — в разделе «Что сделано». Таблица «представимых видов проверок zod» из прошлого батча — в леджере.
 
 ### Осталось недоделанным
-- Push `origin/main` (43 коммита) — отложен, решение владельца.
+- Push `origin/main` — выполнен 2026-07-18 (охватил и эти коммиты, и app-registry).
 - Гейт юриста — вне агента.
 - Follow-up'ы (топ — рекурсивная `jsonValueSchema` для payload) — не гейтят, в леджере (раздел выше).
