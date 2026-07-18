@@ -1,6 +1,6 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { RoomService } from './room.service';
-import { RoomTransitionError, RoomConflictError } from './room.errors';
+import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -78,5 +78,51 @@ describe('RoomService lifecycle', () => {
     const room = await service.create(ORG);
     await service.softDelete(room.id);
     await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
+  });
+});
+
+describe('RoomService transition atomicity', () => {
+  let db: TestDb;
+  let service: RoomService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    service = new RoomService(db.prisma);
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
+  // serialize instead of interleave, the second one reads ACTIVE, and
+  // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
+  // fail with no defect present. That pairing is schedule-dependent and cannot
+  // prove atomicity.
+  //
+  // Racing cancel() vs cancel() on one DRAFT room has exactly one winner under
+  // every possible schedule:
+  //   - Interleaved: both read DRAFT, both pass assertTransition, both issue the
+  //     guarded UPDATE; one affects 1 row, the loser affects 0 rows -> RoomConflictError.
+  //   - Serialized: the loser reads CANCELLED, which is terminal, so
+  //     assertTransition itself throws -> RoomTransitionError.
+  // Either outcome is a legitimate proof that only one CANCELLED transition ever
+  // lands; which specific error class the loser gets depends on the (unobservable)
+  // schedule. Do not tighten the assertion below to one subclass — that would
+  // reintroduce the same flakiness this test is designed to avoid.
+  it('two competing cancels on one room: exactly one wins, the other conflicts', async () => {
+    const room = await service.create(ORG);
+
+    const results = await Promise.allSettled([service.cancel(room.id), service.cancel(room.id)]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(RoomError);
+
+    const finalStatus = (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } }))
+      .status;
+    expect(finalStatus).toBe('CANCELLED');
   });
 });
