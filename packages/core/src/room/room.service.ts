@@ -1,8 +1,24 @@
 import { Injectable } from '@nestjs/common';
-import type { Room } from '@prisma/client';
+import type { Room, $Enums } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { assertTransition, assertDeletable, type RoomStatus } from './room-state-machine';
+import {
+  assertTransition,
+  assertDeletable,
+  DELETABLE_STATUSES,
+  type RoomStatus,
+} from './room-state-machine';
 import { RoomConflictError } from './room.errors';
+
+// Compile-time parity assertion between the Prisma-generated enum and the domain union.
+// `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
+// if a member is ever added to one side and not the other, this line fails to compile
+// instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
+type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
+  ? [$Enums.RoomStatus] extends [RoomStatus]
+    ? true
+    : never
+  : never;
+void (true satisfies RoomStatusParity);
 
 @Injectable()
 export class RoomService {
@@ -50,8 +66,11 @@ export class RoomService {
       throw new RoomConflictError(`Room ${roomId} not found or already deleted`);
     }
     assertDeletable(current.status as RoomStatus);
+    // Guard derived from the single source of truth (DELETABLE_STATUSES) rather than a
+    // hardcoded `status: { not: 'ACTIVE' }`, so a future change to that set is enforced
+    // here automatically instead of silently diverging from the SQL guard.
     const res = await this.prisma.room.updateMany({
-      where: { id: roomId, deletedAt: null, status: { not: 'ACTIVE' } },
+      where: { id: roomId, deletedAt: null, status: { in: [...DELETABLE_STATUSES] } },
       data: { deletedAt: new Date() },
     });
     if (res.count === 0) {

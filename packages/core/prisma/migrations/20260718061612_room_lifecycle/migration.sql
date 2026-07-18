@@ -15,3 +15,11 @@ CREATE TABLE "room"."Room" (
 
     CONSTRAINT "Room_pkey" PRIMARY KEY ("id")
 );
+
+-- Soft-delete is orthogonal to status (REQ-RT-005): deletion is not a status, and a
+-- soft-deleted room can never be ACTIVE. Enforced as a DB invariant (REQ-RWD-010
+-- philosophy: constraint, not check-before-write) rather than only in RoomService.
+-- Holds unconditionally because every transition guard requires deletedAt IS NULL, so a
+-- soft-deleted room can never transition to ACTIVE in the first place.
+ALTER TABLE "room"."Room" ADD CONSTRAINT "Room_softdelete_not_active"
+  CHECK ("deletedAt" IS NULL OR "status" <> 'ACTIVE');

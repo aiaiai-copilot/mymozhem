@@ -50,6 +50,16 @@ describe('room-state-machine transitions', () => {
       expect.objectContaining({ code: 'ROOM_TRANSITION_INVALID' }),
     );
   });
+
+  it('degrades to false/typed-error instead of throwing for an out-of-domain status', () => {
+    // Simulates a Prisma enum value that has drifted out of sync with RoomStatus at
+    // runtime — the scenario room.service.ts's compile-time parity assertion guards
+    // against. Without a total lookup, ROOM_TRANSITIONS[from] would be undefined and
+    // `.has(to)` would throw an untyped TypeError instead of a typed domain error.
+    const drifted = 'ARCHIVED' as unknown as RoomStatus;
+    expect(canTransition(drifted, 'DRAFT')).toBe(false);
+    expect(() => assertTransition(drifted, 'DRAFT')).toThrow(RoomTransitionError);
+  });
 });
 
 describe('room-state-machine deletability', () => {

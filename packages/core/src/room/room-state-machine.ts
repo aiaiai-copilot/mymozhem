@@ -17,14 +17,21 @@ const ROOM_TRANSITIONS: Readonly<Record<RoomStatus, ReadonlySet<RoomStatus>>> = 
 };
 
 // Soft-delete allowed in DRAFT/COMPLETED/CANCELLED, forbidden in ACTIVE (REQ-RT-005).
-const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
+// Exported so room.service.ts derives its DB-level guard from this one set instead of
+// duplicating the rule in a hardcoded `status: { not: 'ACTIVE' }` clause.
+export const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
   'DRAFT',
   'COMPLETED',
   'CANCELLED',
 ]);
 
+const EMPTY_TRANSITIONS: ReadonlySet<RoomStatus> = new Set();
+
 export function canTransition(from: RoomStatus, to: RoomStatus): boolean {
-  return ROOM_TRANSITIONS[from].has(to);
+  // Total lookup: an out-of-band `from` (e.g. a Prisma enum value that has drifted from
+  // this domain union) falls back to the empty set instead of throwing TypeError, so the
+  // caller gets a typed ROOM_TRANSITION_INVALID via assertTransition rather than a crash.
+  return (ROOM_TRANSITIONS[from] ?? EMPTY_TRANSITIONS).has(to);
 }
 
 export function assertTransition(from: RoomStatus, to: RoomStatus): void {
