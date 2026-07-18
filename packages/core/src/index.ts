@@ -7,3 +7,7 @@ export * from './app-registry/app-registry';
 export * from './app-registry/app-registry.tokens';
 export * from './app-registry/app-registry.service';
 export * from './app-registry/app-registry.module';
+export * from './room/room.errors';
+export * from './room/room-state-machine';
+export * from './room/room.service';
+export * from './room/room.module';
