@@ -4,4 +4,29 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["room"]
+}
+
+enum RoomStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@schema("room")
+}
+
+// Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
+// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
+// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
+// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
+model Room {
+  id          String     @id @default(uuid()) @db.Uuid
+  organizerId String     @db.Uuid
+  status      RoomStatus @default(DRAFT)
+  deletedAt   DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@schema("room")
 }
