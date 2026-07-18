@@ -26,6 +26,13 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run lint
       - run: pnpm run test
+      - run: pnpm run test:int
+        env:
+          # Testcontainers spins up its own ephemeral Postgres via Docker; this is a
+          # placeholder so prisma.config.ts's env('DATABASE_URL') resolves during CLI
+          # config loading. The harness overrides DATABASE_URL with the live container
+          # URL before `migrate deploy` (see postgres.testcontainer.ts).
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
       - run: pnpm run build
       - run: pnpm run boundary-check
       - run: pnpm run guardrails
