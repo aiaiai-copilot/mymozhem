@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
-import { HealthModule, PrismaModule } from '@mymozhem/core';
+import { AppRegistryModule, HealthModule, PrismaModule } from '@mymozhem/core';
 
 @Module({
-  imports: [PrismaModule, HealthModule],
+  imports: [PrismaModule, HealthModule, AppRegistryModule],
 })
 export class AppModule {}

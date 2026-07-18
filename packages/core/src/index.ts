@@ -3,3 +3,7 @@ export * from './prisma/prisma.service';
 export * from './prisma/prisma.module';
 export * from './health/health.controller';
 export * from './health/health.module';
+export * from './app-registry/app-registry';
+export * from './app-registry/app-registry.tokens';
+export * from './app-registry/app-registry.service';
+export * from './app-registry/app-registry.module';
