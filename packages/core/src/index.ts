@@ -11,3 +11,5 @@ export * from './room/room.errors';
 export * from './room/room-state-machine';
 export * from './room/room.service';
 export * from './room/room.module';
+export * from './realtime/event-log.service';
+export * from './realtime/realtime.module';
