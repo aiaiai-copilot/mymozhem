@@ -1,9 +1,9 @@
 # HANDOFF
 
 **Date:** 2026-07-22
-**Branch:** `main` (рабочее дерево чистое; **2 коммита впереди `origin/main`, не запушено** — дизайн и план identity-среза) — последний коммит `48ce558` docs(plan): identity minimal seam implementation plan (2026-07-22).
+**Branch:** `main` (рабочее дерево чистое; **9 коммитов впереди `origin/main`, не запушено** — дизайн/план identity-среза + сам срез + merge) — последний коммит `75b97b7` Merge branch 'phase-1-identity-seam' (2026-07-22).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста и **Room lifecycle** — завершены и слиты в `main` (опубликовано на origin 2026-07-22). Следующий срез — **Identity minimal seam** (REQ-ID-005 + REQ-ID-001): brainstorm → design → plan пройдены и одобрены владельцем, **исполнение не начиналось**. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle и **Identity minimal seam** (REQ-ID-001 + REQ-ID-005) — завершены и слиты в `main`. Identity-срез исполнен 2026-07-22 через subagent-driven-development: 4 задачи, все ревью чистые, финальное whole-branch ревью — ready to merge. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -11,11 +11,10 @@
 2. **`.superpowers/sdd/progress.md` — леджер исполнения планов** (SDK + app-registry + Room lifecycle). Читать после CLAUDE.md. Задачи COMPLETE — сделаны, не пере-диспатчить. Леджера нет в git (`.superpowers/` игнорируется) — он существует только на этой машине.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `docs/sessions/2026-07-22-identity-minimal-seam-design.md` — **одобренный дизайн текущего среза**; §6 — список сознательно НЕ построенных швов (нельзя молча начать строить).
-6. `docs/sessions/2026-07-22-identity-minimal-seam-implementation-plan.md` — **план к исполнению** (4 задачи, TDD, self-review пройден).
-7. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
+5. `docs/sessions/2026-07-22-identity-minimal-seam-design.md` — дизайн исполненного identity-среза; §6 — список сознательно НЕ построенных швов (нельзя молча начать строить). Актуально и после среза: швы остаются непостроенными.
+6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы (`2026-07-16-sdk-contract-core`, `2026-07-18-app-registry-registration`, `2026-07-18-room-lifecycle`, их дизайн-доки) читать только при разборе истории — их работа в коммитах.
+Исполненные планы (`2026-07-16-sdk-contract-core`, `2026-07-18-app-registry-registration`, `2026-07-18-room-lifecycle`, `2026-07-22-identity-minimal-seam`, их дизайн-доки) читать только при разборе истории — их работа в коммитах.
 
 ## Два гейта над фазами
 
@@ -24,15 +23,22 @@
 
 ## Следующее действие
 
-**Исполнить `docs/sessions/2026-07-22-identity-minimal-seam-implementation-plan.md` через `superpowers:subagent-driven-development`** (решение владельца 2026-07-22: subagent-driven, в новой сессии). Свежий субагент на задачу, двухстадийное ревью между задачами — как на Room lifecycle. 4 задачи: SDK-словарь (kind/role) → Identity-модель + частичный индекс → FK + починка room-тестов → guarded INSERT.
+**Выбор владельца из оставшихся продолжений фазы 1: appSettings write path (REQ-RT-004) или lifecycle-эмит в лог (REQ-RT-010).** Identity-срез закрыт; оба кандидата разблокированы. Выбранный срез идёт полным циклом CLAUDE.md + superpowers: brainstorm → design → plan → subagent-driven-development.
 
-После identity-среза — выбор владельца из оставшихся продолжений: **appSettings write path** (REQ-RT-004) или **lifecycle-эмит в лог** (REQ-RT-010).
+Со среза identity есть пакет follow-up для **первого реального identity-пишущего потока** (guest-join / OAuth), подобрать его планом явно:
+- presence-тест индекса: ассертить `UNIQUE` и колонку в indexdef (сейчас ловят только поведенческие тесты);
+- кросс-kind кейс индекса: GUEST с email живого REGISTERED — разрешён;
+- malformed non-UUID `organizerId` → сейчас сырой Postgres uuid-syntax error; маппинг в типизированную ошибку — на boundary-слое первого транспорта (REQ-SEC-006);
+- косметика: `harness.int-spec.ts` сидит identity без email; устаревший комментарий в `jest.integration.config.js` («per file» → «per describe»).
 
-**Forward-обязательство** (не забыть при первом же выходе наружу): первый потребитель, отдающий `ContractError`/доменную ошибку по HTTP/Socket.io, обязан идти через типизированный код без стектрейса, не `err.message` (REQ-SEC-006). Room-ошибки (`ROOM_TRANSITION_INVALID`, `ROOM_CONFLICT`) и готовящийся `ROOM_ORGANIZER_NOT_REGISTERED` сейчас core-внутренние и границу не пересекают.
+**Forward-обязательство** (не забыть при первом же выходе наружу): первый потребитель, отдающий `ContractError`/доменную ошибку по HTTP/Socket.io, обязан идти через типизированный код без стектрейса, не `err.message` (REQ-SEC-006). Room-ошибки (`ROOM_TRANSITION_INVALID`, `ROOM_CONFLICT`, `ROOM_ORGANIZER_NOT_REGISTERED`) сейчас core-внутренние и границу не пересекают.
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Миграция `packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql` заморожена.** Любое изменение — только новой миграцией. То же правило для миграций identity-среза после их слияния.
+- **Миграция `packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql` заморожена.** Любое изменение — только новой миграцией. То же для миграций identity-среза после слияния: `20260722151900_identity_seam` и `20260722153952_room_organizer_fk` — **заморожены с 2026-07-22**.
+- **Инвариант «change both or neither»:** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в двух местах — частичный индекс `"Identity_registered_email_key"` (миграция identity_seam) и guarded INSERT в `RoomService.create`. Менять только вместе (design §7).
+- **Хост-порт 5432 занят чужим контейнером `lt-pg`** (не проектным, не трогать). Authoring-контейнер миграций (`mm-migrate`, эфемерный) публиковать на свободный порт (в срезе identity использовались 55432/55433) и подставлять его в `DATABASE_URL`.
+- **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория (обнаружение `prisma.config.ts`).
 - **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Все будущие DB-тесты пойдут через него, поэтому его острые углы наследуются: он мутирует глобальный `process.env.DATABASE_URL` и не восстанавливает его (безопасно только при `maxWorkers: 1`), и требует cwd = корень репозитория для обнаружения `prisma.config.ts`.
 - **Прогон интеграционной ланы поднимает контейнеры Postgres** (по одному на describe с `startTestDb`; ~8 с локально на файл, дольше на холодном CI-раннере). Docker Desktop должен быть запущен.
 
@@ -47,7 +53,7 @@
 
 ## Осталось недоделанным
 
-- **2 коммита (дизайн + план identity-среза) не запушены.** Публикация — решение владельца. Предыдущие 15 коммитов запушены 2026-07-22; CI-лана интеграционных тестов **проверена в CI** — первый прогон на `ubuntu-latest` зелёный целиком (все 13 шагов, включая `test:int` с Testcontainers). Больше не «непроверено в CI».
+- **9 коммитов не запушены** (3 docs + 5 среза + merge). Публикация — решение владельца. CI-лана интеграционных тестов проверена в CI (первый прогон зелёный), но новые коммиты identity-среза CI ещё не видел.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный). В фазе 1 не трогался.
 
@@ -55,26 +61,22 @@
 
 ### Что сделано
 
-- Запушено 15 коммитов на `origin/main` (`4dea9cf..a06028a`) — работа фазы 1 опубликована. Первый реальный CI-прогон интеграционной ланы на GitHub-раннере: **зелёный** (run 29926892739, все шаги включая `pnpm run test:int`; образ postgres:17 и Ryuk на `ubuntu-latest` работают).
-- Исправлено внутреннее противоречие дизайн-дока Rooms: §4 шаг 3 предписывал хардкод `status <> 'ACTIVE'` против §3 «таблица — единственный источник истины». Документ приведён к §3 (код уже следовал ему). Коммит `a06028a`.
-- Пройден полный цикл brainstorm → design → plan среза **Identity minimal seam** по процессу CLAUDE.md + superpowers: дизайн одобрен владельцем по секциям, план написан с self-review. Коммиты `fdb1447` (дизайн), `48ce558` (план).
+- Исполнен план **Identity minimal seam** (`docs/sessions/2026-07-22-identity-minimal-seam-implementation-plan.md`) через `superpowers:subagent-driven-development`, решение владельца от прошлой сессии. 4 задачи, свежий субагент на задачу, task-ревью после каждой — все чистые с первого прохода; финальное whole-branch ревью (fable) — **ready to merge** с одним fix-before-merge (опечатка в комментарии фикстуры, исправлена `c79c242`).
+- Слито в `main` `--no-ff` (`75b97b7`), все гейты перепроверены на слитом результате: boundary-check 0/170, guardrails живы, SDK 162/162, core typecheck + unit 55/55 + lint + int 21/21. Ветка `phase-1-identity-seam` удалена.
+- Что построено: SDK-словарь `identityKindSchema`/`memberRoleSchema` (без потребителей, по дизайну); схема БД `identity` + модель `Identity` + рукописный частичный уникальный индекс `Identity_registered_email_key` (REQ-DEV-006); декларативный FK `Room_organizerId_fkey` (Restrict) + `seedIdentity`; атомарный guarded INSERT в `RoomService.create` с коллапсированной ошибкой `ROOM_ORGANIZER_NOT_REGISTERED` (REQ-ID-005).
+- Единственное отклонение от плана: Task 3 задел `packages/core/src/testing/harness.int-spec.ts` вне списка файлов брифа — вынужденно (смоук-тест создавал комнату с голым UUID, FK его сломал), минимально и в паттерне; ревьюер подтвердил по дифу.
 
 ### Коммиты этой сессии
 
-- `a06028a` docs(design): align Rooms §4 with §3 — soft-delete guard derives from DELETABLE_STATUSES
-- `fdb1447` docs(design): identity minimal seam — REQ-ID-005 guarded INSERT + REQ-ID-001 schema
-- `48ce558` docs(plan): identity minimal seam implementation plan (REQ-ID-005, REQ-ID-001, phase 1)
-
-### Решения владельца этой сессии (rationale — чтобы не переоткрывать)
-
-- **Следующий срез — Identity + Membership, а не appSettings или lifecycle-эмит.** Rationale: снимает заглушку `organizerId`, фундамент для остальных срезов.
-- **Скоуп — минимальный шов.** Без membership-таблицы, токенов, OAuth, гостевого входа — им неоткуда писаться до потоков входа. Швы зафиксированы в §6 дизайн-дока.
-- **Принуждение REQ-ID-005 — guarded INSERT (подход A), не триггер БД.** TOCTOU невозможен структурно: в ф.1 kind иммутабелен (амендмент v1.3), позже флип только GUEST→REGISTERED. Триггер — задел по фильтру амендмента (актора «писатель мимо сервиса» на этапе нет), добавляется аддитивной миграцией.
-- **Запушить накопленное немедленно** — снял многонедельный push-deferred окончательно; CI-лана подтверждена.
-- **Исполнение плана — subagent-driven, в новой сессии** (не в этой).
+- `508e958` feat(sdk): identityKind + memberRole contract vocabulary (REQ-ID-001, REQ-ID-011)
+- `a74f057` feat(core): Identity model + partial unique index migration (REQ-ID-001, REQ-DEV-006)
+- `3595d54` feat(core): FK room.organizerId to identity.id + test seeding (REQ-ID-005)
+- `8086a54` feat(core): enforce REGISTERED organizer via atomic guarded INSERT (REQ-ID-005)
+- `c79c242` fix(sdk): correct fixture comment typo (REQ-ID-001)
+- `75b97b7` Merge branch 'phase-1-identity-seam' — Identity minimal seam slice (REQ-ID-001, REQ-ID-005)
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен — нужен для интеграционной ланы и для authoring-контейнера миграций (`mm-migrate`, эфемерный; после сессии не остался).
-- `.superpowers/sdd/` — леджер, брифы и отчёты субагентов. Не отслеживается git; `git clean -fdx` уничтожит.
-- Внешние системы: единственный side-effect — пуш на `origin/main` (санкционирован владельцем). Тесты били только по одноразовым контейнерам.
+- Docker Desktop запущен. Хост-порт 5432 занят чужим контейнером `lt-pg` — не трогать; authoring-контейнеры `mm-migrate` сессии остановлены/удалены.
+- `.superpowers/sdd/` — леджер (`progress.md`), брифы/отчёты среза в `identity/`, диф-пакеты ревью. Не отслеживается git; `git clean -fdx` уничтожит.
+- Внешние системы: side-effects нет — пуш не выполнялся, тесты били только по одноразовым контейнерам.
