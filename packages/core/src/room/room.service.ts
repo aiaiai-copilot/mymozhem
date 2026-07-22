@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import type { Room, $Enums } from '@prisma/client';
+import type { CoreEventName } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { EventLogService } from '../realtime/event-log.service';
 import {
   assertTransition,
   assertDeletable,
@@ -20,9 +22,20 @@ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
   : never;
 void (true satisfies RoomStatusParity);
 
+// Частичная таблица по дизайну (§4): 'room.activated' здесь НЕ эмитится — его payload
+// это пин (appId, manifestVersion) REQ-RT-004, который появится только в срезе
+// appSettings write path; эмит активации встаёт сюда вместе с ним (design §0 п.1, §10).
+const LIFECYCLE_EVENTS: Partial<Record<RoomStatus, CoreEventName>> = {
+  COMPLETED: 'room.completed',
+  CANCELLED: 'room.cancelled',
+};
+
 @Injectable()
 export class RoomService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly eventLog: EventLogService,
+  ) {}
 
   async create(organizerId: string): Promise<Room> {
     // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
@@ -53,22 +66,29 @@ export class RoomService {
   }
 
   async transition(roomId: string, to: RoomStatus): Promise<Room> {
-    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
-    if (!current || current.deletedAt !== null) {
-      throw new RoomConflictError(`Room ${roomId} not found or deleted`);
-    }
-    // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
-    assertTransition(current.status as RoomStatus, to);
-    // Atomic guarded update: correctness of the race rests on this WHERE, not on the
-    // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
-    const res = await this.prisma.room.updateMany({
-      where: { id: roomId, status: current.status, deletedAt: null },
-      data: { status: to },
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.room.findUnique({ where: { id: roomId } });
+      if (!current || current.deletedAt !== null) {
+        throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+      }
+      // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+      assertTransition(current.status as RoomStatus, to);
+      // Atomic guarded update: correctness of the race rests on this WHERE, not on the
+      // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
+      const res = await tx.room.updateMany({
+        where: { id: roomId, status: current.status, deletedAt: null },
+        data: { status: to },
+      });
+      if (res.count === 0) {
+        // → rollback: ни перехода, ни события у проигравшего (REQ-DEV-008).
+        throw new RoomConflictError(`Room ${roomId} changed concurrently`);
+      }
+      const eventName = LIFECYCLE_EVENTS[to];
+      if (eventName) {
+        await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
+      }
+      return tx.room.findUniqueOrThrow({ where: { id: roomId } });
     });
-    if (res.count === 0) {
-      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
-    }
-    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
   }
 
   activate(roomId: string): Promise<Room> {

@@ -15,7 +15,7 @@ describe('EventLogService.commitCoreEvent', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    rooms = new RoomService(db.prisma);
+    rooms = new RoomService(db.prisma, new EventLogService());
     eventLog = new EventLogService();
   }, 120000);
 
