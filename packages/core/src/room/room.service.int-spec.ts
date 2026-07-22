@@ -1,7 +1,7 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { RoomService } from './room.service';
-import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
+import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -28,6 +28,24 @@ describe('RoomService lifecycle', () => {
     expect(room.status).toBe('DRAFT');
     expect(room.deletedAt).toBeNull();
     expect(room.organizerId).toBe(ORG);
+  });
+
+  it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
+    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    const err = await service.create(guest.id).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomOrganizerNotRegisteredError);
+    expect((err as RoomOrganizerNotRegisteredError).code).toBe('ROOM_ORGANIZER_NOT_REGISTERED');
+  });
+
+  it('rejects a nonexistent organizer with the same collapsed code', async () => {
+    await expect(
+      service.create('00000000-0000-0000-0000-0000000000aa'),
+    ).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
+  });
+
+  it('rejects an anonymized (deletedAt) REGISTERED organizer', async () => {
+    const ghost = await seedIdentity(db.prisma, { kind: 'REGISTERED', deletedAt: new Date() });
+    await expect(service.create(ghost.id)).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
   });
 
   it('persists each legal transition', async () => {

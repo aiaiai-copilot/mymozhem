@@ -7,7 +7,7 @@ import {
   DELETABLE_STATUSES,
   type RoomStatus,
 } from './room-state-machine';
-import { RoomConflictError } from './room.errors';
+import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
 
 // Compile-time parity assertion between the Prisma-generated enum and the domain union.
 // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
@@ -24,9 +24,32 @@ void (true satisfies RoomStatusParity);
 export class RoomService {
   constructor(private readonly prisma: PrismaService) {}
 
-  create(organizerId: string): Promise<Room> {
-    // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
-    return this.prisma.room.create({ data: { organizerId } });
+  async create(organizerId: string): Promise<Room> {
+    // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
+    // INSERT — the WHERE EXISTS predicate is the single source of truth, no
+    // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
+    // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
+    // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
+    // The same predicate lives in the "Identity_registered_email_key" index
+    // condition (design §7) — change both or neither.
+    // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
+    const rows = await this.prisma.$queryRaw<Room[]>`
+      INSERT INTO room."Room" ("id", "organizerId", "status", "createdAt", "updatedAt")
+      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', now(), now()
+      WHERE EXISTS (
+        SELECT 1 FROM identity."Identity"
+        WHERE "id" = ${organizerId}::uuid
+          AND "kind" = 'REGISTERED'
+          AND "deletedAt" IS NULL
+      )
+      RETURNING *
+    `;
+    if (rows.length === 0) {
+      throw new RoomOrganizerNotRegisteredError(
+        `Organizer ${organizerId} is not a live REGISTERED identity`,
+      );
+    }
+    return rows[0];
   }
 
   async transition(roomId: string, to: RoomStatus): Promise<Room> {
