@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["room"]
+  schemas  = ["identity", "room"]
 }
 
 enum RoomStatus {
@@ -29,4 +29,27 @@ model Room {
   updatedAt   DateTime   @updatedAt
 
   @@schema("room")
+}
+
+enum IdentityKind {
+  REGISTERED
+  GUEST
+
+  @@schema("identity")
+}
+
+// Identity — core CRUD entity (ADR-004: single table, kind REGISTERED | GUEST).
+// deletedAt marks anonymization (REQ-ID-014: PII zeroed, id kept — never physical
+// delete while FKs reference it). email is nullable; uniqueness among live
+// REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+// NOT a Prisma preview feature.
+model Identity {
+  id        String       @id @default(uuid()) @db.Uuid
+  kind      IdentityKind
+  email     String?
+  deletedAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@schema("identity")
 }
