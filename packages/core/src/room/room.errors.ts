@@ -5,6 +5,7 @@
 export const ROOM_ERROR_CODES = {
   ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
   ROOM_CONFLICT: 'ROOM_CONFLICT',
+  ROOM_ORGANIZER_NOT_REGISTERED: 'ROOM_ORGANIZER_NOT_REGISTERED',
 } as const;
 
 export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
@@ -31,5 +32,14 @@ export class RoomTransitionError extends RoomError {
 export class RoomConflictError extends RoomError {
   constructor(message: string) {
     super(ROOM_ERROR_CODES.ROOM_CONFLICT, message);
+  }
+}
+
+// Organizer identity missing, GUEST, or anonymized — collapsed into one code on
+// purpose (design §3): to the caller it is a single refusal, and the predicate is
+// identity's invariant, not a place for reconnaissance.
+export class RoomOrganizerNotRegisteredError extends RoomError {
+  constructor(message: string) {
+    super(ROOM_ERROR_CODES.ROOM_ORGANIZER_NOT_REGISTERED, message);
   }
 }

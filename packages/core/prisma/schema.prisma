@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["room"]
+  schemas  = ["identity", "room"]
 }
 
 enum RoomStatus {
@@ -17,11 +17,13 @@ enum RoomStatus {
 }
 
 // Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
-// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
-// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
-// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
+// in room-state-machine.ts (REQ-RT-005). organizerId is a declarative FK to
+// identity.id; the REGISTERED invariant (REQ-ID-005) is enforced by the guarded
+// INSERT in RoomService.create, not by the FK itself.
+// appSettings/pin/freeze (REQ-RT-004) deferred to a later plan.
 model Room {
   id          String     @id @default(uuid()) @db.Uuid
+  organizer   Identity   @relation(fields: [organizerId], references: [id])
   organizerId String     @db.Uuid
   status      RoomStatus @default(DRAFT)
   deletedAt   DateTime?
@@ -29,4 +31,28 @@ model Room {
   updatedAt   DateTime   @updatedAt
 
   @@schema("room")
+}
+
+enum IdentityKind {
+  REGISTERED
+  GUEST
+
+  @@schema("identity")
+}
+
+// Identity — core CRUD entity (ADR-004: single table, kind REGISTERED | GUEST).
+// deletedAt marks anonymization (REQ-ID-014: PII zeroed, id kept — never physical
+// delete while FKs reference it). email is nullable; uniqueness among live
+// REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+// NOT a Prisma preview feature.
+model Identity {
+  id        String       @id @default(uuid()) @db.Uuid
+  kind      IdentityKind
+  email     String?
+  deletedAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  rooms     Room[]
+
+  @@schema("identity")
 }

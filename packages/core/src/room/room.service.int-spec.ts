@@ -1,6 +1,7 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+import { seedIdentity } from '../testing/seed-identity';
 import { RoomService } from './room.service';
-import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
+import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -10,6 +11,7 @@ describe('RoomService lifecycle', () => {
 
   beforeAll(async () => {
     db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     service = new RoomService(db.prisma);
   }, 120000);
 
@@ -26,6 +28,24 @@ describe('RoomService lifecycle', () => {
     expect(room.status).toBe('DRAFT');
     expect(room.deletedAt).toBeNull();
     expect(room.organizerId).toBe(ORG);
+  });
+
+  it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
+    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    const err = await service.create(guest.id).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomOrganizerNotRegisteredError);
+    expect((err as RoomOrganizerNotRegisteredError).code).toBe('ROOM_ORGANIZER_NOT_REGISTERED');
+  });
+
+  it('rejects a nonexistent organizer with the same collapsed code', async () => {
+    await expect(
+      service.create('00000000-0000-0000-0000-0000000000aa'),
+    ).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
+  });
+
+  it('rejects an anonymized (deletedAt) REGISTERED organizer', async () => {
+    const ghost = await seedIdentity(db.prisma, { kind: 'REGISTERED', deletedAt: new Date() });
+    await expect(service.create(ghost.id)).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
   });
 
   it('persists each legal transition', async () => {
@@ -91,6 +111,7 @@ describe('RoomService transition atomicity', () => {
 
   beforeAll(async () => {
     db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     service = new RoomService(db.prisma);
   }, 120000);
 
@@ -137,6 +158,7 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
 
   beforeAll(async () => {
     db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     service = new RoomService(db.prisma);
   }, 120000);
 
@@ -175,5 +197,29 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
         ORG,
       ),
     ).rejects.toThrow(/Room_softdelete_not_active/);
+  });
+});
+
+describe('Room organizerId FK', () => {
+  let db: TestDb;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  // Raw SQL around the service: the database itself must refuse an organizer that
+  // does not exist in identity."Identity" (declarative FK, REQ-ID-005).
+  it('rejects a room whose organizerId is not an identity, at the database level', async () => {
+    await expect(
+      db.prisma.$executeRawUnsafe(
+        `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
+         VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
+        '00000000-0000-0000-0000-0000000000ee',
+      ),
+    ).rejects.toThrow(/Room_organizerId_fkey/);
   });
 });
