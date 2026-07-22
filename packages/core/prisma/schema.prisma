@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["identity", "room"]
+  schemas  = ["identity", "realtime", "room"]
 }
 
 enum RoomStatus {
@@ -29,6 +29,7 @@ model Room {
   deletedAt   DateTime?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
+  logEvents   LogEvent[]
 
   @@schema("room")
 }
@@ -53,6 +54,36 @@ model Identity {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
   rooms     Room[]
+  logEvents LogEvent[]
 
   @@schema("identity")
+}
+
+enum EventVisibility {
+  PUBLIC         @map("public")
+  ORGANIZER      @map("organizer")
+  MODULE_PRIVATE @map("module-private")
+
+  @@schema("realtime")
+}
+
+// Append-only лог событий комнаты (REQ-RT-001, ADR-005). Составной PK = unique(roomId, seq).
+// seq назначает сервер в критической секции (advisory lock, REQ-RT-007).
+// recordedAt — storage-only колонка (отладка/ретеншн); в контракт (logEventSchema) не
+// входит и наружу не проецируется (design §2). onDelete: Restrict у actorId указан явно:
+// дефолт Prisma для optional-релейшна — SetNull, а норма — Restrict (REQ-CORE-003).
+model LogEvent {
+  roomId        String          @db.Uuid
+  seq           Int
+  type          String
+  payload       Json
+  actorId       String?         @db.Uuid
+  visibility    EventVisibility
+  schemaVersion Int
+  recordedAt    DateTime        @default(now())
+  room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  actor         Identity?       @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@id([roomId, seq])
+  @@schema("realtime")
 }

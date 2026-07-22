@@ -1,5 +1,7 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
+import { readRoomLog } from '../testing/read-room-log';
+import { EventLogService } from '../realtime/event-log.service';
 import { RoomService } from './room.service';
 import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
 
@@ -12,7 +14,7 @@ describe('RoomService lifecycle', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma);
+    service = new RoomService(db.prisma, new EventLogService());
   }, 120000);
 
   afterAll(async () => {
@@ -112,7 +114,7 @@ describe('RoomService transition atomicity', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma);
+    service = new RoomService(db.prisma, new EventLogService());
   }, 120000);
 
   afterAll(async () => {
@@ -159,7 +161,7 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma);
+    service = new RoomService(db.prisma, new EventLogService());
   }, 120000);
 
   afterAll(async () => {
@@ -221,5 +223,85 @@ describe('Room organizerId FK', () => {
         '00000000-0000-0000-0000-0000000000ee',
       ),
     ).rejects.toThrow(/Room_organizerId_fkey/);
+  });
+});
+
+describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
+  let db: TestDb;
+  let service: RoomService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    service = new RoomService(db.prisma, new EventLogService());
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+  });
+
+  it('complete() emits exactly one public core.room.completed event (seq=1)', async () => {
+    const room = await service.create(ORG);
+    await service.activate(room.id);
+    await service.complete(room.id);
+
+    // Полный путь DRAFT→ACTIVE→COMPLETED: ровно ОДНА строка — activation осознанно
+    // не эмитит (шов: payload room.activated = пин REQ-RT-004, appSettings-срез).
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({
+      seq: 1,
+      type: 'core.room.completed',
+      visibility: 'public',
+      actorId: null,
+      payload: {},
+      schemaVersion: 1,
+    });
+  });
+
+  it('cancel() from DRAFT and from ACTIVE emits core.room.cancelled (seq=1 each)', async () => {
+    const a = await service.create(ORG);
+    await service.cancel(a.id);
+    const b = await service.create(ORG);
+    await service.activate(b.id);
+    await service.cancel(b.id);
+
+    expect((await readRoomLog(db.prisma, a.id)).map((e) => e.type)).toEqual(['core.room.cancelled']);
+    expect((await readRoomLog(db.prisma, b.id)).map((e) => [e.seq, e.type])).toEqual([
+      [1, 'core.room.cancelled'],
+    ]);
+  });
+
+  it('emits nothing on illegal transition, terminal transition, create or softDelete', async () => {
+    const room = await service.create(ORG);
+    await expect(service.complete(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+
+    await service.activate(room.id);
+    await service.complete(room.id);
+    await expect(service.cancel(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1); // только completed
+
+    const plain = await service.create(ORG);
+    await service.softDelete(plain.id);
+    expect(await readRoomLog(db.prisma, plain.id)).toHaveLength(0);
+  });
+
+  it('two competing cancels emit exactly one event, from the winner (atomicity)', async () => {
+    const room = await service.create(ORG);
+
+    await Promise.allSettled([service.cancel(room.id), service.cancel(room.id)]);
+
+    // Проигравший откатился целиком: ни статуса, ни события (REQ-DEV-008).
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ seq: 1, type: 'core.room.cancelled', visibility: 'public' });
+    expect(
+      (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } })).status,
+    ).toBe('CANCELLED');
   });
 });
