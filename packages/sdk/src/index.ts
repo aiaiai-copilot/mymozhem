@@ -13,3 +13,7 @@ export * from './manifest/manifest.fixtures';
 export * from './manifest/app-settings-visibility';
 export * from './manifest/define-app';
 export * from './manifest/define-app.fixtures';
+export * from './identity/identity-kind';
+export * from './identity/identity-kind.fixtures';
+export * from './membership/member-role';
+export * from './membership/member-role.fixtures';
