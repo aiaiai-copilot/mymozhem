@@ -140,8 +140,9 @@ read-then-write (CLAUDE.md §4: инвариант в БД, не проверк�
 - `softDelete(roomId)`:
   1. SELECT. `null` → `ROOM_CONFLICT`.
   2. `assertDeletable(status)` — при нарушении (ACTIVE) `ROOM_TRANSITION_INVALID`.
-  3. `UPDATE room SET deletedAt = now() WHERE id = :roomId AND deletedAt IS NULL AND status <> 'ACTIVE'`.
-     Ноль строк → `ROOM_CONFLICT`.
+  3. `UPDATE room SET deletedAt = now() WHERE id = :roomId AND deletedAt IS NULL AND status IN DELETABLE_STATUSES`.
+     Guard выводится из `DELETABLE_STATUSES` (§3 — единственный источник истины), а не
+     дублирует правило литералом `status <> 'ACTIVE'`. Ноль строк → `ROOM_CONFLICT`.
 
 SELECT существует **только** ради точного разделения «нелегальный переход существующей
 комнаты» vs «конфликт»; атомарность и корректность гонки держит `WHERE`-условие
