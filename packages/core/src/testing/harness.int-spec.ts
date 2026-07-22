@@ -1,10 +1,12 @@
 import { startTestDb, type TestDb } from './postgres.testcontainer';
+import { seedIdentity } from './seed-identity';
 
 describe('integration harness', () => {
   let db: TestDb;
 
   beforeAll(async () => {
     db = await startTestDb();
+    await seedIdentity(db.prisma, { id: '00000000-0000-0000-0000-000000000001' });
   }, 120000);
 
   afterAll(async () => {
