@@ -1,9 +1,9 @@
 # HANDOFF
 
 **Date:** 2026-07-22
-**Branch:** `main` (рабочее дерево чистое; **12 коммитов впереди `origin/main`, не запушено** — identity-срез + дизайн/план lifecycle-эмита) — последний контентный коммит `893629c` docs(plan): lifecycle log emit implementation plan (2026-07-22).
+**Branch:** `main` (рабочее дерево чистое; **14 коммитов впереди `origin/main`, не запушено** — identity-срез + lifecycle-emit срез + merge) — последний контентный коммит `b2cacb7` feat(core): export and register RealtimeModule in server (2026-07-22), merge `--no-ff` поверх него.
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle и **Identity minimal seam** (REQ-ID-001 + REQ-ID-005) — завершены и слиты в `main`. Следующий срез — **Lifecycle-эмит в лог (REQ-RT-010)**: дизайн одобрен, implementation plan написан, **исполнение НЕ начато** — решение владельца: subagent-driven-development в новой сессии. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam (REQ-ID-001 + REQ-ID-005) и **Lifecycle-эмит в лог (REQ-RT-010 2/3, REQ-RT-001, REQ-RT-007, REQ-DEV-008)** — завершены и слиты в `main`. Event Log построен с нуля: таблица `realtime."LogEvent"`, примитив `EventLogService.commitCoreEvent` (валидация payload до advisory-lock, атомарный seq), `RoomService.transition` эмитит `room.completed`/`room.cancelled` в одной транзакции с переходом. Следующий срез — **appSettings write path (REQ-RT-004)**: он же закроет эмит `room.activated` (шов, дизайн §0 п.1) и тем самым REQ-RT-010 полностью. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,9 +18,11 @@
 
 ## Следующее действие
 
-**Исполнить план `docs/sessions/2026-07-22-realtime-log-lifecycle-emit-implementation-plan.md` через `superpowers:subagent-driven-development`** (явное решение владельца 2026-07-22, как в identity-срезе). 4 задачи: (1) миграция `realtime` + presence-тест, (2) `EventLogService.commitCoreEvent` + `RealtimeModule`, (3) `RoomService.transition` в транзакцию + эмит completed/cancelled, (4) экспорты/регистрация + гейты + boot. План самодостаточен (точные файлы, код, команды, RED→GREEN); дизайн-док — для контекста ревьюеров.
+**Следующий срез фазы 1 — appSettings write path (REQ-RT-004).** Он разблокирован и является единственным оставшимся кандидатом из пары HANDOFF'а; закрывает эмит `room.activated` (payload = пин `(appId, manifestVersion)`, шов дизайна lifecycle-эмита §0 п.1, §10) и тем самым доводит REQ-RT-010 до полного закрытия. Процесс как обычно: brainstorm → дизайн (в `docs/sessions/`) → план → subagent-driven-development.
 
-После среза остаётся второй разблокированный кандидат фазы 1: **appSettings write path (REQ-RT-004)** — он же закроет эмит `room.activated` (шов, дизайн §0 п.1).
+Точки входа в новый срез (из финального ревью lifecycle-эмита):
+- эмит активации встаёт в `LIFECYCLE_EVENTS` в `RoomService.transition` (комментарий-шов уже на месте); тест DRAFT→ACTIVE→COMPLETED «ровно одна строка в логе» — регрессионный якорь, обновить на две строки с пином;
+- добавить однострочный комментарий о конвенции порядка блокировок в `event-log.service.ts` (advisory lock — всегда leaf-most; после его захвата не трогать `room."Room"` в той же транзакции) — в ближайшем срезе, который трогает этот файл, без отдельного коммита.
 
 Со среза identity есть пакет follow-up для **первого реального identity-пишущего потока** (guest-join / OAuth), подобрать его планом явно:
 - presence-тест индекса: ассертить `UNIQUE` и колонку в indexdef (сейчас ловят только поведенческие тесты);
@@ -37,7 +39,9 @@
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Миграция `packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql` заморожена.** Любое изменение — только новой миграцией. То же для миграций identity-среза после слияния: `20260722151900_identity_seam` и `20260722153952_room_organizer_fk` — **заморожены с 2026-07-22**. То же правило распространяется на миграцию `realtime_log_event` после слияния lifecycle-emit среза.
+- **Миграция `packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql` заморожена.** Любое изменение — только новой миграцией. То же для миграций identity-среза после слияния: `20260722151900_identity_seam` и `20260722153952_room_organizer_fk` — **заморожены с 2026-07-22**. То же для миграции lifecycle-emit среза: `20260722180147_realtime_log_event` — **заморожена с 2026-07-22**.
+- **Конвенция порядка блокировок (из финального ревью lifecycle-эмита):** advisory lock комнаты — всегда leaf-most; транзакция, захватившая его, не должна после этого писать в `room."Room"` (сейчас порядок везде безопасен: `transition` берёт row-lock до advisory lock, `commitCoreEvent` не трогает Room). Будущие пути эмита обязаны его сохранять.
+- **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
 - **Инвариант «change both or neither»:** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в двух местах — частичный индекс `"Identity_registered_email_key"` (миграция identity_seam) и guarded INSERT в `RoomService.create`. Менять только вместе (design §7).
 - **Хост-порт 5432 занят чужим контейнером `lt-pg`** (не проектным, не трогать). Authoring-контейнер миграций (`mm-migrate`, эфемерный) публиковать на свободный порт (в срезе identity использовались 55432/55433) и подставлять его в `DATABASE_URL`.
 - **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория (обнаружение `prisma.config.ts`).
@@ -55,9 +59,37 @@
 
 ## Осталось недоделанным
 
-- **12 коммитов не запушены** (identity-срез 6 + handoff ×2 + дизайн/план lifecycle-эмита 2 + handoff этой сессии). Публикация — решение владельца. CI-лана интеграционных тестов проверена в CI (первый прогон зелёный), но коммиты identity-среза и новее CI ещё не видел.
+- **14 коммитов не запушены** (identity-срез + дизайн/план lifecycle-эмита + lifecycle-emit срез 4 коммита + merge + handoff-обновления). Публикация — решение владельца. CI видел только фазу 0; коммиты identity-среза и новее CI ещё не видел.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
-- **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный). В фазе 1 не трогался; план lifecycle-эмита включает boot-проверку как критерий выхода (Task 4 step 6).
+- **Живой boot артефакта** прогнан на закрытии lifecycle-emit среза (`docker compose up --build` → все 4 миграции применены на свежей БД → `/health/ready` 200).
+
+## Session 2026-07-22 (ночь, исполнение lifecycle-эмита)
+
+### Что сделано
+
+- Исполнен план `2026-07-22-realtime-log-lifecycle-emit-implementation-plan.md` через subagent-driven-development: 4/4 задачи, каждая с ревью (spec + quality), финальное whole-branch ревью — **ready to merge, без Critical/Important**. Слито в `main` (--no-ff), ветка удалена, merged-дерево байт-в-байт совпало с ревьюенным HEAD.
+- Event Log построен с нуля: таблица `realtime."LogEvent"` + enum `EventVisibility` (миграция `20260722180147_realtime_log_event`, теперь заморожена), `EventLogService.commitCoreEvent` (zod-валидация до advisory-lock; `pg_advisory_xact_lock` на комнату; seq атомарно одним INSERT…SELECT), `RoomService.transition` в `prisma.$transaction` с эмитом `room.completed`/`room.cancelled` (fail-closed, REQ-DEV-008).
+- Гейты на merge-HEAD: int 33/33, unit 220/220, lint/typecheck/build, boundary-check 0, guardrails, boot с 4 миграциями — всё зелёное.
+- Два отклонения от вербатим-кода плана (оба — баги плана, подтверждены ревьюерами): PK-ассерт `toBe('PRIMARY KEY ("roomId", seq)')` (Postgres не квотит `seq`); `$executeRaw` вместо `$queryRaw` для advisory-lock (void-десериализация).
+- Минорные находки (4) триажированы финальным ревьюером как follow-up; единственная новая — недокументированная конвенция порядка блокировок (внесена выше в ограничения и в точки входа следующего среза).
+
+### Коммиты этой сессии
+
+- `b5dee43` feat(core): realtime.LogEvent table + EventVisibility enum migration (REQ-RT-001)
+- `ab20211` feat(core): EventLogService.commitCoreEvent primitive + RealtimeModule (REQ-RT-001, REQ-RT-007)
+- `bcce15a` feat(core): emit room.completed/room.cancelled to log in transition transaction (REQ-RT-010, REQ-DEV-008)
+- `b2cacb7` feat(core): export and register RealtimeModule in server (REQ-RT-010)
+- merge `--no-ff` phase-1-lifecycle-log-emit → main
+
+### Локальное состояние (не в git)
+
+- Docker Desktop запущен; `lt-pg` на 5432 нетронут; authoring/compose-контейнеры убраны (`mm-migrate` удалён, compose — `down -v`).
+- `.superpowers/sdd/` — леджер (`progress.md`) с полной историей среза, брифы/отчёты в `lifecycle-emit/`, review-пакеты в `review-*.diff`.
+
+### Осталось недоделанным
+
+- Пуш 14 коммитов — решение владельца.
+- Следующий срез: appSettings write path (REQ-RT-004) — см. «Следующее действие».
 
 ## Session 2026-07-22 (вечер, brainstorm → plan)
 
