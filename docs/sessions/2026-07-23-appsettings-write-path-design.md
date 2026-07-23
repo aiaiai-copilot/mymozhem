@@ -178,41 +178,48 @@ realtime/`EventLogService`); конфиг dependency-cruiser не меняетс
 $transaction(tx):
   current = tx.room.findUnique(roomId)                    // как сейчас
   assertTransition(DRAFT → ACTIVE)                        // как сейчас
-  if (current.appId === null) throw RoomNotConfiguredError // предусловие (решение №3)
-  appRegistry.validateSettings(current.appId, current.manifestVersion,
-                               current.appSettings)        // REQ-CORE-007: повторно
   guarded UPDATE status=ACTIVE WHERE id, status=DRAFT, deletedAt IS NULL
-                                                           // как сейчас; count=0 → ROOM_CONFLICT
+    // как сейчас; count=0 → ROOM_CONFLICT. Для активации это ещё и точка
+    // сериализации с configure: updateMany берёт row-lock — конкурентный
+    // configure либо уже закоммичен (и виден в re-read ниже), либо ждёт наш
+    // коммит и получает ROOM_SETTINGS_FROZEN.
+  updated = tx.room.findUniqueOrThrow(roomId)             // re-read ПОСЛЕ row-lock
+  if (updated.appId === null) throw RoomNotConfiguredError // предусловие (решение №3)
+  appRegistry.validateSettings(updated.appId, updated.manifestVersion,
+                               updated.appSettings)        // REQ-CORE-007: повторно
   eventLog.commitCoreEvent(tx, roomId, 'room.activated',
                            { appId, manifestVersion })     // эмит — последним
 ```
 
 Ключевые точки:
 
-- **Предусловие `appId === null` — из прочитанной строки, до guarded UPDATE.** Это не
-  check-before-write в опасном смысле: `appId` монотонен — однажды заданный, не
-  обнуляется ни одним потоком (`configure` заменяет тройку целиком и только в DRAFT);
-  гонки «прочитали null, стало не-null» для отказа не страшны, обратная гонка
-  («не-null → null») невозможна структурно.
+- **Пин и перевалидация — по снимку ПОСЛЕ row-lock, не по `current`.** Псевдокод
+  brainstorm-версии читал пин из `current` (до guarded UPDATE): конкурентный
+  `configure`, закоммитившийся между чтением и UPDATE, дал бы событию старый пин при
+  новой замороженной строке — событие ≠ состояние. Re-read после row-lock делает
+  пин в `room.activated` тождественным замороженной тройке при любом расписании.
+- **Предусловие `appId === null` — тоже post-lock, единственный авторитетный путь.**
+  Отказ откатывает транзакцию: ни перехода, ни события (REQ-DEV-008); цена — пара
+  лишних UPDATE/rollback в ошибочном случае, пренебрежимо.
 - **Перевалидация — реальный гейт, не no-op.** Реестр boot-time, а строка комнаты
   durable: редеплой мог убрать манифест или изменить схему той же версии (кривой релиз).
   `validateSettings` ловит оба случая: нет манифеста → `APP_MANIFEST_UNKNOWN`; схема
   разошлась → `APP_SETTINGS_INVALID`. При отказе транзакция откатывается — ни перехода,
   ни события (REQ-DEV-008).
 - **Эмит последним в транзакции** — конвенция порядка блокировок (advisory lock
-  leaf-most; после его захвата `room."Room"` не трогаем) сохраняется автоматически.
+  leaf-most; после его захвата `room."Room"` не трогаем) сохраняется: row-lock взят
+  guarded UPDATE до advisory lock, как и прежде.
 - **Заморозка — не отдельное действие.** Пин уже лежит в колонках со времени `configure`
   (решение №2); активация закрывает запись предикатом `status = 'DRAFT'` в guarded
   UPDATE `configure`. Заморозка принуждается структурно, а не флагом `frozen`.
-- **Payload события берётся из прочитанной строки** (`current.appId`,
-  `current.manifestVersion`) — той же, что прошла перевалидацию: событие и замороженное
-  состояние не могут разъехаться.
+- **Payload события берётся из re-read строки** (`updated.appId`,
+  `updated.manifestVersion`) — той же, что прошла перевалидацию и стала замороженной:
+  событие и состояние не могут разъехаться ни на каком расписании.
 
-**Форма таблицы событий.** `LIFECYCLE_EVENTS` в нынешнем виде (`статус → имя`, payload
-всегда `{}`) не покрывает activated (payload — пин). Два варианта: маппинг
-`статус → (room) => payload` либо activated как особая ветка с комментарием. Выбор —
-в плане по читаемости; принципиальных различий нет, инвариант один: эмит любого
-lifecycle-события — после guarded UPDATE, в той же транзакции.
+**Форма таблицы событий.** `LIFECYCLE_EVENTS` остаётся таблицей терминальных переходов
+с пустым payload (COMPLETED/CANCELLED); `room.activated` — особая ветка в `transition`,
+т.к. его payload — пин из замороженной строки (выбрано в плане по читаемости; инвариант
+один: эмит любого lifecycle-события — после guarded UPDATE, в той же транзакции).
 
 ---
 
