@@ -1,7 +1,8 @@
-import { ContractError } from '@mymozhem/sdk';
+import { ContractError, validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
+import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
 
@@ -15,7 +16,11 @@ describe('EventLogService.commitCoreEvent', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    rooms = new RoomService(db.prisma, new EventLogService());
+    rooms = new RoomService(
+      db.prisma,
+      new EventLogService(),
+      new AppRegistryService([validManifests[0]]),
+    );
     eventLog = new EventLogService();
   }, 120000);
 

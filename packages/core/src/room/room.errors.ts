@@ -6,6 +6,10 @@ export const ROOM_ERROR_CODES = {
   ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
   ROOM_CONFLICT: 'ROOM_CONFLICT',
   ROOM_ORGANIZER_NOT_REGISTERED: 'ROOM_ORGANIZER_NOT_REGISTERED',
+  ROOM_NOT_CONFIGURED: 'ROOM_NOT_CONFIGURED',
+  // Строковый паритет с зарезервированным кодом SDK-контракта (CONTRACT_ERROR_CODES,
+  // design §6): будущий транспорт отобразит code→code 1:1. SDK не меняется.
+  ROOM_SETTINGS_FROZEN: 'ROOM_SETTINGS_FROZEN',
 } as const;
 
 export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
@@ -41,5 +45,22 @@ export class RoomConflictError extends RoomError {
 export class RoomOrganizerNotRegisteredError extends RoomError {
   constructor(message: string) {
     super(ROOM_ERROR_CODES.ROOM_ORGANIZER_NOT_REGISTERED, message);
+  }
+}
+
+// Активация требует сконфигурированной комнаты (REQ-RT-004): payload room.activated —
+// пин (appId, manifestVersion), у неконфигурированной комнаты ему неоткуда взяться.
+export class RoomNotConfiguredError extends RoomError {
+  constructor(message: string) {
+    super(ROOM_ERROR_CODES.ROOM_NOT_CONFIGURED, message);
+  }
+}
+
+// Запись конфигурации закрыта: комната не DRAFT (заморозка REQ-RT-004), удалена или
+// отсутствует. Причины свёрнуты в один код намеренно (design §6) — вызывающему единый
+// отказ; точность — в server-side message.
+export class RoomSettingsFrozenError extends RoomError {
+  constructor(message: string) {
+    super(ROOM_ERROR_CODES.ROOM_SETTINGS_FROZEN, message);
   }
 }

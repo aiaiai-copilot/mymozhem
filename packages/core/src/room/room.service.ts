@@ -1,15 +1,21 @@
 import { Injectable } from '@nestjs/common';
-import type { Room, $Enums } from '@prisma/client';
+import type { Room, $Enums, Prisma } from '@prisma/client';
 import type { CoreEventName } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventLogService } from '../realtime/event-log.service';
+import { AppRegistryService } from '../app-registry/app-registry.service';
 import {
   assertTransition,
   assertDeletable,
   DELETABLE_STATUSES,
   type RoomStatus,
 } from './room-state-machine';
-import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+import {
+  RoomConflictError,
+  RoomNotConfiguredError,
+  RoomOrganizerNotRegisteredError,
+  RoomSettingsFrozenError,
+} from './room.errors';
 
 // Compile-time parity assertion between the Prisma-generated enum and the domain union.
 // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
@@ -22,9 +28,9 @@ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
   : never;
 void (true satisfies RoomStatusParity);
 
-// Частичная таблица по дизайну (§4): 'room.activated' здесь НЕ эмитится — его payload
-// это пин (appId, manifestVersion) REQ-RT-004, который появится только в срезе
-// appSettings write path; эмит активации встаёт сюда вместе с ним (design §0 п.1, §10).
+// Терминальные переходы с пустым payload (REQ-RT-010). 'room.activated' — особая
+// ветка в transition: его payload — пин (appId, manifestVersion) из замороженной
+// строки (REQ-RT-004, design §5).
 const LIFECYCLE_EVENTS: Partial<Record<RoomStatus, CoreEventName>> = {
   COMPLETED: 'room.completed',
   CANCELLED: 'room.cancelled',
@@ -35,6 +41,7 @@ export class RoomService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventLog: EventLogService,
+    private readonly appRegistry: AppRegistryService,
   ) {}
 
   async create(organizerId: string): Promise<Room> {
@@ -65,6 +72,37 @@ export class RoomService {
     return rows[0];
   }
 
+  // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,
+  // appSettings) — промежуточного состояния не существует (design §4). Валидация ДО
+  // обращения к БД (REQ-CORE-007); запись — guarded UPDATE: только DRAFT и не
+  // удалённая. Заморозка активной комнаты — этот предикат, не флаг.
+  async configure(
+    roomId: string,
+    config: { appId: string; manifestVersion: number; settings: unknown },
+  ): Promise<Room> {
+    this.appRegistry.validateSettings(config.appId, config.manifestVersion, config.settings);
+    const res = await this.prisma.room.updateMany({
+      where: { id: roomId, status: 'DRAFT', deletedAt: null },
+      data: {
+        appId: config.appId,
+        manifestVersion: config.manifestVersion,
+        // JSON Schema-валидированное значение — JSON; unknown → InputJsonValue безопасно.
+        appSettings: config.settings as Prisma.InputJsonValue,
+      },
+    });
+    if (res.count === 0) {
+      // Re-read только для точности server-side message; код один (design §6).
+      const existing = await this.prisma.room.findUnique({ where: { id: roomId } });
+      const reason = !existing
+        ? 'not found'
+        : existing.deletedAt !== null
+          ? 'deleted'
+          : `status ${existing.status}`;
+      throw new RoomSettingsFrozenError(`Room ${roomId} is not configurable: ${reason}`);
+    }
+    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
+  }
+
   async transition(roomId: string, to: RoomStatus): Promise<Room> {
     return this.prisma.$transaction(async (tx) => {
       const current = await tx.room.findUnique({ where: { id: roomId } });
@@ -75,6 +113,9 @@ export class RoomService {
       assertTransition(current.status as RoomStatus, to);
       // Atomic guarded update: correctness of the race rests on this WHERE, not on the
       // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
+      // Для активации это ещё и точка сериализации с configure: updateMany берёт
+      // row-lock — конкурентный configure либо уже закоммичен (и виден в re-read
+      // ниже), либо ждёт наш коммит и получает ROOM_SETTINGS_FROZEN (design §5).
       const res = await tx.room.updateMany({
         where: { id: roomId, status: current.status, deletedAt: null },
         data: { status: to },
@@ -83,11 +124,42 @@ export class RoomService {
         // → rollback: ни перехода, ни события у проигравшего (REQ-DEV-008).
         throw new RoomConflictError(`Room ${roomId} changed concurrently`);
       }
-      const eventName = LIFECYCLE_EVENTS[to];
-      if (eventName) {
-        await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
+      // Re-read ПОСЛЕ row-lock: снимок, который перевалидируется, пинится и эмитится.
+      // Чтение пина из `current` (до лока) могло бы отдать в room.activated пин,
+      // который конкурентный configure уже перезаписал, — событие ≠ состояние.
+      const updated = await tx.room.findUniqueOrThrow({ where: { id: roomId } });
+      if (to === 'ACTIVE') {
+        // REQ-RT-004: активация требует сконфигурированной комнаты — payload
+        // room.activated это пин, неконфигурированной он неоткуда взяться.
+        // Отказ откатывает и переход, и событие (REQ-DEV-008).
+        if (
+          updated.appId === null ||
+          updated.manifestVersion === null ||
+          updated.appSettings === null
+        ) {
+          throw new RoomNotConfiguredError(`Room ${roomId} has no app configuration`);
+        }
+        // REQ-CORE-007: повторная валидация при DRAFT → ACTIVE. Реестр boot-time,
+        // строка durable: редеплой мог убрать манифест или изменить схему версии.
+        this.appRegistry.validateSettings(
+          updated.appId,
+          updated.manifestVersion,
+          updated.appSettings,
+        );
+        // Эмит — последним в транзакции: advisory lock комнаты всегда leaf-most,
+        // после его захвата room."Room" в этой транзакции не пишем (конвенция
+        // порядка блокировок, HANDOFF «Долгоживущие ограничения»).
+        await this.eventLog.commitCoreEvent(tx, roomId, 'room.activated', {
+          appId: updated.appId,
+          manifestVersion: updated.manifestVersion,
+        });
+      } else {
+        const eventName = LIFECYCLE_EVENTS[to];
+        if (eventName) {
+          await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
+        }
       }
-      return tx.room.findUniqueOrThrow({ where: { id: roomId } });
+      return updated;
     });
   }
 
