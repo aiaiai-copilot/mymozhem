@@ -305,3 +305,49 @@ describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
     ).toBe('CANCELLED');
   });
 });
+
+describe('Room config triple CHECK constraint (REQ-RT-004)', () => {
+  let db: TestDb;
+  let service: RoomService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    service = new RoomService(db.prisma, new EventLogService());
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+  });
+
+  it('accepts an all-NULL triple and a fully-set triple', async () => {
+    const room = await service.create(ORG); // тройка NULL
+    await db.prisma.$executeRawUnsafe(
+      `UPDATE room."Room"
+       SET "appId" = 'quiz', "manifestVersion" = 1, "appSettings" = '{}'::jsonb
+       WHERE id = $1`,
+      room.id,
+    );
+    const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+    expect(reread.appId).toBe('quiz');
+    expect(reread.manifestVersion).toBe(1);
+  });
+
+  // Инвариант тройки (design §2): либо все NULL, либо все заданы. Сервис такую запись
+  // не производит никогда (единственный путь — configure, Task 3), поэтому проверяем
+  // сырым SQL, что инвариант держит сама БД (философия REQ-RWD-010).
+  it.each([
+    { set: `"appId" = 'quiz'`, label: 'appId without the rest' },
+    { set: `"appId" = 'quiz', "manifestVersion" = 1`, label: 'pin without appSettings' },
+    { set: `"appSettings" = '{}'::jsonb`, label: 'appSettings without the pin' },
+  ])('rejects a partial triple at the database level ($label)', async ({ set }) => {
+    const room = await service.create(ORG);
+    await expect(
+      db.prisma.$executeRawUnsafe(`UPDATE room."Room" SET ${set} WHERE id = $1`, room.id),
+    ).rejects.toThrow(/Room_config_triple/);
+  });
+});
