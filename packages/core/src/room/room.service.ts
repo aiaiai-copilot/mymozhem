@@ -1,15 +1,20 @@
 import { Injectable } from '@nestjs/common';
-import type { Room, $Enums } from '@prisma/client';
+import type { Room, $Enums, Prisma } from '@prisma/client';
 import type { CoreEventName } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventLogService } from '../realtime/event-log.service';
+import { AppRegistryService } from '../app-registry/app-registry.service';
 import {
   assertTransition,
   assertDeletable,
   DELETABLE_STATUSES,
   type RoomStatus,
 } from './room-state-machine';
-import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+import {
+  RoomConflictError,
+  RoomOrganizerNotRegisteredError,
+  RoomSettingsFrozenError,
+} from './room.errors';
 
 // Compile-time parity assertion between the Prisma-generated enum and the domain union.
 // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
@@ -35,6 +40,7 @@ export class RoomService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventLog: EventLogService,
+    private readonly appRegistry: AppRegistryService,
   ) {}
 
   async create(organizerId: string): Promise<Room> {
@@ -63,6 +69,37 @@ export class RoomService {
       );
     }
     return rows[0];
+  }
+
+  // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,
+  // appSettings) — промежуточного состояния не существует (design §4). Валидация ДО
+  // обращения к БД (REQ-CORE-007); запись — guarded UPDATE: только DRAFT и не
+  // удалённая. Заморозка активной комнаты — этот предикат, не флаг.
+  async configure(
+    roomId: string,
+    config: { appId: string; manifestVersion: number; settings: unknown },
+  ): Promise<Room> {
+    this.appRegistry.validateSettings(config.appId, config.manifestVersion, config.settings);
+    const res = await this.prisma.room.updateMany({
+      where: { id: roomId, status: 'DRAFT', deletedAt: null },
+      data: {
+        appId: config.appId,
+        manifestVersion: config.manifestVersion,
+        // JSON Schema-валидированное значение — JSON; unknown → InputJsonValue безопасно.
+        appSettings: config.settings as Prisma.InputJsonValue,
+      },
+    });
+    if (res.count === 0) {
+      // Re-read только для точности server-side message; код один (design §6).
+      const existing = await this.prisma.room.findUnique({ where: { id: roomId } });
+      const reason = !existing
+        ? 'not found'
+        : existing.deletedAt !== null
+          ? 'deleted'
+          : `status ${existing.status}`;
+      throw new RoomSettingsFrozenError(`Room ${roomId} is not configurable: ${reason}`);
+    }
+    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
   }
 
   async transition(roomId: string, to: RoomStatus): Promise<Room> {

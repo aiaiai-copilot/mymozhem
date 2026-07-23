@@ -1,11 +1,29 @@
+import { validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { EventLogService } from '../realtime/event-log.service';
+import { AppRegistryService } from '../app-registry/app-registry.service';
+import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
 import { RoomService } from './room.service';
-import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+import {
+  RoomError,
+  RoomTransitionError,
+  RoomConflictError,
+  RoomOrganizerNotRegisteredError,
+  RoomSettingsFrozenError,
+} from './room.errors';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
+
+// quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
+const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+
+const makeService = (db: TestDb) =>
+  new RoomService(db.prisma, new EventLogService(), new AppRegistryService([validManifests[0]]));
+
+const configureQuiz = (service: RoomService, roomId: string) =>
+  service.configure(roomId, { appId: 'quiz', manifestVersion: 1, settings: QUIZ_SETTINGS });
 
 describe('RoomService lifecycle', () => {
   let db: TestDb;
@@ -14,7 +32,7 @@ describe('RoomService lifecycle', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma, new EventLogService());
+    service = makeService(db);
   }, 120000);
 
   afterAll(async () => {
@@ -114,7 +132,7 @@ describe('RoomService transition atomicity', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma, new EventLogService());
+    service = makeService(db);
   }, 120000);
 
   afterAll(async () => {
@@ -161,7 +179,7 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma, new EventLogService());
+    service = makeService(db);
   }, 120000);
 
   afterAll(async () => {
@@ -233,7 +251,7 @@ describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma, new EventLogService());
+    service = makeService(db);
   }, 120000);
 
   afterAll(async () => {
@@ -313,7 +331,7 @@ describe('Room config triple CHECK constraint (REQ-RT-004)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    service = new RoomService(db.prisma, new EventLogService());
+    service = makeService(db);
   }, 120000);
 
   afterAll(async () => {
@@ -349,5 +367,93 @@ describe('Room config triple CHECK constraint (REQ-RT-004)', () => {
     await expect(
       db.prisma.$executeRawUnsafe(`UPDATE room."Room" SET ${set} WHERE id = $1`, room.id),
     ).rejects.toThrow(/Room_config_triple/);
+  });
+});
+
+describe('RoomService.configure (REQ-RT-004)', () => {
+  let db: TestDb;
+  let service: RoomService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    service = makeService(db);
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+  });
+
+  it('persists the full config triple on a DRAFT room', async () => {
+    const room = await service.create(ORG);
+    const configured = await configureQuiz(service, room.id);
+    expect(configured.appId).toBe('quiz');
+    expect(configured.manifestVersion).toBe(1);
+    expect(configured.appSettings).toEqual(QUIZ_SETTINGS);
+  });
+
+  it('replaces the whole triple on re-configure', async () => {
+    const room = await service.create(ORG);
+    await configureQuiz(service, room.id);
+    const next = { title: 'Other quiz', correctAnswers: [1] };
+    const reconfigured = await service.configure(room.id, {
+      appId: 'quiz',
+      manifestVersion: 1,
+      settings: next,
+    });
+    expect(reconfigured.appSettings).toEqual(next);
+  });
+
+  it('rejects invalid settings with APP_SETTINGS_INVALID and leaves the row unchanged', async () => {
+    const room = await service.create(ORG);
+    const err = await service
+      .configure(room.id, { appId: 'quiz', manifestVersion: 1, settings: { title: 'x' } })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppSettingsInvalidError);
+    expect((err as AppSettingsInvalidError).code).toBe('APP_SETTINGS_INVALID');
+    const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+    expect(reread.appId).toBeNull();
+    expect(reread.appSettings).toBeNull();
+  });
+
+  it('rejects an unknown manifest with APP_MANIFEST_UNKNOWN', async () => {
+    const room = await service.create(ORG);
+    const err = await service
+      .configure(room.id, { appId: 'quiz', manifestVersion: 99, settings: QUIZ_SETTINGS })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppManifestUnknownError);
+    expect((err as AppManifestUnknownError).code).toBe('APP_MANIFEST_UNKNOWN');
+  });
+
+  it.each([
+    {
+      name: 'ACTIVE',
+      setup: async (s: RoomService, id: string) => {
+        await configureQuiz(s, id);
+        await s.activate(id);
+      },
+    },
+    { name: 'CANCELLED', setup: async (s: RoomService, id: string) => { await s.cancel(id); } },
+    { name: 'soft-deleted', setup: async (s: RoomService, id: string) => { await s.softDelete(id); } },
+  ])('rejects configure on a $name room with ROOM_SETTINGS_FROZEN', async ({ setup }) => {
+    const room = await service.create(ORG);
+    await setup(service, room.id);
+    const err = await configureQuiz(service, room.id).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomSettingsFrozenError);
+    expect((err as RoomSettingsFrozenError).code).toBe('ROOM_SETTINGS_FROZEN');
+  });
+
+  it('rejects configure of a missing room with the same collapsed code', async () => {
+    await expect(
+      service.configure('00000000-0000-0000-0000-0000000000ff', {
+        appId: 'quiz',
+        manifestVersion: 1,
+        settings: QUIZ_SETTINGS,
+      }),
+    ).rejects.toBeInstanceOf(RoomSettingsFrozenError);
   });
 });
