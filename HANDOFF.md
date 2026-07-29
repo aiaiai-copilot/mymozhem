@@ -1,14 +1,14 @@
 # HANDOFF
 
-**Date:** 2026-07-29 (вечер, батч 1 membership/guest-join)
-**Branch:** `phase-1-membership-guest-join` (2 коммита поверх `main`: `3279301` SDK-схемы, `e4d8b64` конфиг §4; `main` сам на 3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-29 (вечер, батч 2 membership/guest-join)
+**Branch:** `phase-1-membership-guest-join` (6 коммитов поверх `main`: батч 1 — `3279301` SDK-схемы, `e4d8b64` конфиг §4; батч 2 — `6ec1277` схема membership + код/политика, `46363d0` fix классификатора коллизии, `60ee3f6` createGuest + ORGANIZER-membership; `main` сам на 3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) исполняется subagent-driven по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md`, разбитому на 3 батча (решение владельца 2026-07-29, один батч на сессию): **батч 1 (Tasks 1–2) — COMPLETE** в этой сессии, ревью чистые; батчи 2–3 — в новых сессиях. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) исполняется subagent-driven по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md`, разбитому на 3 батча (решение владельца 2026-07-29, один батч на сессию): **батч 1 (Tasks 1–2) и батч 2 (Tasks 3–4) — COMPLETE**, ревью чистые (батч 2 — после одного fix-раунда на Task 3); батч 3 (Tasks 5–6 + финальное whole-branch ревью ветки) — в новой сессии. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
-2. **`.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер текущего среза.** Tasks 1–2 COMPLETE, ревью чистые — не пере-диспатчить. Резюм: Task 3. (Старый леджер прежних срезов — `.superpowers/sdd/progress.md`.) Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит.
+2. **`.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер текущего среза.** Tasks 1–4 COMPLETE, ревью чистые — не пере-диспатчить. Резюм: Task 5. (Старый леджер прежних срезов — `.superpowers/sdd/progress.md`.) Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
 5. `docs/sessions/2026-07-23-appsettings-write-path-design.md` — образец свежего дизайна среза (§0 — решения владельца, §5 — post-lock re-read, §9 — швы).
@@ -18,9 +18,7 @@
 
 ## Следующее действие
 
-**Батч 2 среза Membership / guest-join — Tasks 3–4 в новой сессии** (subagent-driven, режим тот же): миграция `membership_guest_join` + код комнаты/политика в `RoomService.create` + `IdentityService.createGuest` + ORGANIZER-membership в транзакции. План: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — обязательное чтение: depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности, нетестируемая коллизия кода; authoring-порт миграций — 55434). Леджер резюма — см. пункт 2 выше. Интерфейсы, готовые для батча 2: `roomJoinPolicySchema`/`RoomJoinPolicy`, `displayNameSchema` (SDK, commit `3279301`); `APP_CONFIG`/`ConfigModule`/`AppConfig` с `ROOM_CODE_MIN_LEN`/`ROOM_PARTICIPANT_LIMIT`/`JOIN_RATE_LIMIT_IP` (commit `e4d8b64`).
-
-**Батч 3 (новая сессия после батча 2):** Tasks 5–6 (join + лимиты + wiring + полные гейты + живой boot) + финальное whole-branch ревью ветки.
+**Батч 3 среза Membership / guest-join — Tasks 5–6 в новой сессии** (subagent-driven, режим тот же) **+ финальное whole-branch ревью ветки**: `JoinRateLimiter` + `MembershipService.join` с лимитами и единообразным отказом, затем экспорты/wiring приложения, полные гейты и живой boot с 6 миграциями. План: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — обязательное чтение: depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности). Леджер резюма — см. пункт 2 выше. Интерфейсы, готовые для батча 3: `roomJoinPolicySchema`/`RoomJoinPolicy`, `displayNameSchema` (SDK); `APP_CONFIG`/`ConfigModule`/`AppConfig` (`3279301`/`e4d8b64`); Prisma-схема `membership` (модель `Membership`, enum `MemberRole`, частичный индекс `Membership_single_organizer_key`), `Room.code`/`Room.joinPolicy`, `Identity.displayName` (миграция `20260729164500_membership_guest_join`, commit `6ec1277`); `IdentityService.createGuest(displayName, tx?)`, `MembershipService.createOrganizerMembership(tx, roomId, identityId)`, `RoomService.create(organizerId, joinPolicy?)` — 5-аргументный конструктор (commit `60ee3f6`). Классификатор коллизии кода матчит P2010-обёртку (commit `46363d0`) — см. долгоживущие ограничения.
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
 
@@ -48,9 +46,10 @@
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`. Любое изменение — только новой миграцией.
+- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`. Любое изменение — только новой миграцией.
 - **Конвенция порядка блокировок:** advisory lock комнаты — всегда leaf-most; транзакция, захватившая его, не должна после этого писать в `room."Room"` (порядок безопасен: `transition` берёт row-lock до advisory lock, эмит — последним шагом; `commitCoreEvent` не трогает Room; `configure` advisory lock не берёт и цикла не создаёт — проверено финальным ревью appSettings).
 - **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
+- **Prisma 7.8 adapter-pg: форма ошибок raw-запросов.** Падающий `$queryRaw` оборачивается в `PrismaClientKnownRequestError` с кодом `P2010`; SQLSTATE сидит внутри message (``Raw query failed. Code: `23505`. Message: ...``) и в `meta.driverAdapterError.cause.originalCode`. Топ-левел `err.code` НИКОГДА не равен SQLSTATE — матчить как `code === 'P2010'` + подстроки в message (прецедент: `isRoomCodeCollision`, commit `46363d0`). Также: `$queryRaw` возвращает сырое DB-значение enum (`'guests'`), а не Prisma-имя из `@map` (`'GUESTS'`) — клиентский `@map` применяет только десериализация клиента; при `RETURNING *` из raw INSERT нужен re-read через клиент (`findUniqueOrThrow`), как в `insertRoom`.
 - **Инвариант «change both or neither»:** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в двух местах — частичный индекс `"Identity_registered_email_key"` (миграция identity_seam) и guarded INSERT в `RoomService.create`. Менять только вместе (design §7).
 - **Хост-порт 5432 занят чужим контейнером `lt-pg`** (не проектным, не трогать). Authoring-контейнер миграций (`mm-migrate`, эфемерный) публиковать на свободный порт (в срезах использовались 55432/55433) и подставлять его в `DATABASE_URL`.
 - **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория (обнаружение `prisma.config.ts`).
@@ -70,62 +69,34 @@
 
 ## Осталось недоделанным
 
-- **Батчи 2–3 плана membership/guest-join** (Tasks 3–4, затем 5–6 + финальное ревью) — subagent-driven, каждый в новой сессии (см. «Следующее действие»).
+- **Батч 3 плана membership/guest-join** (Tasks 5–6 + финальное whole-branch ревью ветки) — subagent-driven, новая сессия (см. «Следующее действие»).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-07-29, вечер (батч 1 membership/guest-join: Tasks 1–2)
+## Session 2026-07-29, вечер (батч 2 membership/guest-join: Tasks 3–4)
 
 ### Что сделано
 
-- Разрез плана на 3 батча подтверждён владельцем (один батч на сессию, как в срезе sdk-contract-core): 1–2 / 3–4 / 5–6+финальное ревью. Зафиксирован в леджере среза.
-- Ветка `phase-1-membership-guest-join` от `a6d53b8`; baseline зелёный (unit-ланы всех пакетов, Docker поднят).
-- **Task 1 (SDK: roomJoinPolicy + displayName)** — COMPLETE, commit `3279301`. TDD RED→GREEN, 182/182 (162+20), lint+typecheck чисто. Ревью: spec ✅, Approved, 0 Critical/Important, 1 Minor (в roll-up леджера).
-- **Task 2 (конфиг §4 + ConfigModule)** — COMPLETE, commit `e4d8b64`. TDD RED→GREEN, 68/68 core (10/10 loadConfig describe), lint+typecheck чисто. Ревью: spec ✅, Approved, 0 находок; grep подтвердил отсутствие незапрошенных потребителей ConfigModule.
-- Pre-flight скан плана чист (конфликтов задач и план-против-рубрики нет; якоря сверены с кодом — записано в леджере).
+- **Task 3 (миграция + код/политика в create)** — COMPLETE, commits `6ec1277` + fix `46363d0`. TDD RED→GREEN, unit 80/80, int 59/59, lint+typecheck чисто. Ревью: 1 Important (классификатор коллизии матчил несуществующую форму ошибки — топ-левел `23505` вместо P2010-обёртки) → fix-раунд 1: классификатор исправлен + 9 юнит-тестов на форму ошибки; re-review PASS. Отклонения, принятые ревью: re-read через `findUniqueOrThrow` (raw `$queryRaw` не применяет `@map` enum), ассерт `lower(email)` без кавычек (депарс Postgres), вынужденные правки двух старых raw-SQL тестов (NOT NULL `code`) и call-site в event-log.
+- **Task 4 (createGuest + ORGANIZER-membership в транзакции create)** — COMPLETE, commit `60ee3f6`. TDD RED→GREEN, int 63/63, unit 80/80, lint+typecheck чисто. Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (в roll-up леджера). Все 3 call-site `new RoomService(` обновлены под 5-аргументный конструктор.
+- Миграция `20260729164500_membership_guest_join` применена и заморожена (рукописный частичный индекс `Membership_single_organizer_key`, REQ-DEV-006).
+- Follow-up пакет identity-среза подобран планом (presence-апгрейд + кросс-kind тест) — исполнен в Task 3.
+- Pre-flight конфликтов не было (скан чист ещё с батча 1); контроллер-ноутс плана сработали как заявлено.
 
 ### Коммиты этой сессии
 
-- `3279301` feat(sdk): room join policy + displayName contract schemas (REQ-ID-002, REQ-ID-003)
-- `e4d8b64` feat(core): §4 join/code/participant config params + ConfigModule (REQ-OPS-003)
+- `6ec1277` feat(core): membership schema + room code & join policy in create (REQ-ID-013, REQ-ID-002, REQ-ID-011)
+- `46363d0` fix(core): match P2010-wrapped 23505 in room code collision classifier (REQ-ID-013)
+- `60ee3f6` feat(core): IdentityService.createGuest + organizer membership on room create (REQ-ID-003, REQ-ID-011)
 - плюс handoff-коммит. Всё на ветке `phase-1-membership-guest-join`, не пушено (push — решение владельца).
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет.
+- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (`mm-migrate` удалён после authoring'а миграции).
 - Untracked `AGENTS.md` в корне — не трогать.
-- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — Tasks 1–2 COMPLETE с разборами ревью; briefs/reports/диффы ревью рядом. `git clean -fdx` уничтожит.
+- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — Tasks 1–4 COMPLETE с разборами ревью и fix-раунда; briefs/reports/диффы ревью рядом. `git clean -fdx` уничтожит.
 - Внешних side-effects не было (ни push, ни прод-тестов).
 
 ### Осталось недоделанным
 
-- Батч 2 (Tasks 3–4) — новая сессия (см. «Следующее действие»): миграция, код/политика в create, createGuest, ORGANIZER-membership.
-- Батч 3 (Tasks 5–6 + финальное ревью ветки) — новая сессия после батча 2.
-- Юрист — гейт 1 открыт, действие вне агента.
-
-## Session 2026-07-29 (дизайн + план среза membership/guest-join)
-
-### Что сделано
-
-- Выбран следующий срез фазы 1 (решение владельца): **Membership / guest-join** — код комнаты, политика входа, членство, лимиты входа.
-- Дизайн пройден через superpowers:brainstorming по секциям, одобрен: `docs/sessions/2026-07-29-membership-guest-join-design.md`. Решения владельца (§1 дизайна): объём «join + лимиты» (kick и TTL — отдельные срезы); `displayName` на Identity; ORGANIZER-membership при create; rate-limit in-memory; `ROOM_PARTICIPANT_LIMIT_REACHED` отдельным кодом; гонка count-then-insert на лимите принята.
-- План написан через superpowers:writing-plans, 6 задач: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности, нетестируемая коллизия кода).
-- Режим исполнения: **subagent-driven в новой сессии** (решение владельца) — эта сессия код не писала.
-
-### Коммиты этой сессии
-
-- `be62c90` docs(sessions): membership/guest-join slice design (REQ-ID-002/003/006/011/013)
-- `9ff5ac0` docs(sessions): membership/guest-join implementation plan
-- плюс этот handoff-коммит; все три впереди `origin/main`, push — решение владельца.
-
-### Локальное состояние (не в git)
-
-- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет.
-- Untracked `AGENTS.md` в корне — не создан этой сессией, содержимое не проверялось, не трогать.
-- `.superpowers/sdd/` — леджер (`progress.md`) прежних срезов; нового раздела под membership/guest-join пока нет — заведёт исполняющая сессия. Не отслеживается git; `git clean -fdx` уничтожит.
-- Внешних side-effects не было (ни push, ни прод-тестов).
-
-### Осталось недоделанным
-
-- Исполнение плана membership/guest-join — subagent-driven, новая сессия (см. «Следующее действие»).
-- После исполнения: код-срезы из follow-up пакетов (configure/app-registry, event-commit) остаются на будущие планы.
+- Батч 3 (Tasks 5–6 + финальное ревью ветки) — новая сессия (см. «Следующее действие»).
 - Юрист — гейт 1 открыт, действие вне агента.
