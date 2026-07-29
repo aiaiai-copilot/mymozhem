@@ -1,6 +1,6 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
-import type { AppConfig } from '../config/config.schema';
+import { TEST_CONFIG } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
@@ -17,15 +17,6 @@ const ORG = '00000000-0000-0000-0000-000000000001';
 const IP = '203.0.113.7';
 const IP2 = '198.51.100.9';
 
-const TEST_CONFIG: AppConfig = {
-  NODE_ENV: 'test',
-  PORT: 3000,
-  DATABASE_URL: 'postgresql://unused',
-  ROOM_CODE_MIN_LEN: 8,
-  ROOM_PARTICIPANT_LIMIT: 500,
-  JOIN_RATE_LIMIT_IP: 20,
-};
-
 describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   let db: TestDb;
   let roomService: RoomService;
@@ -35,7 +26,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       db.prisma,
       new IdentityService(db.prisma),
       new JoinRateLimiter(overrides.rateLimit ?? 1000),
-      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? 500 },
+      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
     );
 
   beforeAll(async () => {

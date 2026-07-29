@@ -2,13 +2,13 @@ import { validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
+import { TEST_CONFIG } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { IdentityService } from '../identity/identity.service';
 import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
-import type { AppConfig } from '../config/config.schema';
 import { RoomService } from './room.service';
 import {
   RoomError,
@@ -23,15 +23,6 @@ const ORG = '00000000-0000-0000-0000-000000000001';
 
 // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
 const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
-
-const TEST_CONFIG: AppConfig = {
-  NODE_ENV: 'test',
-  PORT: 3000,
-  DATABASE_URL: 'postgresql://unused',
-  ROOM_CODE_MIN_LEN: 8,
-  ROOM_PARTICIPANT_LIMIT: 500,
-  JOIN_RATE_LIMIT_IP: 20,
-};
 
 const makeService = (db: TestDb) =>
   new RoomService(
