@@ -4,6 +4,7 @@ import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import { MembershipService } from '../membership/membership.service';
 import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
 import type { AppConfig } from '../config/config.schema';
 import { RoomService } from './room.service';
@@ -35,6 +36,7 @@ const makeService = (db: TestDb) =>
     db.prisma,
     new EventLogService(),
     new AppRegistryService([validManifests[0]]),
+    new MembershipService(db.prisma),
     TEST_CONFIG,
   );
 
@@ -64,6 +66,14 @@ describe('RoomService lifecycle', () => {
     expect(room.status).toBe('DRAFT');
     expect(room.deletedAt).toBeNull();
     expect(room.organizerId).toBe(ORG);
+  });
+
+  it('creates the ORGANIZER membership atomically with the room (REQ-ID-011, design §1)', async () => {
+    const room = await service.create(ORG);
+    const memberships = await db.prisma.membership.findMany({ where: { roomId: room.id } });
+    expect(memberships).toHaveLength(1);
+    expect(memberships[0].identityId).toBe(ORG);
+    expect(memberships[0].role).toBe('ORGANIZER');
   });
 
   it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
@@ -544,6 +554,7 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([]),
+      new MembershipService(db.prisma),
       TEST_CONFIG,
     );
     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);

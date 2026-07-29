@@ -6,6 +6,7 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import { MembershipService } from '../membership/membership.service';
 import { generateRoomCode, isRoomCodeCollision } from './room-code';
 import {
   assertTransition,
@@ -45,6 +46,7 @@ export class RoomService {
     private readonly prisma: PrismaService,
     private readonly eventLog: EventLogService,
     private readonly appRegistry: AppRegistryService,
+    private readonly membership: MembershipService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -55,7 +57,13 @@ export class RoomService {
     for (let attempt = 0; attempt < 3; attempt++) {
       const code = generateRoomCode(this.config.ROOM_CODE_MIN_LEN);
       try {
-        return await this.insertRoom(organizerId, code, policy);
+        // One transaction: room row + ORGANIZER membership land atomically
+        // (REQ-ID-011, design §1) — a partial pair can never be observed.
+        return await this.prisma.$transaction(async (tx) => {
+          const room = await this.insertRoom(tx, organizerId, code, policy);
+          await this.membership.createOrganizerMembership(tx, room.id, organizerId);
+          return room;
+        });
       } catch (e) {
         if (attempt < 2 && isRoomCodeCollision(e)) continue;
         throw e;
@@ -73,11 +81,12 @@ export class RoomService {
   // condition (design §7) — change both or neither.
   // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
   private async insertRoom(
+    tx: Prisma.TransactionClient,
     organizerId: string,
     code: string,
     joinPolicy: RoomJoinPolicy,
   ): Promise<Room> {
-    const rows = await this.prisma.$queryRaw<Room[]>`
+    const rows = await tx.$queryRaw<Room[]>`
       INSERT INTO room."Room" ("id", "organizerId", "status", "code", "joinPolicy", "createdAt", "updatedAt")
       SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', ${code}, ${joinPolicy}::"room"."RoomJoinPolicy", now(), now()
       WHERE EXISTS (
@@ -95,7 +104,7 @@ export class RoomService {
     }
     // Re-read через клиент: $queryRaw отдаёт сырое DB-значение enum ('guests'), а
     // контракт метода — Prisma-имя ('GUESTS'); маппинг @map выполняет только клиент.
-    return this.prisma.room.findUniqueOrThrow({ where: { id: rows[0].id } });
+    return tx.room.findUniqueOrThrow({ where: { id: rows[0].id } });
   }
 
   // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,

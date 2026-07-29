@@ -3,6 +3,7 @@ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import { MembershipService } from '../membership/membership.service';
 import type { AppConfig } from '../config/config.schema';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
@@ -30,6 +31,7 @@ describe('EventLogService.commitCoreEvent', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([validManifests[0]]),
+      new MembershipService(db.prisma),
       TEST_CONFIG,
     );
     eventLog = new EventLogService();
