@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-07-23
-**Branch:** `main` (рабочее дерево чистое, синхронизирован с `origin/main`) — последний коммит `eaada54` Merge pull request #1 (appSettings write path, 2026-07-23).
+**Date:** 2026-07-29
+**Branch:** `main` (3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать) — последний коммит `9ff5ac0` membership/guest-join implementation plan (2026-07-29).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam (REQ-ID-001 + REQ-ID-005), Lifecycle-эмит в лог (REQ-RT-010 2/3) и **appSettings write path (REQ-RT-004, REQ-CORE-007, REQ-RT-010→3/3)** — завершены и слиты в `main`. Срез appSettings исполнен через subagent-driven-development: 5/5 задач, все ревью чистые, финальное whole-branch ревью — ready to merge; слит PR #1 (merge-коммит `eaada54`, дерево байт-в-байт == ревьюенному HEAD). **Следующий срез не выбран** — решение владельца (кандидаты и навешанные follow-up — ниже). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. **Следующий срез выбран: Membership / guest-join** (REQ-ID-002/003/006/011/013) — дизайн одобрен по секциям, план написан и закоммичен (`docs/sessions/2026-07-29-membership-guest-join-{design,implementation-plan}.md`). **Исполнение — subagent-driven в новой сессии** (решение владельца 2026-07-29). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,7 +18,9 @@
 
 ## Следующее действие
 
-**Выбор следующего среза — решение владельца.** Навешанные на будущие срезы follow-up пакеты (подбирать планами явно):
+**Исполнение среза Membership / guest-join** по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (6 задач: SDK-схемы → конфиг → миграция+код комнаты → IdentityService+organizer-membership → join+лимиты → wiring+гейты+boot) через superpowers:subagent-driven-development — режим подтверждён владельцем 2026-07-29. Дизайн: `docs/sessions/2026-07-29-membership-guest-join-design.md` (§1 — решения владельца; controller-notes в шапке плана — обязательное чтение исполнителем).
+
+**Follow-up пакеты, подбираемые будущими планами явно:**
 
 **Для следующего среза, трогающего configure/app-registry** (из финального ревью appSettings, ~15 строк суммарно):
 - guard в `configure` на `settings === undefined || settings === null` → `AppSettingsInvalidError` (сейчас: permissive-схема + null даёт сырую P2011 от CHECK, а re-configure с `undefined` молча оставляет stale settings под новым пином; гейт активации ловит до эмита, но отказ нетипизирован);
@@ -26,11 +28,8 @@
 - race-тест configure-vs-activate со второй версией манифеста (quiz@2) — сейчас обе стороны гонки пинят quiz@1, и ассерт «пин == строке» проходит тривиально;
 - при появлении транспорта: зафиксировать в контрактных доках допущение «settings — не-null JSON value».
 
-**Для первого реального identity-пишущего потока** (guest-join / OAuth), со среза identity:
-- presence-тест индекса: ассертить `UNIQUE` и колонку в indexdef (сейчас ловят только поведенческие тесты);
-- кросс-kind кейс индекса: GUEST с email живого REGISTERED — разрешён;
+**Для первого реального identity-пишущего потока** (guest-join / OAuth), со среза identity — **бóльшая часть подобрана планом membership/guest-join** (presence-тест индекса с UNIQUE+колонкой, кросс-kind кейс, косметика harness'а и jest-конфига — Task 3 плана). Остаётся на транспортный срез:
 - malformed non-UUID `organizerId` → сейчас сырой Postgres uuid-syntax error; маппинг в типизированную ошибку — на boundary-слое первого транспорта (REQ-SEC-006);
-- косметика: `harness.int-spec.ts` сидит identity без email; устаревший комментарий в `jest.integration.config.js` («per file» → «per describe»).
 
 **Для среза event-commit (из дизайна lifecycle-эмита, §10):** подобрать отложенные тесты actorId≠null и payload-нейтральности гонки за seq.
 
@@ -69,35 +68,33 @@
 
 ## Осталось недоделанным
 
-- **Выбор следующего среза** — решение владельца (кандидаты и follow-up пакеты — в «Следующее действие»).
+- **Исполнение плана membership/guest-join** — subagent-driven в новой сессии (см. «Следующее действие»).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-07-23 (исполнение среза appSettings write path, subagent-driven)
+## Session 2026-07-29 (дизайн + план среза membership/guest-join)
 
 ### Что сделано
 
-- Исполнен план `docs/sessions/2026-07-23-appsettings-write-path-implementation-plan.md` через superpowers:subagent-driven-development: 5 задач, свежий implementer + task-ревьюер на задачу (модели: haiku для транскрипционных, sonnet для интеграционных, opus для concurrency-задачи, fable для финального ревью).
-- **Все ревью чистые** (spec ✅ + quality approved по каждой задаче); финальное whole-branch ревью (fable) — ready to merge, без Critical/Important. Кросс-задачные инварианты проверены: post-lock re-read держит пин события == замороженной строке; advisory lock leaf-most, `configure` цикла блокировок не создаёт; CHECK недостижим из сервисного пути; отказы активации — throw в транзакции с полным откатом.
-- **Первый PR репозитория:** ветка `phase-1-appsettings-write-path` запушена (решение владельца, опция 2 finishing-скилла), PR #1 создан и **смёржен владельцем на GitHub** (merge-коммит, не squash). Локальный main синхронизирован fast-forward; feature-ветки (local + remote) удалены. В PR вошли и 3 ранее незапушенных docs-коммита — `origin/main` теперь полностью догнан, **непушенных коммитов не осталось**.
-- Отклонения исполнителей (оба проверены ревьюерами): 6-й call-site трёхаргументного конструктора найден в `realtime/event-log.int-spec.ts` (план знал про 5 в room-спеке); форма `test:int -- -t` заменена на рабочую без `--`.
-- Полные гейты + живой boot (Task 5): lint/typecheck/unit (sdk 162, core 62, server 3)/int 49/49/boundary-check 0 viol (196 модулей)/guardrails 3/3/build — зелёные; compose boot с 5 миграциями, `/health/ready` 200, стек снесён `down -v`, `lt-pg` нетронут.
+- Выбран следующий срез фазы 1 (решение владельца): **Membership / guest-join** — код комнаты, политика входа, членство, лимиты входа.
+- Дизайн пройден через superpowers:brainstorming по секциям, одобрен: `docs/sessions/2026-07-29-membership-guest-join-design.md`. Решения владельца (§1 дизайна): объём «join + лимиты» (kick и TTL — отдельные срезы); `displayName` на Identity; ORGANIZER-membership при create; rate-limit in-memory; `ROOM_PARTICIPANT_LIMIT_REACHED` отдельным кодом; гонка count-then-insert на лимите принята.
+- План написан через superpowers:writing-plans, 6 задач: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности, нетестируемая коллизия кода).
+- Режим исполнения: **subagent-driven в новой сессии** (решение владельца) — эта сессия код не писала.
 
 ### Коммиты этой сессии
 
-- `3ab4dd1` feat(core): room app config columns + triple CHECK migration (REQ-RT-004)
-- `4fe39b4` feat(core): AppRegistryService.validateSettings with ajv cache (REQ-CORE-007)
-- `e23b63e` feat(core): RoomService.configure write path (REQ-RT-004)
-- `b89dfcc` feat(core): activation freeze + room.activated emit (REQ-RT-004, REQ-RT-010, REQ-CORE-007, REQ-DEV-008)
-- `eaada54` Merge pull request #1 (GitHub, владелец)
+- `be62c90` docs(sessions): membership/guest-join slice design (REQ-ID-002/003/006/011/013)
+- `9ff5ac0` docs(sessions): membership/guest-join implementation plan
+- плюс этот handoff-коммит; все три впереди `origin/main`, push — решение владельца.
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (compose снесён, `mm-migrate` удалён).
-- `.superpowers/sdd/` — леджер (`progress.md`) с полной историей шести срезов + briefs/reports/diff-пакеты в `appsettings-write-path/`. Не отслеживается git; `git clean -fdx` уничтожит.
-- Внешние системы: push ветки + PR #1 на GitHub (смёржен) — единственные side-effects; прод-тестов не было, тесты только против Testcontainers и локального compose.
+- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет.
+- Untracked `AGENTS.md` в корне — не создан этой сессией, содержимое не проверялось, не трогать.
+- `.superpowers/sdd/` — леджер (`progress.md`) прежних срезов; нового раздела под membership/guest-join пока нет — заведёт исполняющая сессия. Не отслеживается git; `git clean -fdx` уничтожит.
+- Внешних side-effects не было (ни push, ни прод-тестов).
 
 ### Осталось недоделанным
 
-- Выбор следующего среза — решение владельца (см. «Следующее действие»).
-- Follow-up пакеты appSettings/identity/event-commit — подобрать соответствующими планами.
+- Исполнение плана membership/guest-join — subagent-driven, новая сессия (см. «Следующее действие»).
+- После исполнения: код-срезы из follow-up пакетов (configure/app-registry, event-commit) остаются на будущие планы.
 - Юрист — гейт 1 открыт, действие вне агента.
