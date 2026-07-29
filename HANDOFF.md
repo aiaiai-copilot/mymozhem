@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-07-29 (ночь, батч 3 membership/guest-join — план исполнен полностью)
-**Branch:** `phase-1-membership-guest-join` (11 коммитов поверх `main`, последний `107e12d`; **все гейты зелёные, ветка готова к мерджу — решение о мердже и push за владельцем**; `main` сам на 3 коммита впереди `origin/main`; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-29 (ночь, membership/guest-join СЛИТ в main)
+**Branch:** `main` (17 коммитов впереди `origin/main`, последний `408a463` — merge среза; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) — **COMPLETE все 3 батча**: план `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` исполнен subagent-driven целиком (Tasks 1–6), финальное whole-branch ревью ветки пройдено («Ready to merge: With fixes» → единственный fix `107e12d` влит, re-review ALL ADDRESSED). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013, REQ-OPS-003) — **COMPLETE и СЛИТ в `main`** (`408a463`, `--no-ff`): план исполнен subagent-driven целиком (Tasks 1–6 в трёх батчах), финальное whole-branch ревью пройдено («Ready to merge: With fixes» → fix `107e12d`, re-review ALL ADDRESSED), тесты/typecheck на слитом результате зелёные, feature-ветка удалена. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,7 +18,7 @@
 
 ## Следующее действие
 
-**Мердж ветки `phase-1-membership-guest-join` в `main`** (решение владельца; навык superpowers:finishing-a-development-branch предъявит опции). Ветка зелёная целиком: unit 265 (SDK 182 + core 83), int 78 (testcontainers), boundary-check 0, guardrails 3/3, build, живой docker boot → `/health/ready` 200 с 6 миграциями. После мерджа — выбор следующего среза фазы 1 (кандидаты из follow-up пакетов ниже; наиболее созревший — **транспортный срез с auth/HTTP**, он подбирает REQ-SEC-006 forward-обязательство и parked-minors этого среза).
+**Выбор следующего среза фазы 1** (brainstorm → дизайн → план, как прежние срезы). Кандидаты из follow-up пакетов ниже; наиболее созревший — **транспортный срез с auth/HTTP**: он подбирает REQ-SEC-006 forward-обязательство (типизированные коды без стектрейсов наружу), parked-minors среза membership/guest-join (eviction лимитера, real-IP) и открывает путь к первому живому событию. Перед ним — напомнить владельцу про **push** (`main` на 17 коммитов впереди `origin/main`).
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
 
@@ -76,17 +76,18 @@
 
 ## Осталось недоделанным
 
-- **Мердж ветки + push** — решение владельца (см. «Следующее действие»).
+- **Push `main`** (17 коммитов впереди `origin/main`) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-07-29, ночь (батч 3 membership/guest-join: Tasks 5–6 + финальное ревью)
+## Session 2026-07-29, ночь (батч 3 membership/guest-join + мердж в main)
 
 ### Что сделано
 
-- **Task 5 (JoinRateLimiter + MembershipService.join)** — COMPLETE, commit `a123f0d`. Процессный казус: первый implementer-субагент выполнил и закоммитил задачу, но умер на API-таймауте до отчёта; второй implementer верифицировал дословное соответствие брифу и прогнал все гейты (limiter unit 3/3, join int 15/15, unit 83/83, int 78/78, lint+typecheck чисто). Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (roll-up).
-- **Task 6 (экспорты, wiring, полные гейты + живой boot)** — COMPLETE, commits `d70f919` (fix: placeholder `DATABASE_URL` в health e2e — ConfigModule валидирует env при boot AppModule, REQ-OPS-003) + `47d7105` (wiring). Полная лана из корня зелёная: lint, typecheck, unit 268, int 78, boundary-check 0, guardrails 3/3, build. Живой docker boot: `/health/ready` 200, 6 миграций, последняя `20260729164500_membership_guest_join`; `down -v`, `lt-pg` не тронут.
-- **Финальное whole-branch ревью ветки** (`a6d53b8..47d7105`, 10 коммитов, opus): «Ready to merge: With fixes» — 0 Critical, 1 Important (`TEST_CONFIG` в трёх int-spec'ах — pre-committed триггер извлечения сработал). Fix wave `107e12d` (извлечение в `src/testing/test-config.ts` + единый источник дефолта лимита), scoped re-review: ALL ADDRESSED. Остальные minors — parked с рулингами в леджере; самые ценные перенесены в follow-up пакеты выше (транспортный срез).
-- Три API-обрыва субагентов за сессию (таймауты/connection closed) — во всех случаях работа восстановлена резюмом агента или верификацией уже сделанного коммита; леджер + отчёты оказались достаточны.
+- **Task 5 (JoinRateLimiter + MembershipService.join)** — COMPLETE, commit `a123f0d`. Процессный казус: первый implementer-субагент выполнил и закоммитил задачу, но умер на API-таймауте до отчёта; второй implementer верифицировал дословное соответствие брифу и прогнал все гейты (limiter unit 3/3, join int 15/15, unit 83/83, int 78/78). Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (roll-up).
+- **Task 6 (экспорты, wiring, полные гейты + живой boot)** — COMPLETE, commits `d70f919` (fix: placeholder `DATABASE_URL` в health e2e — ConfigModule валидирует env при boot AppModule, REQ-OPS-003) + `47d7105`. Полная лана из корня зелёная; живой docker boot: `/health/ready` 200, 6 миграций; `down -v`, `lt-pg` не тронут.
+- **Финальное whole-branch ревью ветки** (`a6d53b8..47d7105`, opus): «Ready to merge: With fixes» — 0 Critical, 1 Important (`TEST_CONFIG` в трёх int-spec'ах). Fix wave `107e12d` (извлечение в `src/testing/test-config.ts` + единый источник дефолта лимита), scoped re-review: ALL ADDRESSED. Остальные minors — parked с рулингами в леджере; самые ценные перенесены в follow-up пакеты выше (транспортный срез).
+- **Мердж в `main`**: `408a463` (`--no-ff`, в стиле репо); тесты/typecheck на слитом результате зелёные (turbo-cache hit — дерево идентично прогнанному); feature-ветка `phase-1-membership-guest-join` удалена.
+- Три API-обрыва субагентов за сессию (таймауты/connection closed) — работа восстановлена резюмом агентов или верификацией уже сделанных коммитов; леджер + отчёты оказались достаточны.
 
 ### Коммиты этой сессии
 
@@ -94,16 +95,17 @@
 - `d70f919` fix(server): set DATABASE_URL placeholder for AppModule boot in health e2e (REQ-OPS-003)
 - `47d7105` feat(core): wire identity/membership modules into the app (REQ-ID-002)
 - `107e12d` refactor(core): extract shared TEST_CONFIG into src/testing (REQ-OPS-003)
-- плюс handoff-коммит. Всё на ветке `phase-1-membership-guest-join`, не пушено (push — решение владельца).
+- `340d7b2` + handoff-коммит этой правки; мердж `408a463`. Всё в `main`, не пушено (push — решение владельца).
 
 ### Локальное состояние (не в git)
 
 - Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (boot-смоук завершён `down -v`).
 - Untracked `AGENTS.md` в корне — не трогать (вопрос владельцу о его судьбе всё ещё открыт).
-- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — все 6 tasks COMPLETE + итоги финального ревью с рулингами triage; briefs/reports/диффы рядом. `git clean -fdx` уничтожит.
+- Леджер завершённого среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — оставлен по конвенции репо (прежние леджеры не удалялись); briefs/reports/диффы рядом. `git clean -fdx` уничтожит.
 - Внешних side-effects не было (ни push, ни прод-тестов; интеграционная лана — только throwaway testcontainers).
 
 ### Осталось недоделанным
 
-- Мердж ветки + push — решение владельца (навык finishing-a-development-branch предъявит опции).
+- Push `main` (17 коммитов впереди `origin/main`) — решение владельца.
+- Выбор следующего среза — brainstorm с владельцем (кандидат — транспортный, см. «Следующее действие»).
 - Юрист — гейт 1 открыт, действие вне агента.
