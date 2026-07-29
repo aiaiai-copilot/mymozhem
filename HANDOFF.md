@@ -1,14 +1,14 @@
 # HANDOFF
 
-**Date:** 2026-07-29 (вечер, батч 2 membership/guest-join)
-**Branch:** `phase-1-membership-guest-join` (6 коммитов поверх `main`: батч 1 — `3279301` SDK-схемы, `e4d8b64` конфиг §4; батч 2 — `6ec1277` схема membership + код/политика, `46363d0` fix классификатора коллизии, `60ee3f6` createGuest + ORGANIZER-membership; `main` сам на 3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-29 (ночь, батч 3 membership/guest-join — план исполнен полностью)
+**Branch:** `phase-1-membership-guest-join` (11 коммитов поверх `main`, последний `107e12d`; **все гейты зелёные, ветка готова к мерджу — решение о мердже и push за владельцем**; `main` сам на 3 коммита впереди `origin/main`; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) исполняется subagent-driven по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md`, разбитому на 3 батча (решение владельца 2026-07-29, один батч на сессию): **батч 1 (Tasks 1–2) и батч 2 (Tasks 3–4) — COMPLETE**, ревью чистые (батч 2 — после одного fix-раунда на Task 3); батч 3 (Tasks 5–6 + финальное whole-branch ревью ветки) — в новой сессии. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) — **COMPLETE все 3 батча**: план `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` исполнен subagent-driven целиком (Tasks 1–6), финальное whole-branch ревью ветки пройдено («Ready to merge: With fixes» → единственный fix `107e12d` влит, re-review ALL ADDRESSED). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
-2. **`.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер текущего среза.** Tasks 1–4 COMPLETE, ревью чистые — не пере-диспатчить. Резюм: Task 5. (Старый леджер прежних срезов — `.superpowers/sdd/progress.md`.) Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит.
+2. **`.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер завершённого среза.** Все 6 tasks COMPLETE, финальное ревью пройдено — план НЕ переисполнять. Резюм: мердж ветки. (Старый леджер прежних срезов — `.superpowers/sdd/progress.md`.) Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
 5. `docs/sessions/2026-07-23-appsettings-write-path-design.md` — образец свежего дизайна среза (§0 — решения владельца, §5 — post-lock re-read, §9 — швы).
@@ -18,7 +18,7 @@
 
 ## Следующее действие
 
-**Батч 3 среза Membership / guest-join — Tasks 5–6 в новой сессии** (subagent-driven, режим тот же) **+ финальное whole-branch ревью ветки**: `JoinRateLimiter` + `MembershipService.join` с лимитами и единообразным отказом, затем экспорты/wiring приложения, полные гейты и живой boot с 6 миграциями. План: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — обязательное чтение: depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности). Леджер резюма — см. пункт 2 выше. Интерфейсы, готовые для батча 3: `roomJoinPolicySchema`/`RoomJoinPolicy`, `displayNameSchema` (SDK); `APP_CONFIG`/`ConfigModule`/`AppConfig` (`3279301`/`e4d8b64`); Prisma-схема `membership` (модель `Membership`, enum `MemberRole`, частичный индекс `Membership_single_organizer_key`), `Room.code`/`Room.joinPolicy`, `Identity.displayName` (миграция `20260729164500_membership_guest_join`, commit `6ec1277`); `IdentityService.createGuest(displayName, tx?)`, `MembershipService.createOrganizerMembership(tx, roomId, identityId)`, `RoomService.create(organizerId, joinPolicy?)` — 5-аргументный конструктор (commit `60ee3f6`). Классификатор коллизии кода матчит P2010-обёртку (commit `46363d0`) — см. долгоживущие ограничения.
+**Мердж ветки `phase-1-membership-guest-join` в `main`** (решение владельца; навык superpowers:finishing-a-development-branch предъявит опции). Ветка зелёная целиком: unit 265 (SDK 182 + core 83), int 78 (testcontainers), boundary-check 0, guardrails 3/3, build, живой docker boot → `/health/ready` 200 с 6 миграциями. После мерджа — выбор следующего среза фазы 1 (кандидаты из follow-up пакетов ниже; наиболее созревший — **транспортный срез с auth/HTTP**, он подбирает REQ-SEC-006 forward-обязательство и parked-minors этого среза).
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
 
@@ -33,7 +33,14 @@
 
 **Для среза event-commit (из дизайна lifecycle-эмита, §10):** подобрать отложенные тесты actorId≠null и payload-нейтральности гонки за seq.
 
-**Для плана с auth/HTTP:** REST-поверхность + маппинг типизированных ошибок + actorId (швы дизайна appSettings §9). Все новые коды этого среза (`APP_MANIFEST_UNKNOWN`, `APP_SETTINGS_INVALID`, `ROOM_NOT_CONFIGURED`, `ROOM_SETTINGS_FROZEN`) — core-внутренние; `ROOM_SETTINGS_FROZEN` намеренно совпадает строкой с зарезервированным кодом SDK-контракта (маппинг 1:1).
+**Для транспортного среза (guest-join по HTTP/Socket.io), parked из финального ревью membership/guest-join:**
+- `JoinRateLimiter` не вытесняет протухшие IP-записи (`join-rate-limiter.ts`) — Map растёт по одной записи на distinct IP за время жизни процесса; fix = `delete` при expiry или периодический sweep; реальный вектор появится с выходом наружу;
+- гонка soft-delete/status-flip между проверкой и insert в `MembershipService.join` — тот же класс принятой гонки, что count-then-insert (design fork (б) называет только лимит); acceptance зафиксирован в леджере; направление fail-safe (сиротская membership-строка безвредна, ничего не эмитится);
+- real-IP extraction (доверие к X-Forwarded-For) — принадлежит транспорту, лимитер считает по `params.ip` как дано;
+- JSDoc на `RoomService.create`: словарь политики lowercase-in (`'registered'`) / Prisma-name-out (`'REGISTERED'`);
+- при первом касании `apps/server/test/health.e2e-spec.ts`: placeholder `DATABASE_URL` указывает на 5432 (`lt-pg`) — заменить на мёртвый порт и добавить save/restore env в afterAll.
+
+**Для плана с auth/HTTP:** REST-поверхность + маппинг типизированных ошибок + actorId (швы дизайна appSettings §9). Все новые коды этого среза (`APP_MANIFEST_UNKNOWN`, `APP_SETTINGS_INVALID`, `ROOM_NOT_CONFIGURED`, `ROOM_SETTINGS_FROZEN`) — core-внутренние; `ROOM_SETTINGS_FROZEN` намеренно совпадает строкой с зарезервированным кодом SDK-контракта (маппинг 1:1). Коды membership-среза (`ROOM_JOIN_DENIED`, `JOIN_RATE_LIMITED`, `ROOM_PARTICIPANT_LIMIT_REACHED`) — тоже core-внутренние, маппинг наружу — обязанность этого же транспорта (REQ-SEC-006).
 
 **Для плана realtime read:** проекции appSettings (ядро проецирует конфиг наравне с состоянием, ADR-008).
 
@@ -69,34 +76,34 @@
 
 ## Осталось недоделанным
 
-- **Батч 3 плана membership/guest-join** (Tasks 5–6 + финальное whole-branch ревью ветки) — subagent-driven, новая сессия (см. «Следующее действие»).
+- **Мердж ветки + push** — решение владельца (см. «Следующее действие»).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-07-29, вечер (батч 2 membership/guest-join: Tasks 3–4)
+## Session 2026-07-29, ночь (батч 3 membership/guest-join: Tasks 5–6 + финальное ревью)
 
 ### Что сделано
 
-- **Task 3 (миграция + код/политика в create)** — COMPLETE, commits `6ec1277` + fix `46363d0`. TDD RED→GREEN, unit 80/80, int 59/59, lint+typecheck чисто. Ревью: 1 Important (классификатор коллизии матчил несуществующую форму ошибки — топ-левел `23505` вместо P2010-обёртки) → fix-раунд 1: классификатор исправлен + 9 юнит-тестов на форму ошибки; re-review PASS. Отклонения, принятые ревью: re-read через `findUniqueOrThrow` (raw `$queryRaw` не применяет `@map` enum), ассерт `lower(email)` без кавычек (депарс Postgres), вынужденные правки двух старых raw-SQL тестов (NOT NULL `code`) и call-site в event-log.
-- **Task 4 (createGuest + ORGANIZER-membership в транзакции create)** — COMPLETE, commit `60ee3f6`. TDD RED→GREEN, int 63/63, unit 80/80, lint+typecheck чисто. Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (в roll-up леджера). Все 3 call-site `new RoomService(` обновлены под 5-аргументный конструктор.
-- Миграция `20260729164500_membership_guest_join` применена и заморожена (рукописный частичный индекс `Membership_single_organizer_key`, REQ-DEV-006).
-- Follow-up пакет identity-среза подобран планом (presence-апгрейд + кросс-kind тест) — исполнен в Task 3.
-- Pre-flight конфликтов не было (скан чист ещё с батча 1); контроллер-ноутс плана сработали как заявлено.
+- **Task 5 (JoinRateLimiter + MembershipService.join)** — COMPLETE, commit `a123f0d`. Процессный казус: первый implementer-субагент выполнил и закоммитил задачу, но умер на API-таймауте до отчёта; второй implementer верифицировал дословное соответствие брифу и прогнал все гейты (limiter unit 3/3, join int 15/15, unit 83/83, int 78/78, lint+typecheck чисто). Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (roll-up).
+- **Task 6 (экспорты, wiring, полные гейты + живой boot)** — COMPLETE, commits `d70f919` (fix: placeholder `DATABASE_URL` в health e2e — ConfigModule валидирует env при boot AppModule, REQ-OPS-003) + `47d7105` (wiring). Полная лана из корня зелёная: lint, typecheck, unit 268, int 78, boundary-check 0, guardrails 3/3, build. Живой docker boot: `/health/ready` 200, 6 миграций, последняя `20260729164500_membership_guest_join`; `down -v`, `lt-pg` не тронут.
+- **Финальное whole-branch ревью ветки** (`a6d53b8..47d7105`, 10 коммитов, opus): «Ready to merge: With fixes» — 0 Critical, 1 Important (`TEST_CONFIG` в трёх int-spec'ах — pre-committed триггер извлечения сработал). Fix wave `107e12d` (извлечение в `src/testing/test-config.ts` + единый источник дефолта лимита), scoped re-review: ALL ADDRESSED. Остальные minors — parked с рулингами в леджере; самые ценные перенесены в follow-up пакеты выше (транспортный срез).
+- Три API-обрыва субагентов за сессию (таймауты/connection closed) — во всех случаях работа восстановлена резюмом агента или верификацией уже сделанного коммита; леджер + отчёты оказались достаточны.
 
 ### Коммиты этой сессии
 
-- `6ec1277` feat(core): membership schema + room code & join policy in create (REQ-ID-013, REQ-ID-002, REQ-ID-011)
-- `46363d0` fix(core): match P2010-wrapped 23505 in room code collision classifier (REQ-ID-013)
-- `60ee3f6` feat(core): IdentityService.createGuest + organizer membership on room create (REQ-ID-003, REQ-ID-011)
+- `a123f0d` feat(core): guest join flow with entry limits (REQ-ID-002, REQ-ID-003, REQ-ID-006, REQ-ID-013)
+- `d70f919` fix(server): set DATABASE_URL placeholder for AppModule boot in health e2e (REQ-OPS-003)
+- `47d7105` feat(core): wire identity/membership modules into the app (REQ-ID-002)
+- `107e12d` refactor(core): extract shared TEST_CONFIG into src/testing (REQ-OPS-003)
 - плюс handoff-коммит. Всё на ветке `phase-1-membership-guest-join`, не пушено (push — решение владельца).
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (`mm-migrate` удалён после authoring'а миграции).
-- Untracked `AGENTS.md` в корне — не трогать.
-- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — Tasks 1–4 COMPLETE с разборами ревью и fix-раунда; briefs/reports/диффы ревью рядом. `git clean -fdx` уничтожит.
-- Внешних side-effects не было (ни push, ни прод-тестов).
+- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (boot-смоук завершён `down -v`).
+- Untracked `AGENTS.md` в корне — не трогать (вопрос владельцу о его судьбе всё ещё открыт).
+- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — все 6 tasks COMPLETE + итоги финального ревью с рулингами triage; briefs/reports/диффы рядом. `git clean -fdx` уничтожит.
+- Внешних side-effects не было (ни push, ни прод-тестов; интеграционная лана — только throwaway testcontainers).
 
 ### Осталось недоделанным
 
-- Батч 3 (Tasks 5–6 + финальное ревью ветки) — новая сессия (см. «Следующее действие»).
+- Мердж ветки + push — решение владельца (навык finishing-a-development-branch предъявит опции).
 - Юрист — гейт 1 открыт, действие вне агента.
