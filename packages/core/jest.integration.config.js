@@ -7,5 +7,5 @@ module.exports = {
   roots: ['<rootDir>/src'],
   testMatch: ['**/*.int-spec.ts'],
   testTimeout: 120000, // container pull + start
-  maxWorkers: 1, // one shared container per file; avoid parallel DB contention
+  maxWorkers: 1, // one container per describe block (startTestDb); avoid parallel DB contention
 };

@@ -6,7 +6,10 @@ describe('integration harness', () => {
 
   beforeAll(async () => {
     db = await startTestDb();
-    await seedIdentity(db.prisma, { id: '00000000-0000-0000-0000-000000000001' });
+    await seedIdentity(db.prisma, {
+      id: '00000000-0000-0000-0000-000000000001',
+      email: 'harness@example.test',
+    });
   }, 120000);
 
   afterAll(async () => {
@@ -15,7 +18,7 @@ describe('integration harness', () => {
 
   it('applies the migration and can round-trip a Room row', async () => {
     const created = await db.prisma.room.create({
-      data: { organizerId: '00000000-0000-0000-0000-000000000001' },
+      data: { organizerId: '00000000-0000-0000-0000-000000000001', code: 'harness01' },
     });
     expect(created.status).toBe('DRAFT');
     expect(created.deletedAt).toBeNull();

@@ -1,9 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { Room, $Enums, Prisma } from '@prisma/client';
-import type { CoreEventName } from '@mymozhem/sdk';
+import { roomJoinPolicySchema, type CoreEventName, type RoomJoinPolicy } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { APP_CONFIG } from '../config/config.tokens';
+import type { AppConfig } from '../config/config.schema';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import { generateRoomCode, isRoomCodeCollision } from './room-code';
 import {
   assertTransition,
   assertDeletable,
@@ -42,20 +45,41 @@ export class RoomService {
     private readonly prisma: PrismaService,
     private readonly eventLog: EventLogService,
     private readonly appRegistry: AppRegistryService,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
-  async create(organizerId: string): Promise<Room> {
-    // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
-    // INSERT — the WHERE EXISTS predicate is the single source of truth, no
-    // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
-    // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
-    // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
-    // The same predicate lives in the "Identity_registered_email_key" index
-    // condition (design §7) — change both or neither.
-    // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
+  async create(organizerId: string, joinPolicy: RoomJoinPolicy = 'guests'): Promise<Room> {
+    const policy = roomJoinPolicySchema.parse(joinPolicy);
+    // Retry on code collision lives OUTSIDE any transaction: a failed statement aborts
+    // the whole Postgres transaction, so retrying inside one is pointless.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const code = generateRoomCode(this.config.ROOM_CODE_MIN_LEN);
+      try {
+        return await this.insertRoom(organizerId, code, policy);
+      } catch (e) {
+        if (attempt < 2 && isRoomCodeCollision(e)) continue;
+        throw e;
+      }
+    }
+    throw new Error('unreachable: the retry loop exits via return or throw');
+  }
+
+  // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
+  // INSERT — the WHERE EXISTS predicate is the single source of truth, no
+  // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
+  // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
+  // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
+  // The same predicate lives in the "Identity_registered_email_key" index
+  // condition (design §7) — change both or neither.
+  // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
+  private async insertRoom(
+    organizerId: string,
+    code: string,
+    joinPolicy: RoomJoinPolicy,
+  ): Promise<Room> {
     const rows = await this.prisma.$queryRaw<Room[]>`
-      INSERT INTO room."Room" ("id", "organizerId", "status", "createdAt", "updatedAt")
-      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', now(), now()
+      INSERT INTO room."Room" ("id", "organizerId", "status", "code", "joinPolicy", "createdAt", "updatedAt")
+      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', ${code}, ${joinPolicy}::"room"."RoomJoinPolicy", now(), now()
       WHERE EXISTS (
         SELECT 1 FROM identity."Identity"
         WHERE "id" = ${organizerId}::uuid
@@ -69,7 +93,9 @@ export class RoomService {
         `Organizer ${organizerId} is not a live REGISTERED identity`,
       );
     }
-    return rows[0];
+    // Re-read через клиент: $queryRaw отдаёт сырое DB-значение enum ('guests'), а
+    // контракт метода — Prisma-имя ('GUESTS'); маппинг @map выполняет только клиент.
+    return this.prisma.room.findUniqueOrThrow({ where: { id: rows[0].id } });
   }
 
   // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,

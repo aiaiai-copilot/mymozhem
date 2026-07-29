@@ -5,6 +5,7 @@ import { readRoomLog } from '../testing/read-room-log';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
+import type { AppConfig } from '../config/config.schema';
 import { RoomService } from './room.service';
 import {
   RoomError,
@@ -20,8 +21,22 @@ const ORG = '00000000-0000-0000-0000-000000000001';
 // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
 const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
 
+const TEST_CONFIG: AppConfig = {
+  NODE_ENV: 'test',
+  PORT: 3000,
+  DATABASE_URL: 'postgresql://unused',
+  ROOM_CODE_MIN_LEN: 8,
+  ROOM_PARTICIPANT_LIMIT: 500,
+  JOIN_RATE_LIMIT_IP: 20,
+};
+
 const makeService = (db: TestDb) =>
-  new RoomService(db.prisma, new EventLogService(), new AppRegistryService([validManifests[0]]));
+  new RoomService(
+    db.prisma,
+    new EventLogService(),
+    new AppRegistryService([validManifests[0]]),
+    TEST_CONFIG,
+  );
 
 const configureQuiz = (service: RoomService, roomId: string) =>
   service.configure(roomId, { appId: 'quiz', manifestVersion: 1, settings: QUIZ_SETTINGS });
@@ -217,8 +232,8 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
   it('rejects an INSERT of a row that is both ACTIVE and soft-deleted, at the database level', async () => {
     await expect(
       db.prisma.$executeRawUnsafe(
-        `INSERT INTO room."Room" (id, "organizerId", status, "deletedAt", "updatedAt")
-         VALUES (gen_random_uuid(), $1, 'ACTIVE', now(), now())`,
+        `INSERT INTO room."Room" (id, "organizerId", status, code, "deletedAt", "updatedAt")
+         VALUES (gen_random_uuid(), $1, 'ACTIVE', 'rawcheck1', now(), now())`,
         ORG,
       ),
     ).rejects.toThrow(/Room_softdelete_not_active/);
@@ -241,8 +256,8 @@ describe('Room organizerId FK', () => {
   it('rejects a room whose organizerId is not an identity, at the database level', async () => {
     await expect(
       db.prisma.$executeRawUnsafe(
-        `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
-         VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
+        `INSERT INTO room."Room" (id, "organizerId", status, code, "updatedAt")
+         VALUES (gen_random_uuid(), $1, 'DRAFT', 'rawfk001', now())`,
         '00000000-0000-0000-0000-0000000000ee',
       ),
     ).rejects.toThrow(/Room_organizerId_fkey/);
@@ -529,6 +544,7 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([]),
+      TEST_CONFIG,
     );
     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppManifestUnknownError);
@@ -568,5 +584,45 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
       type: 'core.room.activated',
       payload: { appId: final.appId, manifestVersion: final.manifestVersion },
     });
+  });
+});
+
+describe('RoomService.create room code and join policy (REQ-ID-013, REQ-ID-002)', () => {
+  let db: TestDb;
+  let service: RoomService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    service = makeService(db);
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+  });
+
+  it('creates a room with an 8-char safe-alphabet code and guests policy by default', async () => {
+    const room = await service.create(ORG);
+    expect(room.code).toMatch(/^[abcdefghjkmnpqrstuvwxyz23456789]{8}$/);
+    expect(room.joinPolicy).toBe('GUESTS');
+  });
+
+  it('generates distinct codes for two rooms', async () => {
+    const a = await service.create(ORG);
+    const b = await service.create(ORG);
+    expect(a.code).not.toBe(b.code);
+  });
+
+  it('honours an explicit join policy', async () => {
+    const room = await service.create(ORG, 'registered');
+    expect(room.joinPolicy).toBe('REGISTERED');
+  });
+
+  it('rejects an invalid join policy before touching the DB', async () => {
+    await expect(service.create(ORG, 'public' as never)).rejects.toThrow();
   });
 });

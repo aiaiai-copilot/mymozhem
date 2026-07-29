@@ -3,10 +3,20 @@ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import type { AppConfig } from '../config/config.schema';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
+
+const TEST_CONFIG: AppConfig = {
+  NODE_ENV: 'test',
+  PORT: 3000,
+  DATABASE_URL: 'postgresql://unused',
+  ROOM_CODE_MIN_LEN: 8,
+  ROOM_PARTICIPANT_LIMIT: 500,
+  JOIN_RATE_LIMIT_IP: 20,
+};
 
 describe('EventLogService.commitCoreEvent', () => {
   let db: TestDb;
@@ -20,6 +30,7 @@ describe('EventLogService.commitCoreEvent', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([validManifests[0]]),
+      TEST_CONFIG,
     );
     eventLog = new EventLogService();
   }, 120000);
