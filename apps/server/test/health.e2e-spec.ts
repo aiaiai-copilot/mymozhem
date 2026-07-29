@@ -8,6 +8,9 @@ describe('Health (e2e)', () => {
   const prismaStub = { isHealthy: jest.fn(), onModuleInit: jest.fn(), onModuleDestroy: jest.fn() };
 
   beforeAll(async () => {
+    // AppModule now includes ConfigModule (REQ-OPS-003): env is validated at boot.
+    // PrismaService is stubbed below, so a placeholder URL is sufficient.
+    process.env.DATABASE_URL ??= 'postgresql://stub:stub@localhost:5432/stub';
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
       .useValue(prismaStub)

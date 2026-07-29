@@ -17,3 +17,7 @@ export * from './identity/identity-kind';
 export * from './identity/identity-kind.fixtures';
 export * from './membership/member-role';
 export * from './membership/member-role.fixtures';
+export * from './identity/display-name';
+export * from './identity/display-name.fixtures';
+export * from './membership/room-join-policy';
+export * from './membership/room-join-policy.fixtures';

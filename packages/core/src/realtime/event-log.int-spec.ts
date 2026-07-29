@@ -2,7 +2,11 @@ import { ContractError, validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
+import { TEST_CONFIG } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
+import { MembershipService } from '../membership/membership.service';
+import { JoinRateLimiter } from '../membership/join-rate-limiter';
+import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
 
@@ -20,6 +24,13 @@ describe('EventLogService.commitCoreEvent', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([validManifests[0]]),
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+      ),
+      TEST_CONFIG,
     );
     eventLog = new EventLogService();
   }, 120000);

@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["identity", "realtime", "room"]
+  schemas  = ["identity", "membership", "realtime", "room"]
 }
 
 enum RoomStatus {
@@ -12,6 +12,16 @@ enum RoomStatus {
   ACTIVE
   COMPLETED
   CANCELLED
+
+  @@schema("room")
+}
+
+// REQ-ID-002: join policy — атрибут комнаты, дефолт guests (ADR-004). Значения в БД —
+// lowercase-строки спеки (прецедент EventVisibility); Prisma-имена — как у MemberRole.
+enum RoomJoinPolicy {
+  GUESTS      @map("guests")
+  REGISTERED  @map("registered")
+  INVITE_ONLY @map("invite_only")
 
   @@schema("room")
 }
@@ -25,17 +35,20 @@ enum RoomStatus {
 // часть миграции room_app_config). Единственный путь записи — RoomService.configure;
 // заморозка — предикат status = 'DRAFT' в его guarded UPDATE, не флаг.
 model Room {
-  id              String     @id @default(uuid()) @db.Uuid
-  organizer       Identity   @relation(fields: [organizerId], references: [id])
-  organizerId     String     @db.Uuid
-  status          RoomStatus @default(DRAFT)
+  id              String         @id @default(uuid()) @db.Uuid
+  organizer       Identity       @relation(fields: [organizerId], references: [id])
+  organizerId     String         @db.Uuid
+  status          RoomStatus     @default(DRAFT)
+  code            String         @unique
+  joinPolicy      RoomJoinPolicy @default(GUESTS)
   appId           String?
   manifestVersion Int?
   appSettings     Json?
   deletedAt       DateTime?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
   logEvents       LogEvent[]
+  memberships     Membership[]
 
   @@schema("room")
 }
@@ -53,14 +66,16 @@ enum IdentityKind {
 // REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
 // NOT a Prisma preview feature.
 model Identity {
-  id        String       @id @default(uuid()) @db.Uuid
-  kind      IdentityKind
-  email     String?
-  deletedAt DateTime?
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
-  rooms     Room[]
-  logEvents LogEvent[]
+  id          String       @id @default(uuid()) @db.Uuid
+  kind        IdentityKind
+  email       String?
+  displayName String?
+  deletedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  rooms       Room[]
+  logEvents   LogEvent[]
+  memberships Membership[]
 
   @@schema("identity")
 }
@@ -92,4 +107,30 @@ model LogEvent {
 
   @@id([roomId, seq])
   @@schema("realtime")
+}
+
+enum MemberRole {
+  ORGANIZER
+  MODERATOR
+  PARTICIPANT
+  SPECTATOR
+
+  @@schema("membership")
+}
+
+// Membership — связь identity с комнатой, несущая роль (REQ-ID-011). CRUD-домен
+// (ADR-005): изменения членства в лог не пишутся. ORGANIZER-membership создаётся в
+// транзакции RoomService.create; единственность организатора — частичный индекс
+// "Membership_single_organizer_key" (рукописная часть миграции, REQ-DEV-006).
+model Membership {
+  id         String    @id @default(uuid()) @db.Uuid
+  room       Room      @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  roomId     String    @db.Uuid
+  identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Restrict)
+  identityId String    @db.Uuid
+  role       MemberRole
+  joinedAt   DateTime  @default(now())
+
+  @@unique([roomId, identityId])
+  @@schema("membership")
 }

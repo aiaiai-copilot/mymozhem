@@ -24,9 +24,19 @@ describe('Identity registered-email partial unique index', () => {
       WHERE schemaname = 'identity' AND indexname = 'Identity_registered_email_key'
     `;
     expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
+    // Postgres deparses the lowercase identifier без кавычек: миграция пишет
+    // lower("email"), pg_indexes отдаёт lower(email).
+    expect(rows[0].indexdef).toContain('lower(email)');
     expect(rows[0].indexdef).toMatch(/lower/i);
     expect(rows[0].indexdef).toContain('REGISTERED');
     expect(rows[0].indexdef).toMatch(/deletedAt" IS NULL/i);
+  });
+
+  it('allows a GUEST row with the email of a live REGISTERED row', async () => {
+    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
+    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
+    expect(await db.prisma.identity.count()).toBe(2);
   });
 
   it('rejects a second live REGISTERED row with the same email', async () => {
