@@ -13,14 +13,21 @@ export function generateRoomCode(length: number): string {
   return code;
 }
 
-// Unique violation on the room code (index "Room_code_key"). Driver-adapter raw
-// errors surface the Postgres SQLSTATE; the retry loop in create() is a safety net —
-// a collision is a ~1e-12 event and intentionally untested.
+// Unique violation on the room code (index "Room_code_key"). Prisma 7 + adapter-pg
+// wraps every failing $queryRaw in PrismaClientKnownRequestError with code P2010 and
+// message `Raw query failed. Code: \`23505\`. Message: \`duplicate key value violates
+// unique constraint "Room_code_key"...\`` — the raw SQLSTATE never reaches the top
+// level (verified against @prisma/client@7.8.0 runtime + @prisma/adapter-pg@7.8.0
+// convertError: 23505 → UniqueConstraintViolation with originalCode '23505', also
+// reachable as meta.driverAdapterError.cause.originalCode). The retry loop in
+// create() is a safety net — a collision is a ~1e-12 event and intentionally untested
+// end-to-end; the classifier itself is unit-tested in room-code.spec.ts.
 export function isRoomCodeCollision(e: unknown): boolean {
   const err = e as { code?: string; message?: string } | null;
   return (
-    err?.code === '23505' &&
+    err?.code === 'P2010' &&
     typeof err.message === 'string' &&
+    err.message.includes('23505') &&
     err.message.includes('Room_code_key')
   );
 }
