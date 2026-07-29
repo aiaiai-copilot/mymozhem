@@ -4,6 +4,8 @@ import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
+import { JoinRateLimiter } from '../membership/join-rate-limiter';
+import { IdentityService } from '../identity/identity.service';
 import type { AppConfig } from '../config/config.schema';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
@@ -31,7 +33,12 @@ describe('EventLogService.commitCoreEvent', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([validManifests[0]]),
-      new MembershipService(db.prisma),
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+      ),
       TEST_CONFIG,
     );
     eventLog = new EventLogService();

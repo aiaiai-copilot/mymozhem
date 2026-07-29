@@ -5,6 +5,8 @@ import { readRoomLog } from '../testing/read-room-log';
 import { EventLogService } from '../realtime/event-log.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
+import { JoinRateLimiter } from '../membership/join-rate-limiter';
+import { IdentityService } from '../identity/identity.service';
 import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
 import type { AppConfig } from '../config/config.schema';
 import { RoomService } from './room.service';
@@ -36,7 +38,12 @@ const makeService = (db: TestDb) =>
     db.prisma,
     new EventLogService(),
     new AppRegistryService([validManifests[0]]),
-    new MembershipService(db.prisma),
+    new MembershipService(
+      db.prisma,
+      new IdentityService(db.prisma),
+      new JoinRateLimiter(1000),
+      TEST_CONFIG,
+    ),
     TEST_CONFIG,
   );
 
@@ -554,7 +561,12 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
       db.prisma,
       new EventLogService(),
       new AppRegistryService([]),
-      new MembershipService(db.prisma),
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+      ),
       TEST_CONFIG,
     );
     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);
