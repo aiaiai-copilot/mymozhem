@@ -1,9 +1,11 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ВЫБРАН, спроектирован и спланирован — к исполнению)
-**Branch:** `main` (2 коммита впереди `origin/main`: `73fd918` дизайн + `7e66695` план; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез ИСПОЛНЕН и прошёл финальное whole-branch ревью — MERGE-READY; reuse-логирование по решению владельца добавлено (`519fd8a`); осталось решение о мердже)
+**Branch:** `phase-1-transport-http-auth` (17 коммитов над `f4ec5a7` с `main`: 11 task-коммитов + 5 handoff + 1 final-fix; `main` на 2 коммита впереди `origin/main`; **push и мердж — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Следующий срез — **транспортный auth/HTTP** — выбран владельцем, дизайн утверждён, план реализации написан и закоммичен. Исполнение — **subagent-driven в новой сессии** (явное решение владельца). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, **транспортный auth/HTTP** — реализованы; все кроме транспорта слиты в `main`, транспорт — на ветке, ждёт финального ревью и мерджа. Транспорт исполнялся subagent-driven батчами (решение владельца: батч = сессия): 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 ✅; 5) tasks 11-12 ✅. Леджер исполнения: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` (миноры и adjudication каждой задачи — там; леджер не в git). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+
+**Что построил срез:** `POST /rooms/join` + `POST /auth/refresh`; access JWT HS256 + httpOnly refresh-cookie с ротацией семейств и reuse-detection (`identity."Session"`, REQ-ID-007/008/016); единый фильтр ошибок, наружу ровно `{code}` (REQ-SEC-006); join/refresh rate-limit с lazy sweep (REQ-ID-006, REQ-SEC-007); helmet/CORS-allowlist/trustProxy из конфига (REQ-SEC-008); fail-closed JWT_SECRET (REQ-SEC-002); SDK-контракт 1.1.0; seed-скрипт `pnpm create-room` (REQ-SEC-001). Гейты: build/lint/typecheck/test(320)/test:int(88)/boundary-check/guardrails — зелёные; docker smoke: 403 ROOM_JOIN_DENIED на join с неверным кодом.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,9 +20,32 @@
 
 ## Следующее действие
 
-**Исполнение плана транспортного среза** — `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven (свежий субагент на задачу, двухстадийное ревью между задачами — как в membership-срезе). Порядок задач значим: 1 (SDK) → 2 (config) → 3 (миграция) → 4-5 (TokenService) → 6 (лимитер, независима) → 7 (фильтр) → 8 (transport module) → 9 (server wiring) → 10 (e2e) → 11 (seed-скрипт) → 12 (гейты + smoke + этот HANDOFF).
+**Мердж ветки `phase-1-transport-http-auth` в `main`** (superpowers:finishing-a-development-branch) — финальное ревью пройдено (MERGE-READY, единственный Important исправлен по решению владельца, re-review clean). Мердж и push — решение владельца; после мерджа этот HANDOFF переписывается под следующий срез.
 
-Перед стартом — напомнить владельцу про **push** (`main` на 2 коммита впереди `origin/main`).
+**Кандидаты на следующий срез** (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `TokenService.verifyAccessToken` + claims-формат), event-commit (отложенные тесты), OAuth-срез (`POST /rooms` + Google-флоу).
+
+**Остаточные риски, принимаемые мерджем (из финального ревью):**
+- Строгая ротация refresh: потерянный ответ → безобидный ретрай старого токена → ревок семейства (REQ-ID-007 как спроектировано, без grace-окна; дизайн §4 принял strict detection).
+- Access-токены живут ≤15 мин после терминации комнаты/исключения (принятый компромисс дизайна §11; апгрейд — revocation по `sid`).
+- `/health/ready` 503 теперь отдаёт `{code:'INTERNAL_ERROR'}` вместо `{status,db}` (статус неизменен, пробы не затронуты) — следствие глобального фильтра.
+- **Для OAuth-среза:** `TokenService.sessionExpiry()` применяет guest-cap `min(REFRESH,GUEST_TTL)` безусловно — REGISTERED-ротация не должна его наследовать (token.service.ts, design §10).
+- **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
+
+**Принятые при исполнении отклонения от плана (все прошли ревью, зафиксированы в леджере):**
+- `packages/core` без fastify-зависимости → структурные типы `RequestLike`/`ReplyLike` (`transport/http.types.ts`) вместо `FastifyReply/FastifyRequest` (чистота границы, ADR-002-friendly).
+- HttpException сохраняет свой статус (404→`REQUEST_INVALID`, 503→`INTERNAL_ERROR`) — плановая таблица важнее код-скетча.
+- Race-тест rotate: alive-count по `{revokedAt: null, replacedById: null}` (design §4 метит ротированные через `replacedById`).
+- Терминальная комната в тестах — через `cancel` (DRAFT→CANCELLED); DRAFT→COMPLETED нелегален.
+- `NODE_OPTIONS=--experimental-vm-modules` в test-скрипте apps/server (ESM-only `cookie@2` под jest 29 CJS — верифицировано, изолировано).
+- Seed-скрипт импортирует core через `dist/*.js` subpath'ы (баррел тянет testcontainers — см. ограничения ниже).
+- **Финальное ревью (fable, whole-branch):** MERGE-READY. Единственный Important — reuse-detection не логировался, хотя дизайн §11 обосновывает коллапс кодов серверным логом — по решению владельца исправлен до мерджа (`519fd8a`: `logger.warn` на AuthError-ветке, wire неизменён, токен-материала в логах нет). Все deferred-миноры леджера оттриажены: fix-before-merge нет.
+
+Опыт батча 1 для следующих сессий:
+- Имплементеры дважды пытались писать report/brief в `~/.superpowers` вместо репозиторного `.superpowers` — после каждого имплементера проверять наличие report-файла в workspace ДО диспатча ревьюера (промпт даёт абсолютный путь, но проверка дешевле резюма агента).
+- Плановый jest-фильтр Task 3 `-t "Session schema"` матчит ноль тестов (кавычка в имени describe) — писать в диспатчах рабочую форму фильтра, ловушка «0 tests, exit 0» реальна.
+- Docker Desktop нужен уже с Task 3 (миграция) и далее (int-ланы, e2e, smoke).
+
+Перед стартом батча — напомнить владельцу про **push** (`main` на 2 коммита впереди `origin/main` + ветка среза локальная).
 
 **Ключевые решения владельца, зашитые в дизайн (§0) — не переоткрывать при исполнении:**
 - Google OAuth НЕ в срезе; комнаты к первому событию — seed-скриптом через core-сервисы (Task 11), служебный REGISTERED-организатор без логина.
@@ -54,7 +79,10 @@
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`. Любое изменение — только новой миграцией.
+- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`, `20260730101037_auth_sessions`. Любое изменение — только новой миграцией.
+- **Prod-баррел core тянет testcontainers в require-time** (design §9 — осознанное расширение ради e2e). Безопасно, пока Dockerfile тащит полные `node_modules` в runtime-стейдж; упадёт при pruning devDependencies. Follow-up-кандидат: вынести testing в отдельный entry point (`@mymozhem/core/testing`); не давать workaround с dist-subpath-импортами (create-room.mjs) стать постоянным.
+- **`NODE_OPTIONS=--experimental-vm-modules` зашит в test-скрипт apps/server** — `@fastify/cookie@11` динамически импортирует ESM-only `cookie@2`, что ломает jest 29 CJS. Изолирован в test-скрипте. Триггеры пересмотра: jest 30 или `@fastify/cookie` на `require(ESM)` (Node 24).
+- **Refresh-кука `Secure` при `NODE_ENV=production`** — compose-смоук по plain HTTP не сможет round-trip куки cookie-jar клиентом; ассертить `Set-Cookie`-заголовок.
 - **Конвенция порядка блокировок:** advisory lock комнаты — всегда leaf-most; транзакция, захватившая его, не должна после этого писать в `room."Room"` (порядок безопасен: `transition` берёт row-lock до advisory lock, эмит — последним шагом; `commitCoreEvent` не трогает Room; `configure` advisory lock не берёт и цикла не создаёт — проверено финальным ревью appSettings).
 - **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
 - **Prisma 7.8 adapter-pg: форма ошибок raw-запросов.** Падающий `$queryRaw` оборачивается в `PrismaClientKnownRequestError` с кодом `P2010`; SQLSTATE сидит внутри message (``Raw query failed. Code: `23505`. Message: ...``) и в `meta.driverAdapterError.cause.originalCode`. Топ-левел `err.code` НИКОГДА не равен SQLSTATE — матчить как `code === 'P2010'` + подстроки в message (прецедент: `isRoomCodeCollision`, commit `46363d0`). Также: `$queryRaw` возвращает сырое DB-значение enum (`'guests'`), а не Prisma-имя из `@map` (`'GUESTS'`) — клиентский `@map` применяет только десериализация клиента; при `RETURNING *` из raw INSERT нужен re-read через клиент (`findUniqueOrThrow`), как в `insertRoom`.
@@ -69,6 +97,9 @@
 
 Самое ценное из накопленного:
 
+- **Вынести testing-экспорты из prod-баррела core** в отдельный entry point (см. ограничение выше) — при этом починить и `create-room.mjs` обратно на баррел (его dist-subpath-импорты молча сломаются при появлении `exports` в core).
+- **`create-room.mjs`: findFirst по точному `email`, а индекс — по `lower(email)`** — при кейс-варианте email будет сырая unique-violation вместо reuse (edge case seed-скрипта; `mode: 'insensitive'` или комментарий).
+
 - **`updateManyAndReturn` доступен на закреплённой Prisma 7.8.0** — схлопнет 3 запроса в 2 в обеих мутациях `RoomService` (transition/softDelete) и попутно уберёт дублирование хвоста `if (count===0) throw` + re-read. Проверено ревьюером, не гипотеза. **Осторожно:** `transition` — транзакция с побочным эмитом; применение updateManyAndReturn не должно разорвать атомарность «UPDATE + лог». После appSettings-среза в transition есть ещё и post-lock re-read — его роль (консистентный снимок пина) не спутать с рефакторингом. Аналогичный 2-запросный паттерн и в `configure` — тот же кандидат.
 - **Нет гейта на дрейф миграций.** `prisma migrate diff --from-migrations` здесь непригоден: Prisma 7.8 требует `datasource.shadowDatabaseUrl` в `prisma.config.ts`, которого нет. Стоит завести настоящий гейт, пока миграций мало.
 - **Общая рекурсивная `jsonValueSchema`** для payload в `log-event`/`projected-event` — `z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002.
@@ -77,8 +108,7 @@
 
 ## Осталось недоделанным
 
-- **Push `main`** (2 коммита впереди `origin/main`) — решение владельца.
-- **Исполнение плана транспортного среза** — следующая сессия, subagent-driven (решение владельца).
+- **Мердж ветки + push** (`main` 2 коммита впереди `origin/main` + ветка) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
 ## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
@@ -108,4 +138,28 @@
 
 - Push `main` (2 коммита: дизайн + план) — решение владельца.
 - Исполнение плана — следующая сессия, subagent-driven.
+- Юрист — гейт 1 открыт, действие вне агента.
+
+## Session 2026-07-30 (исполнение транспортного среза, батчи 1-5)
+
+### Что сделано
+
+- Все 12 задач плана `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md` исполнены subagent-driven (свежий имплементер + двухстадийное ревью на задачу), без единого fix-раунда — все ревью clean с первого прохода; миноры отложены в SDD-леджер.
+- Батчевая схема владельца (батч = сессия) в этой сессии выполнена подряд: 1-3, 4-5, 6-8, 9-10, 11-12.
+- Гейты зелёные (Task 12): build 3/3, lint, typecheck 5/5, unit 320, int 88, boundary-check, guardrails. Docker smoke: `/health/ready` 200, `POST /rooms/join` → 403 `{"code":"ROOM_JOIN_DENIED"}`, `docker compose down -v`, `lt-pg` нетронут. Неблокирующее предупреждение Prisma об openssl-1.1.x в контейнере — косметика.
+- HANDOFF переписан под финальное ревью и мердж; обязательные строки из ревью батчей 4-5 внесены в ограничения и follow-up.
+
+### Коммиты этой сессии (ветка phase-1-transport-http-auth, над f4ec5a7)
+
+`6ca517e` SDK DTO/коды, контракт 1.1.0 · `5e3609d` config · `7503459` миграция Session · `eaba0d8` TokenService issue/verify · `d71e1b2` rotate · `83ce6da` limiter eviction · `4853742` exception filter · `4394208` TransportModule · `55afe8f` server wiring · `a6bb3ad` HTTP e2e · `386802e` create-room seed · `519fd8a` final-fix reuse-логирование · + handoff-коммиты батчей · (+ handoff-коммит этой правки)
+
+### Локальное состояние (не в git)
+
+- Docker Desktop запущен (нужен для int/e2e). `lt-pg` на 5432 нетронут. Эфемерные контейнеры (mm-migrate 55434, mm-seed-check 55435) удалены.
+- SDD-леджер: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — deferred-миноры всех 12 задач; финальный ревьюер триажит их до мерджа. `git clean -fdx` уничтожит.
+- Untracked `AGENTS.md` — вопрос владельцу открыт.
+
+### Осталось недоделанным
+
+- Финальное whole-branch ревью → мердж (решение владельца) → push.
 - Юрист — гейт 1 открыт, действие вне агента.

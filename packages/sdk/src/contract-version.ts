@@ -5,7 +5,7 @@ import { ContractError } from './errors/error-codes';
 // contract version — packages/sdk/package.json is kept equal to this by a contract
 // test. Versioning from day one is the enforcement mechanism of the boundary, not
 // preparation for a future consumer (ADR-002).
-export const CONTRACT_VERSION = '1.0.0';
+export const CONTRACT_VERSION = '1.1.0';
 
 // A manifest declares the range of contract versions it is compatible with; the
 // core checks it at registration (REQ-CTR-004). We normalize the range with semver

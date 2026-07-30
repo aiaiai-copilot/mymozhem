@@ -18,6 +18,12 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql://mymozhem:mymozhem@postgres:5432/mymozhem?schema=public
+      # REQ-SEC-002: обязателен, >=32 байта; без значения в окружении compose не стартует.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (>=32 bytes)}
+      # REQ-SEC-008: allowlist origin через запятую; пусто = CORS-заголовки не выдаются.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       PORT: 3000
       NODE_ENV: production
     ports:

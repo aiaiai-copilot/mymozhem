@@ -10,7 +10,8 @@
     "test": "turbo run test",
     "test:int": "turbo run test:int",
     "boundary-check": "depcruise apps packages --config .dependency-cruiser.cjs",
-    "guardrails": "node scripts/verify-guardrails.mjs"
+    "guardrails": "node scripts/verify-guardrails.mjs",
+    "create-room": "pnpm --filter @mymozhem/server run create-room"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

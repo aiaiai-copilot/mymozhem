@@ -18,6 +18,12 @@ describe('contract errors', () => {
       'EVENT_RATE_LIMITED',
       'ROOM_LOG_SEALED',
       'ROOM_SETTINGS_FROZEN',
+      'ROOM_JOIN_DENIED',
+      'ROOM_PARTICIPANT_LIMIT_REACHED',
+      'RATE_LIMITED',
+      'REQUEST_INVALID',
+      'SESSION_INVALID',
+      'INTERNAL_ERROR',
     ]);
   });
 

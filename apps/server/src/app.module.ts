@@ -7,6 +7,7 @@ import {
   PrismaModule,
   RealtimeModule,
   RoomModule,
+  TransportModule,
 } from '@mymozhem/core';
 
 @Module({
@@ -18,6 +19,7 @@ import {
     IdentityModule,
     MembershipModule,
     RealtimeModule,
+    TransportModule,
   ],
 })
 export class AppModule {}

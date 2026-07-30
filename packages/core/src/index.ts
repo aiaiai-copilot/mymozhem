@@ -21,3 +21,15 @@ export * from './membership/membership.service';
 export * from './membership/membership.module';
 export * from './realtime/event-log.service';
 export * from './realtime/realtime.module';
+export * from './auth/auth.constants';
+export * from './auth/auth.errors';
+export * from './auth/token.service';
+export * from './auth/auth.module';
+export * from './transport/transport.module';
+export * from './transport/http-exception.filter';
+export * from './transport/auth.tokens';
+// Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+// строятся на том же testcontainer-посеве, что и core int-спеки.
+export * from './testing/postgres.testcontainer';
+export * from './testing/seed-identity';
+export * from './testing/test-config';

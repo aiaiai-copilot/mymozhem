@@ -21,3 +21,6 @@ export * from './identity/display-name';
 export * from './identity/display-name.fixtures';
 export * from './membership/room-join-policy';
 export * from './membership/room-join-policy.fixtures';
+export * from './auth/join-request';
+export * from './auth/join-request.fixtures';
+export * from './auth/token-response';
