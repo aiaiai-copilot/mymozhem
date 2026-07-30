@@ -66,6 +66,84 @@ export class TokenService {
     return { sub: decoded.sub, sid: decoded.sid, kind: decoded.kind, roomId: typeof decoded.roomId === 'string' ? decoded.roomId : undefined };
   }
 
+  // Ротация (REQ-ID-007) + проверки жизни гостевой сессии (REQ-ID-016). Все отказные
+  // ветки — один SESSION_INVALID наружу; различие только в server-side message.
+  async rotate(refreshToken: string): Promise<IssuedTokens> {
+    const session = await this.prisma.session.findUnique({
+      where: { refreshTokenHash: sha256(refreshToken) },
+    });
+    if (!session) {
+      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'unknown refresh token');
+    }
+    if (session.replacedById !== null) {
+      // Предъявлен уже ротированный токен — сигнал кражи: гасим всё семейство (REQ-ID-007).
+      await this.prisma.session.updateMany({
+        where: { familyId: session.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, `refresh reuse detected, family ${session.familyId} revoked`);
+    }
+    if (session.revokedAt !== null || session.expiresAt.getTime() <= Date.now()) {
+      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'session revoked or expired');
+    }
+
+    const identity = await this.prisma.identity.findUnique({ where: { id: session.identityId } });
+    if (!identity || identity.deletedAt !== null) {
+      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'identity gone');
+    }
+
+    let roomId: string | undefined;
+    if (identity.kind === 'GUEST') {
+      if (identity.createdAt.getTime() + this.config.GUEST_TTL * 1000 <= Date.now()) {
+        throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'guest TTL expired');
+      }
+      // Гость живёт ровно в одной комнате — членство и есть scope сессии (design §4).
+      const membership = await this.prisma.membership.findFirst({ where: { identityId: identity.id } });
+      if (!membership) {
+        throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'membership gone');
+      }
+      const room = await this.prisma.room.findUnique({ where: { id: membership.roomId } });
+      if (!room || room.status === 'COMPLETED' || room.status === 'CANCELLED' || room.deletedAt !== null) {
+        throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'room terminal');
+      }
+      roomId = membership.roomId;
+    }
+
+    const newRefreshToken = randomBytes(32).toString('base64url');
+    const newSessionId = randomUUID();
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Атомарный захват ротации: проигравший гонку видит count=0 → SESSION_INVALID,
+        // семейство НЕ ревокается (гонка ≠ кража, design §4).
+        const claimed = await tx.session.updateMany({
+          where: { id: session.id, replacedById: null, revokedAt: null, expiresAt: { gt: new Date() } },
+          data: { replacedById: newSessionId },
+        });
+        if (claimed.count === 0) {
+          throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'rotation race lost');
+        }
+        await tx.session.create({
+          data: {
+            id: newSessionId,
+            identityId: session.identityId,
+            refreshTokenHash: sha256(newRefreshToken),
+            familyId: session.familyId,
+            expiresAt: this.sessionExpiry(),
+          },
+        });
+      });
+    } catch (err) {
+      if (err instanceof AuthError) throw err;
+      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, `rotation failed: ${(err as Error).message}`);
+    }
+
+    return {
+      accessToken: this.signAccess({ sub: identity.id, sid: newSessionId, kind: identity.kind, roomId }),
+      expiresIn: this.config.ACCESS_TOKEN_TTL,
+      refreshToken: newRefreshToken,
+    };
+  }
+
   protected sessionExpiry(): Date {
     return new Date(Date.now() + Math.min(this.config.REFRESH_TOKEN_TTL, this.config.GUEST_TTL) * 1000);
   }
