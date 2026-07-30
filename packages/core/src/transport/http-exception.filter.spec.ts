@@ -24,10 +24,15 @@ const makeHost = (reply: ReplyMock): ArgumentsHost =>
 describe('HttpExceptionFilter (REQ-SEC-006)', () => {
   // Глушим серверный лог на всём сьюте: 5xx-кейсы иначе печатают исключение в консоль jest.
   let errorSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
   beforeEach(() => {
     errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+    warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
   });
-  afterEach(() => errorSpy.mockRestore());
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
 
   // Полная таблица маппинга design §5 + инвариант REQ-SEC-006: наружу ровно {code}.
   const cases: Array<[string, unknown, number, string]> = [
@@ -84,10 +89,21 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
       expect(errorSpy).toHaveBeenCalledWith(err);
     });
 
-    it('does not log 4xx as server errors', () => {
+    it('logs AuthError message at warn level (design §11: различие reuse/expired/unknown живёт в серверном логе)', () => {
+      const err = new AuthError('SESSION_INVALID', 'refresh reuse detected, family <uuid> revoked');
+      const { filter, reply } = makeFilter();
+      filter.catch(err, makeHost(reply));
+      expect(warnSpy).toHaveBeenCalledWith('refresh reuse detected, family <uuid> revoked');
+      expect(errorSpy).not.toHaveBeenCalled();
+      // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
+      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
+    });
+
+    it('does not log non-auth 4xx at all', () => {
       const { filter, reply } = makeFilter();
       filter.catch(new RoomJoinDeniedError('no room for code'), makeHost(reply));
       expect(errorSpy).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
     });
   });
 });

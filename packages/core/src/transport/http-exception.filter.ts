@@ -34,7 +34,16 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // статус («его status», маппинг design §5); wire-код при этом типизированный.
     const status: number =
       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
-    if (status >= 500) this.logger.error(exception);
+    if (status >= 500) {
+      this.logger.error(exception);
+    } else if (exception instanceof AuthError) {
+      // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
+      // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
+      // токена не оставляет следа для расследования. Message AuthError безопасен:
+      // token.service.ts кладёт туда только фиксированные строки и familyId (UUID),
+      // без token-материала.
+      this.logger.warn(exception.message);
+    }
     void reply.status(status).send({ code });
   }
 
