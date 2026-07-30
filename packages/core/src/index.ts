@@ -25,3 +25,6 @@ export * from './auth/auth.constants';
 export * from './auth/auth.errors';
 export * from './auth/token.service';
 export * from './auth/auth.module';
+export * from './transport/transport.module';
+export * from './transport/http-exception.filter';
+export * from './transport/auth.tokens';
