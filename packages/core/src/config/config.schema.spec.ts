@@ -1,6 +1,6 @@
 import { loadConfig } from './config.schema';
 
-const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db' };
+const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db', JWT_SECRET: 's'.repeat(32) };
 
 describe('loadConfig', () => {
   it('applies defaults when only DATABASE_URL is provided', () => {
@@ -49,5 +49,49 @@ describe('loadConfig', () => {
     } as NodeJS.ProcessEnv);
     expect(cfg.ROOM_CODE_MIN_LEN).toBe(10);
     expect(cfg.JOIN_RATE_LIMIT_IP).toBe(5);
+  });
+
+  it('rejects a missing JWT_SECRET (REQ-SEC-002)', () => {
+    expect(() =>
+      loadConfig({ DATABASE_URL: base.DATABASE_URL } as NodeJS.ProcessEnv),
+    ).toThrow(/JWT_SECRET/);
+  });
+
+  it('rejects JWT_SECRET shorter than 32 bytes (REQ-SEC-002)', () => {
+    expect(() => loadConfig({ ...base, JWT_SECRET: 'short' } as NodeJS.ProcessEnv)).toThrow(
+      /JWT_SECRET/,
+    );
+  });
+
+  it('rejects REFRESH_TOKEN_TTL > GUEST_TTL (REQ-ID-016)', () => {
+    expect(() =>
+      loadConfig({ ...base, GUEST_TTL: '3600', REFRESH_TOKEN_TTL: '7200' } as NodeJS.ProcessEnv),
+    ).toThrow(/REFRESH_TOKEN_TTL/);
+  });
+
+  it('rejects CORS wildcard in production (REQ-SEC-008)', () => {
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'production', CORS_ORIGINS: '*' } as NodeJS.ProcessEnv),
+    ).toThrow(/CORS_ORIGINS/);
+  });
+
+  it('applies transport defaults', () => {
+    const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+    expect(cfg.ACCESS_TOKEN_TTL).toBe(900);
+    expect(cfg.GUEST_TTL).toBe(86400);
+    expect(cfg.REFRESH_TOKEN_TTL).toBe(86400);
+    expect(cfg.REFRESH_RATE_LIMIT).toBe(10);
+    expect(cfg.TRUST_PROXY).toBe(false);
+    expect(cfg.CORS_ORIGINS).toEqual([]);
+  });
+
+  it('parses TRUST_PROXY and CORS_ORIGINS', () => {
+    const cfg = loadConfig({
+      ...base,
+      TRUST_PROXY: 'true',
+      CORS_ORIGINS: 'https://a.example, https://b.example',
+    } as NodeJS.ProcessEnv);
+    expect(cfg.TRUST_PROXY).toBe(true);
+    expect(cfg.CORS_ORIGINS).toEqual(['https://a.example', 'https://b.example']);
   });
 });
