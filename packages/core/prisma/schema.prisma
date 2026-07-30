@@ -76,6 +76,23 @@ model Identity {
   rooms       Room[]
   logEvents   LogEvent[]
   memberships Membership[]
+  sessions    Session[]
+
+  @@schema("identity")
+}
+
+// Session — семейство refresh-токенов (REQ-ID-007: хранится только хэш токена,
+// ротация связывает replacedById, отзыв — revokedAt; REQ-ID-016: expiresAt).
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  identity         Identity  @relation(fields: [identityId], references: [id])
+  identityId       String    @db.Uuid
+  refreshTokenHash String    @unique
+  familyId         String    @db.Uuid
+  replacedById     String?   @db.Uuid
+  revokedAt        DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
 
   @@schema("identity")
 }
