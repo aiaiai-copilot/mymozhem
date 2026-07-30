@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ИСПОЛНЯЕТСЯ батчами — батчи 1-2 (tasks 1-5) завершены, review clean)
-**Branch:** `phase-1-transport-http-auth` (батч 1: `6ca517e` SDK DTO, `5e3609d` config, `7503459` миграция Session; батч 2: `eaba0d8` TokenService issue/verify, `d71e1b2` rotate; base — `f4ec5a7` на `main`, который на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез ИСПОЛНЯЕТСЯ батчами — батчи 1-3 (tasks 1-8) завершены, review clean)
+**Branch:** `phase-1-transport-http-auth` (батч 1: `6ca517e` SDK DTO, `5e3609d` config, `7503459` миграция Session; батч 2: `eaba0d8` TokenService issue/verify, `d71e1b2` rotate; батч 3: `83ce6da` limiter eviction, `4853742` exception filter, `4394208` TransportModule; base — `f4ec5a7` на `main`, который на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Транспортный auth/HTTP срез исполняется subagent-driven **батчами по решению владельца (2026-07-30): каждый батч — новая сессия** (защита контекстного окна). Батчи: 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 (лимитер/фильтр/TransportModule); 4) tasks 9-10 (server wiring, e2e); 5) tasks 11-12 (seed, гейты+smoke). Состояние исполнения — в SDD-леджере (см. ниже), НЕ в этом файле. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Транспортный auth/HTTP срез исполняется subagent-driven **батчами по решению владельца (2026-07-30): каждый батч — новая сессия** (защита контекстного окна). Батчи: 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 (server wiring, e2e); 5) tasks 11-12 (seed, гейты+smoke). Состояние исполнения — в SDD-леджере (см. ниже), НЕ в этом файле. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,7 +18,13 @@
 
 ## Следующее действие
 
-**Батч 3 транспортного среза: tasks 6-8 (JoinRateLimiter eviction, HttpExceptionFilter, TransportModule)** — план `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven в новой сессии (решение владельца: батч = сессия). Резюме по SDD-леджеру `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — навык сам найдёт первую задачу без `complete`. Ветка уже существует: `git checkout phase-1-transport-http-auth` (НЕ создавать заново).
+**Батч 4 транспортного среза: tasks 9-10 (apps/server wiring: fastify-плагины/trustProxy/AppModule; HTTP e2e полного потока)** — план `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven в новой сессии (решение владельца: батч = сессия). Резюме по SDD-леджеру `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — навык сам найдёт первую задачу без `complete`. Ветка уже существует: `git checkout phase-1-transport-http-auth` (НЕ создавать заново).
+
+Швы, накопленные батчами 1-3, обязательные для батча 4:
+- **`packages/core` НЕ имеет fastify-зависимости** — транспорт работает на структурных типах `RequestLike`/`ReplyLike` (`transport/http.types.ts`, паттерн Task 7). В apps/server fastify есть — там плагины регистрируются штатно.
+- **Task 9 обязан зарегистрировать `@fastify/cookie`** — иначе `RequestLike.cookies` undefined и refresh падает 500 вместо 401 (типами не ловится; страж — e2e Task 10).
+- **Task 10: статус join осознанно 201** (Nest-дефолт, спека молчит) — e2e ассертит его явно, не «как получится».
+- Filter: HttpException сохраняет свой статус (404→REQUEST_INVALID), SDK ContractError сознательно не маппится (→500, design-conformant).
 
 Опыт батча 1 для следующих сессий:
 - Имплементеры дважды пытались писать report/brief в `~/.superpowers` вместо репозиторного `.superpowers` — после каждого имплементера проверять наличие report-файла в workspace ДО диспатча ревьюера (промпт даёт абсолютный путь, но проверка дешевле резюма агента).
@@ -83,7 +89,7 @@
 ## Осталось недоделанным
 
 - **Push `main`** (2 коммита впереди `origin/main`) — решение владельца.
-- **Батчи 3-5 транспортного среза** (tasks 6-12) — каждый в новой сессии, резюме по SDD-леджеру. Батч 5 (Task 12) обновит этот HANDOFF финально.
+- **Батчи 4-5 транспортного среза** (tasks 9-12) — каждый в новой сессии, резюме по SDD-леджеру. Батч 5 (Task 12) обновит этот HANDOFF финально.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
 ## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
