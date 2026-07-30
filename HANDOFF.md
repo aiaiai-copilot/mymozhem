@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ИСПОЛНЯЕТСЯ батчами — батчи 1-3 (tasks 1-8) завершены, review clean)
-**Branch:** `phase-1-transport-http-auth` (батч 1: `6ca517e` SDK DTO, `5e3609d` config, `7503459` миграция Session; батч 2: `eaba0d8` TokenService issue/verify, `d71e1b2` rotate; батч 3: `83ce6da` limiter eviction, `4853742` exception filter, `4394208` TransportModule; base — `f4ec5a7` на `main`, который на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез ИСПОЛНЯЕТСЯ батчами — батчи 1-4 (tasks 1-10) завершены, review clean)
+**Branch:** `phase-1-transport-http-auth` (батч 1: `6ca517e` SDK DTO, `5e3609d` config, `7503459` миграция Session; батч 2: `eaba0d8` TokenService issue/verify, `d71e1b2` rotate; батч 3: `83ce6da` limiter eviction, `4853742` exception filter, `4394208` TransportModule; батч 4: `55afe8f` server wiring, `a6bb3ad` HTTP e2e; base — `f4ec5a7` на `main`, который на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Транспортный auth/HTTP срез исполняется subagent-driven **батчами по решению владельца (2026-07-30): каждый батч — новая сессия** (защита контекстного окна). Батчи: 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 (server wiring, e2e); 5) tasks 11-12 (seed, гейты+smoke). Состояние исполнения — в SDD-леджере (см. ниже), НЕ в этом файле. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Транспортный auth/HTTP срез исполняется subagent-driven **батчами по решению владельца (2026-07-30): каждый батч — новая сессия** (защита контекстного окна). Батчи: 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 ✅; 5) tasks 11-12 (seed, гейты+smoke). Состояние исполнения — в SDD-леджере (см. ниже), НЕ в этом файле. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,9 +18,14 @@
 
 ## Следующее действие
 
-**Батч 4 транспортного среза: tasks 9-10 (apps/server wiring: fastify-плагины/trustProxy/AppModule; HTTP e2e полного потока)** — план `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven в новой сессии (решение владельца: батч = сессия). Резюме по SDD-леджеру `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — навык сам найдёт первую задачу без `complete`. Ветка уже существует: `git checkout phase-1-transport-http-auth` (НЕ создавать заново).
+**Батч 5 (финальный) транспортного среза: tasks 11-12 (seed-скрипт create-room; полные гейты + docker boot smoke + финальный HANDOFF)** — план `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven в новой сессии (решение владельца: батч = сессия). Резюме по SDD-леджеру `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — навык сам найдёт первую задачу без `complete`. Ветка уже существует: `git checkout phase-1-transport-http-auth` (НЕ создавать заново).
 
-Швы, накопленные батчами 1-3, обязательные для батча 4:
+Обязательные строки для финального HANDOFF (из ревью батча 4 — Task 12 должен их внести):
+- **core barrel ре-экспортирует `testing/postgres.testcontainer`** → boot apps/server тянет `testcontainers` в require-time. Безопасно, пока Dockerfile тащит полные `node_modules` в runtime-стейдж; упадёт, если когда-нибудь включить pruning devDependencies. Зафиксировать как долгоживущее ограничение.
+- **`NODE_OPTIONS=--experimental-vm-modules` зашит в test-скрипт apps/server** (ESM-only `cookie@2` под jest 29 CJS; workaround верифицирован, изолирован в test-скрипте). Триггеры пересмотра: jest 30 или `@fastify/cookie` на `require(ESM)`.
+- **Docker smoke (Task 12):** compose ставит `NODE_ENV=production` → refresh-кука `Secure` по plain HTTP → cookie-jar клиент её не вернёт. Smoke рефреша ассертит `Set-Cookie`-заголовок, а не round-trip куки.
+
+Швы, накопленные батчами 1-3 (уже учтены батчем 4, для истории):
 - **`packages/core` НЕ имеет fastify-зависимости** — транспорт работает на структурных типах `RequestLike`/`ReplyLike` (`transport/http.types.ts`, паттерн Task 7). В apps/server fastify есть — там плагины регистрируются штатно.
 - **Task 9 обязан зарегистрировать `@fastify/cookie`** — иначе `RequestLike.cookies` undefined и refresh падает 500 вместо 401 (типами не ловится; страж — e2e Task 10).
 - **Task 10: статус join осознанно 201** (Nest-дефолт, спека молчит) — e2e ассертит его явно, не «как получится».
@@ -89,7 +94,7 @@
 ## Осталось недоделанным
 
 - **Push `main`** (2 коммита впереди `origin/main`) — решение владельца.
-- **Батчи 4-5 транспортного среза** (tasks 9-12) — каждый в новой сессии, резюме по SDD-леджеру. Батч 5 (Task 12) обновит этот HANDOFF финально.
+- **Батч 5 транспортного среза** (tasks 11-12) — в новой сессии, резюме по SDD-леджеру. Task 12 обновит этот HANDOFF финально (включая обязательные строки выше).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
 ## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
