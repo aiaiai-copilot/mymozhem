@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ВЫБРАН, спроектирован и спланирован — к исполнению)
-**Branch:** `main` (2 коммита впереди `origin/main`: `73fd918` дизайн + `7e66695` план; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез ИСПОЛНЯЕТСЯ батчами — батч 1 (tasks 1-3) завершён, review clean)
+**Branch:** `phase-1-transport-http-auth` (3 коммита батча 1: `6ca517e` SDK DTO, `5e3609d` config, `7503459` миграция Session; base — `f4ec5a7` на `main`, который на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Следующий срез — **транспортный auth/HTTP** — выбран владельцем, дизайн утверждён, план реализации написан и закоммичен. Исполнение — **subagent-driven в новой сессии** (явное решение владельца). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join — завершены и слиты в `main`. Транспортный auth/HTTP срез исполняется subagent-driven **батчами по решению владельца (2026-07-30): каждый батч — новая сессия** (защита контекстного окна). Батчи: 1) tasks 1-3 ✅; 2) tasks 4-5 (TokenService); 3) tasks 6-8 (лимитер/фильтр/TransportModule); 4) tasks 9-10 (server wiring, e2e); 5) tasks 11-12 (seed, гейты+smoke). Состояние исполнения — в SDD-леджере (см. ниже), НЕ в этом файле. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -18,9 +18,14 @@
 
 ## Следующее действие
 
-**Исполнение плана транспортного среза** — `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven (свежий субагент на задачу, двухстадийное ревью между задачами — как в membership-срезе). Порядок задач значим: 1 (SDK) → 2 (config) → 3 (миграция) → 4-5 (TokenService) → 6 (лимитер, независима) → 7 (фильтр) → 8 (transport module) → 9 (server wiring) → 10 (e2e) → 11 (seed-скрипт) → 12 (гейты + smoke + этот HANDOFF).
+**Батч 2 транспортного среза: tasks 4-5 (TokenService issue/verify + rotate)** — план `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md`, subagent-driven в новой сессии (решение владельца: батч = сессия). Резюме по SDD-леджеру `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — навык сам найдёт первую задачу без `complete`. Ветка уже существует: `git checkout phase-1-transport-http-auth` (НЕ создавать заново).
 
-Перед стартом — напомнить владельцу про **push** (`main` на 2 коммита впереди `origin/main`).
+Опыт батча 1 для следующих сессий:
+- Имплементеры дважды пытались писать report/brief в `~/.superpowers` вместо репозиторного `.superpowers` — после каждого имплементера проверять наличие report-файла в workspace ДО диспатча ревьюера (промпт даёт абсолютный путь, но проверка дешевле резюма агента).
+- Плановый jest-фильтр Task 3 `-t "Session schema"` матчит ноль тестов (кавычка в имени describe) — писать в диспатчах рабочую форму фильтра, ловушка «0 tests, exit 0» реальна.
+- Docker Desktop нужен уже с Task 3 (миграция) и далее (int-ланы, e2e, smoke).
+
+Перед стартом батча — напомнить владельцу про **push** (`main` на 2 коммита впереди `origin/main` + ветка среза локальная).
 
 **Ключевые решения владельца, зашитые в дизайн (§0) — не переоткрывать при исполнении:**
 - Google OAuth НЕ в срезе; комнаты к первому событию — seed-скриптом через core-сервисы (Task 11), служебный REGISTERED-организатор без логина.
@@ -78,7 +83,7 @@
 ## Осталось недоделанным
 
 - **Push `main`** (2 коммита впереди `origin/main`) — решение владельца.
-- **Исполнение плана транспортного среза** — следующая сессия, subagent-driven (решение владельца).
+- **Батчи 2-5 транспортного среза** (tasks 4-12) — каждый в новой сессии, резюме по SDD-леджеру. Батч 5 (Task 12) обновит этот HANDOFF финально.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
 ## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
