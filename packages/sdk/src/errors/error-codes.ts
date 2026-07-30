@@ -13,6 +13,13 @@ export const CONTRACT_ERROR_CODES = [
   'EVENT_RATE_LIMITED',
   'ROOM_LOG_SEALED',
   'ROOM_SETTINGS_FROZEN',
+  // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
+  'ROOM_JOIN_DENIED',
+  'ROOM_PARTICIPANT_LIMIT_REACHED',
+  'RATE_LIMITED',
+  'REQUEST_INVALID',
+  'SESSION_INVALID',
+  'INTERNAL_ERROR',
 ] as const;
 
 export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
