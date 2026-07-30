@@ -24,4 +24,23 @@ describe('JoinRateLimiter (REQ-ID-006)', () => {
     now.t += 60_001;
     expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
   });
+
+  it('sweeps expired entries so the map does not grow per one-shot IP', () => {
+    let now = 1_000_000;
+    const limiter = new JoinRateLimiter(10, 60_000, () => now);
+    for (let i = 0; i < 100; i++) limiter.tryAcquire(`10.0.0.${i}`);
+    expect((limiter as unknown as { attempts: Map<string, unknown> }).attempts.size).toBe(100);
+    now += 61_000; // все окна протухли
+    limiter.tryAcquire('10.1.0.1'); // триггер sweep
+    expect((limiter as unknown as { attempts: Map<string, unknown> }).attempts.size).toBe(1);
+  });
+
+  it('does not sweep within the same window (amortized)', () => {
+    let now = 1_000_000;
+    const limiter = new JoinRateLimiter(10, 60_000, () => now);
+    limiter.tryAcquire('10.0.0.1');
+    now += 30_000; // внутри окна
+    limiter.tryAcquire('10.0.0.2');
+    expect((limiter as unknown as { attempts: Map<string, unknown> }).attempts.size).toBe(2);
+  });
 });
