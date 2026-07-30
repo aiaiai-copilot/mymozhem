@@ -21,3 +21,7 @@ export * from './membership/membership.service';
 export * from './membership/membership.module';
 export * from './realtime/event-log.service';
 export * from './realtime/realtime.module';
+export * from './auth/auth.constants';
+export * from './auth/auth.errors';
+export * from './auth/token.service';
+export * from './auth/auth.module';
