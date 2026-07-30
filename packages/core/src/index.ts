@@ -28,3 +28,8 @@ export * from './auth/auth.module';
 export * from './transport/transport.module';
 export * from './transport/http-exception.filter';
 export * from './transport/auth.tokens';
+// Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+// строятся на том же testcontainer-посеве, что и core int-спеки.
+export * from './testing/postgres.testcontainer';
+export * from './testing/seed-identity';
+export * from './testing/test-config';
