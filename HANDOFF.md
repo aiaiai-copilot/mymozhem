@@ -1,30 +1,30 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ИСПОЛНЕН и прошёл финальное whole-branch ревью — MERGE-READY; reuse-логирование по решению владельца добавлено (`519fd8a`); осталось решение о мердже)
-**Branch:** `phase-1-transport-http-auth` (17 коммитов над `f4ec5a7` с `main`: 11 task-коммитов + 5 handoff + 1 final-fix; `main` на 2 коммита впереди `origin/main`; **push и мердж — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез СЛИТ в `main` и запушен: merge `e28daec`; ветка `phase-1-transport-http-auth` удалена локально и на origin; фаза 1 продолжается выбором следующего среза)
+**Branch:** `main` (в синхроне с `origin/main` после push `f4ec5a7..e28daec`; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, **транспортный auth/HTTP** — реализованы; все кроме транспорта слиты в `main`, транспорт — на ветке, ждёт финального ревью и мерджа. Транспорт исполнялся subagent-driven батчами (решение владельца: батч = сессия): 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 ✅; 5) tasks 11-12 ✅. Леджер исполнения: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` (миноры и adjudication каждой задачи — там; леджер не в git). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, **транспортный auth/HTTP** — реализованы и ВСЕ слиты в `main` (транспорт — merge-коммитом `e28daec`, 44 файла, +1626 строк; тесты на результате мерджа зелёные). Транспорт исполнялся subagent-driven батчами: 12/12 задач, финальное whole-branch ревью MERGE-READY, reuse-логирование добавлено (`519fd8a`). Леджер исполнения: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` (не в git, существует только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 **Что построил срез:** `POST /rooms/join` + `POST /auth/refresh`; access JWT HS256 + httpOnly refresh-cookie с ротацией семейств и reuse-detection (`identity."Session"`, REQ-ID-007/008/016); единый фильтр ошибок, наружу ровно `{code}` (REQ-SEC-006); join/refresh rate-limit с lazy sweep (REQ-ID-006, REQ-SEC-007); helmet/CORS-allowlist/trustProxy из конфига (REQ-SEC-008); fail-closed JWT_SECRET (REQ-SEC-002); SDK-контракт 1.1.0; seed-скрипт `pnpm create-room` (REQ-SEC-001). Гейты: build/lint/typecheck/test(320)/test:int(88)/boundary-check/guardrails — зелёные; docker smoke: 403 ROOM_JOIN_DENIED на join с неверным кодом.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
-2. **`docs/sessions/2026-07-30-transport-http-auth-design.md` + `2026-07-30-transport-http-auth-implementation-plan.md` — текущий фронт работ.** Дизайн: §0 — решения владельца (без OAuth, только join+refresh, parked minors в скоупе, размещение в core, единый `RATE_LIMITED`/`SESSION_INVALID`), §10 — швы к следующим срезам, §11 — принятые компромиссы. План: 12 задач с TDD-циклами, таблица spec coverage в конце.
+2. `docs/sessions/2026-07-30-transport-http-auth-design.md` + `2026-07-30-transport-http-auth-implementation-plan.md` — последний исполненный срез (для разбора истории и швов к следующим срезам: §10 дизайна — швы к realtime handshake и OAuth). §0 — решения владельца, §11 — принятые компромиссы.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер завершённого среза (не переисполнять). Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит. Новый леджер транспортного среза создаётся рядом по той же конвенции.
+5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` и `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — леджеры завершённых срезов (не переисполнять). Леджеры не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит. Новый леджер следующего среза создаётся рядом по той же конвенции.
 6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы прежних срезов (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, membership-guest-join) читать только при разборе истории — их работа в коммитах.
+Исполненные планы прежних срезов (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, membership-guest-join, transport-http-auth) читать только при разборе истории — их работа в коммитах.
 
 ## Следующее действие
 
-**Мердж ветки `phase-1-transport-http-auth` в `main`** (superpowers:finishing-a-development-branch) — финальное ревью пройдено (MERGE-READY, единственный Important исправлен по решению владельца, re-review clean). Мердж и push — решение владельца; после мерджа этот HANDOFF переписывается под следующий срез.
+**Выбор следующего среза фазы 1** (brainstorm → дизайн → план по конвейеру superpowers). Мердж транспортного среза завершён; HANDOFF переписан.
 
-**Кандидаты на следующий срез** (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `TokenService.verifyAccessToken` + claims-формат), event-commit (отложенные тесты), OAuth-срез (`POST /rooms` + Google-флоу).
+**Кандидаты на следующий срез** (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `TokenService.verifyAccessToken` + claims-формат — самый прямой шов, дизайн §10), event-commit (отложенные тесты actorId≠null и payload-нейтральности гонки за seq), OAuth-срез (`POST /rooms` + Google-флоу, REQ-ID-015/009).
 
-**Остаточные риски, принимаемые мерджем (из финального ревью):**
+**Остаточные риски, принятые мерджем (из финального ревью):**
 - Строгая ротация refresh: потерянный ответ → безобидный ретрай старого токена → ревок семейства (REQ-ID-007 как спроектировано, без grace-окна; дизайн §4 принял strict detection).
 - Access-токены живут ≤15 мин после терминации комнаты/исключения (принятый компромисс дизайна §11; апгрейд — revocation по `sid`).
 - `/health/ready` 503 теперь отдаёт `{code:'INTERNAL_ERROR'}` вместо `{status,db}` (статус неизменен, пробы не затронуты) — следствие глобального фильтра.
@@ -45,7 +45,7 @@
 - Плановый jest-фильтр Task 3 `-t "Session schema"` матчит ноль тестов (кавычка в имени describe) — писать в диспатчах рабочую форму фильтра, ловушка «0 tests, exit 0» реальна.
 - Docker Desktop нужен уже с Task 3 (миграция) и далее (int-ланы, e2e, smoke).
 
-Перед стартом батча — напомнить владельцу про **push** (`main` на 2 коммита впереди `origin/main` + ветка среза локальная).
+Перед стартом батча — Docker Desktop должен быть запущен (int/e2e/smoke поднимают контейнеры Postgres).
 
 **Ключевые решения владельца, зашитые в дизайн (§0) — не переоткрывать при исполнении:**
 - Google OAuth НЕ в срезе; комнаты к первому событию — seed-скриптом через core-сервисы (Task 11), служебный REGISTERED-организатор без логина.
@@ -108,58 +108,30 @@
 
 ## Осталось недоделанным
 
-- **Мердж ветки + push** (`main` 2 коммита впереди `origin/main` + ветка) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
+- **Судьба untracked `AGENTS.md`** в корне — вопрос владельцу открыт.
+- **Следующий срез фазы 1 не выбран** — кандидаты выше.
 
-## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
+## Session 2026-07-30 (мердж транспортного среза)
 
 ### Что сделано
 
-- **Push предыдущего состояния:** 17 коммитов membership-среза ушли в `origin/main` по решению владельца (`eaada54..cee70ac`).
-- **Выбран следующий срез фазы 1 — транспортный auth/HTTP** (кандидат из прошлого handoff подтверждён владельцем). Альтернативы — event-commit (отложенные тесты) и realtime read — остаются в follow-up.
-- **Brainstorm → дизайн → план по конвейеру superpowers**, все развилки закрыты владельцем (§0 дизайна): без OAuth (служебный организатор, комнаты seed-скриптом); эндпоинты только join + refresh; parked minors все три в скоупе; размещение транспорта в `packages/core` (вариант A; apps/server — чистая композиция); единые wire-коды `RATE_LIMITED`/`SESSION_INVALID`.
-- **Дизайн** `docs/sessions/2026-07-30-transport-http-auth-design.md` — утверждён владельцем по секциям. Ключевое содержимое: токен-контур с нуля (access JWT HS256 + httpOnly refresh, таблица `identity."Session"` с семействами ротации и reuse-detection по REQ-ID-007), фильтр с wire-форматом `{code}` (REQ-SEC-006), контроли первого exposure (JWT_SECRET fail-closed, refresh rate-limit, helmet/CORS, real-IP через TRUST_PROXY), SDK-контракт 1.0.0 → 1.1.0 аддитивно.
-- **План** `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md` — 12 задач с TDD-циклами, готовым кодом и таблицей spec coverage; self-review пройден (починена несогласованность refresh-cookie хелпера между контроллерами).
+- По решению владельца: полный прогон гейтов на ветке (unit 5 пакетов, int 88/88, boundary-check, guardrails — зелёные) → мердж `phase-1-transport-http-auth` в `main` merge-коммитом `e28daec` (--no-ff, 44 файла, +1626 строк) → тесты на результате мерджа зелёные → ветка удалена локально и на origin → `main` запушен (`f4ec5a7..e28daec`, 19 коммитов).
+- HANDOFF переписан под состояние «срез слит, следующий срез не выбран».
 
 ### Коммиты этой сессии
 
-- `73fd918` docs(design): transport auth/HTTP slice design (join + refresh, token contour, REQ-SEC-006)
-- `7e66695` docs(plan): transport auth/HTTP implementation plan (12 tasks, REQ-ID-007/008/016, REQ-SEC-002/006/007/008)
+- `e28daec` merge(core): transport auth/HTTP slice — join+refresh, token contour, REQ-SEC-006 filter (12/12 tasks, final review MERGE-READY)
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop: состояние не менялось этой сессией (тесты/контейнеры не поднимались — сессия была проектировочная). `lt-pg` на 5432 нетронут.
-- Untracked `AGENTS.md` в корне — не трогать (вопрос владельцу о его судьбе всё ещё открыт).
-- Леджер завершённого membership-среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — на месте; леджер транспортного среза будет создан при исполнении.
-- Внешние side-effects: только `git push origin main` (по явному решению владельца). Никаких прод-тестов и изменяющих действий наружу.
-
-### Осталось недоделанным
-
-- Push `main` (2 коммита: дизайн + план) — решение владельца.
-- Исполнение плана — следующая сессия, subagent-driven.
-- Юрист — гейт 1 открыт, действие вне агента.
-
-## Session 2026-07-30 (исполнение транспортного среза, батчи 1-5)
-
-### Что сделано
-
-- Все 12 задач плана `docs/sessions/2026-07-30-transport-http-auth-implementation-plan.md` исполнены subagent-driven (свежий имплементер + двухстадийное ревью на задачу), без единого fix-раунда — все ревью clean с первого прохода; миноры отложены в SDD-леджер.
-- Батчевая схема владельца (батч = сессия) в этой сессии выполнена подряд: 1-3, 4-5, 6-8, 9-10, 11-12.
-- Гейты зелёные (Task 12): build 3/3, lint, typecheck 5/5, unit 320, int 88, boundary-check, guardrails. Docker smoke: `/health/ready` 200, `POST /rooms/join` → 403 `{"code":"ROOM_JOIN_DENIED"}`, `docker compose down -v`, `lt-pg` нетронут. Неблокирующее предупреждение Prisma об openssl-1.1.x в контейнере — косметика.
-- HANDOFF переписан под финальное ревью и мердж; обязательные строки из ревью батчей 4-5 внесены в ограничения и follow-up.
-
-### Коммиты этой сессии (ветка phase-1-transport-http-auth, над f4ec5a7)
-
-`6ca517e` SDK DTO/коды, контракт 1.1.0 · `5e3609d` config · `7503459` миграция Session · `eaba0d8` TokenService issue/verify · `d71e1b2` rotate · `83ce6da` limiter eviction · `4853742` exception filter · `4394208` TransportModule · `55afe8f` server wiring · `a6bb3ad` HTTP e2e · `386802e` create-room seed · `519fd8a` final-fix reuse-логирование · + handoff-коммиты батчей · (+ handoff-коммит этой правки)
-
-### Локальное состояние (не в git)
-
-- Docker Desktop запущен (нужен для int/e2e). `lt-pg` на 5432 нетронут. Эфемерные контейнеры (mm-migrate 55434, mm-seed-check 55435) удалены.
-- SDD-леджер: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — deferred-миноры всех 12 задач; финальный ревьюер триажит их до мерджа. `git clean -fdx` уничтожит.
+- Docker Desktop запущен (нужен для int/e2e). `lt-pg` на 5432 нетронут.
+- SDD-леджер транспортного среза: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — на месте; `git clean -fdx` уничтожит.
 - Untracked `AGENTS.md` — вопрос владельцу открыт.
+- Внешние side-effects: `git push origin main` (по явному решению владельца) + удаление удалённой ветки среза. Никаких прод-тестов и изменяющих действий наружу.
 
 ### Осталось недоделанным
 
-- Финальное whole-branch ревью → мердж (решение владельца) → push.
+- Выбор и старт следующего среза фазы 1 (realtime read/handshake | event-commit | OAuth).
 - Юрист — гейт 1 открыт, действие вне агента.
