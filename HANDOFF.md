@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Date:** 2026-07-30 (транспортный срез ИСПОЛНЕН целиком — все 12 задач, все гейты зелёные, docker smoke пройден; осталось финальное whole-branch ревью и мердж)
-**Branch:** `phase-1-transport-http-auth` (13 коммитов над `f4ec5a7` с `main`: tasks 1-12 по одному коммиту на задачу + handoff-коммиты батчей; `main` на 2 коммита впереди `origin/main`; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-07-30 (транспортный срез ИСПОЛНЕН и прошёл финальное whole-branch ревью — MERGE-READY; reuse-логирование по решению владельца добавлено (`519fd8a`); осталось решение о мердже)
+**Branch:** `phase-1-transport-http-auth` (17 коммитов над `f4ec5a7` с `main`: 11 task-коммитов + 5 handoff + 1 final-fix; `main` на 2 коммита впереди `origin/main`; **push и мердж — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
 
 **Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, **транспортный auth/HTTP** — реализованы; все кроме транспорта слиты в `main`, транспорт — на ветке, ждёт финального ревью и мерджа. Транспорт исполнялся subagent-driven батчами (решение владельца: батч = сессия): 1) tasks 1-3 ✅; 2) tasks 4-5 ✅; 3) tasks 6-8 ✅; 4) tasks 9-10 ✅; 5) tasks 11-12 ✅. Леджер исполнения: `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` (миноры и adjudication каждой задачи — там; леджер не в git). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -20,9 +20,16 @@
 
 ## Следующее действие
 
-**Финальное whole-branch ревью ветки `phase-1-transport-http-auth` → мердж в `main`** (superpowers:subagent-driven-development final review → superpowers:finishing-a-development-branch). Финальному ревьюеру указать на леджер `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — там deferred-миноры всех задач для триажа «что чинить до мерджа». Мердж — решение владельца; после него этот HANDOFF переписывается под следующий срез.
+**Мердж ветки `phase-1-transport-http-auth` в `main`** (superpowers:finishing-a-development-branch) — финальное ревью пройдено (MERGE-READY, единственный Important исправлен по решению владельца, re-review clean). Мердж и push — решение владельца; после мерджа этот HANDOFF переписывается под следующий срез.
 
 **Кандидаты на следующий срез** (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `TokenService.verifyAccessToken` + claims-формат), event-commit (отложенные тесты), OAuth-срез (`POST /rooms` + Google-флоу).
+
+**Остаточные риски, принимаемые мерджем (из финального ревью):**
+- Строгая ротация refresh: потерянный ответ → безобидный ретрай старого токена → ревок семейства (REQ-ID-007 как спроектировано, без grace-окна; дизайн §4 принял strict detection).
+- Access-токены живут ≤15 мин после терминации комнаты/исключения (принятый компромисс дизайна §11; апгрейд — revocation по `sid`).
+- `/health/ready` 503 теперь отдаёт `{code:'INTERNAL_ERROR'}` вместо `{status,db}` (статус неизменен, пробы не затронуты) — следствие глобального фильтра.
+- **Для OAuth-среза:** `TokenService.sessionExpiry()` применяет guest-cap `min(REFRESH,GUEST_TTL)` безусловно — REGISTERED-ротация не должна его наследовать (token.service.ts, design §10).
+- **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
 
 **Принятые при исполнении отклонения от плана (все прошли ревью, зафиксированы в леджере):**
 - `packages/core` без fastify-зависимости → структурные типы `RequestLike`/`ReplyLike` (`transport/http.types.ts`) вместо `FastifyReply/FastifyRequest` (чистота границы, ADR-002-friendly).
@@ -31,6 +38,7 @@
 - Терминальная комната в тестах — через `cancel` (DRAFT→CANCELLED); DRAFT→COMPLETED нелегален.
 - `NODE_OPTIONS=--experimental-vm-modules` в test-скрипте apps/server (ESM-only `cookie@2` под jest 29 CJS — верифицировано, изолировано).
 - Seed-скрипт импортирует core через `dist/*.js` subpath'ы (баррел тянет testcontainers — см. ограничения ниже).
+- **Финальное ревью (fable, whole-branch):** MERGE-READY. Единственный Important — reuse-detection не логировался, хотя дизайн §11 обосновывает коллапс кодов серверным логом — по решению владельца исправлен до мерджа (`519fd8a`: `logger.warn` на AuthError-ветке, wire неизменён, токен-материала в логах нет). Все deferred-миноры леджера оттриажены: fix-before-merge нет.
 
 Опыт батча 1 для следующих сессий:
 - Имплементеры дважды пытались писать report/brief в `~/.superpowers` вместо репозиторного `.superpowers` — после каждого имплементера проверять наличие report-файла в workspace ДО диспатча ревьюера (промпт даёт абсолютный путь, но проверка дешевле резюма агента).
@@ -100,8 +108,7 @@
 
 ## Осталось недоделанным
 
-- **Push `main`** (2 коммита впереди `origin/main`) — решение владельца.
-- **Финальное whole-branch ревью + мердж ветки** — следующее действие (см. выше).
+- **Мердж ветки + push** (`main` 2 коммита впереди `origin/main` + ветка) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
 ## Session 2026-07-30 (выбор среза: brainstorm → дизайн → план транспортного auth/HTTP)
@@ -144,7 +151,7 @@
 
 ### Коммиты этой сессии (ветка phase-1-transport-http-auth, над f4ec5a7)
 
-`6ca517e` SDK DTO/коды, контракт 1.1.0 · `5e3609d` config · `7503459` миграция Session · `eaba0d8` TokenService issue/verify · `d71e1b2` rotate · `83ce6da` limiter eviction · `4853742` exception filter · `4394208` TransportModule · `55afe8f` server wiring · `a6bb3ad` HTTP e2e · `386802e` create-room seed · + handoff-коммиты батчей · (+ handoff-коммит этой правки)
+`6ca517e` SDK DTO/коды, контракт 1.1.0 · `5e3609d` config · `7503459` миграция Session · `eaba0d8` TokenService issue/verify · `d71e1b2` rotate · `83ce6da` limiter eviction · `4853742` exception filter · `4394208` TransportModule · `55afe8f` server wiring · `a6bb3ad` HTTP e2e · `386802e` create-room seed · `519fd8a` final-fix reuse-логирование · + handoff-коммиты батчей · (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
