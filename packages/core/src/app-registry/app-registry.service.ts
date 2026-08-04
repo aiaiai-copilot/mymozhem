@@ -47,6 +47,38 @@ export class AppRegistryService {
     }
   }
 
+  // REQ-CTR-008/009 read-path для event-commit цепочки: схема + декларированный
+  // потолок видимости типа из манифеста. undefined = неизвестный тип/манифест.
+  getEventDefinition(
+    appId: string,
+    manifestVersion: number,
+    name: string,
+  ): AppManifest['events'][string] | undefined {
+    return this.registry.getManifest(appId, manifestVersion)?.events[name];
+  }
+
+  // Валидаторы app-событий — в том же кэше, что appSettings (REQ-CORE-007), с
+  // префиксом ключа, чтобы не пересекаться с ключом настроек `appId@version`.
+  eventValidatorFor(
+    appId: string,
+    manifestVersion: number,
+    name: string,
+    schema: JsonSchemaObject,
+  ): ValidateFunction {
+    const key = `event:${appId}@${manifestVersion}:${name}`;
+    const cached = this.validators.get(key);
+    if (cached) {
+      return cached;
+    }
+    const compiled = this.ajv.compile(schema);
+    this.validators.set(key, compiled);
+    return compiled;
+  }
+
+  describeEventErrors(validate: ValidateFunction): string {
+    return this.ajv.errorsText(validate.errors);
+  }
+
   private validatorFor(
     appId: string,
     manifestVersion: number,

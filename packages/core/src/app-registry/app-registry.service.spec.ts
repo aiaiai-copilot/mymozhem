@@ -73,6 +73,37 @@ describe('AppRegistryService.validateSettings (REQ-CORE-007)', () => {
   });
 });
 
+describe('event-commit read-path (REQ-CTR-008/009)', () => {
+  it('getEventDefinition returns schema+visibility for a known type, undefined for unknown', () => {
+    const svc = new AppRegistryService([validManifests[0]]);
+    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
+    expect(def?.visibility).toBe('module-private');
+    expect(def?.schema).toMatchObject({ type: 'object' });
+    expect(svc.getEventDefinition('quiz', 1, 'answer.v2')).toBeUndefined();
+    expect(svc.getEventDefinition('nope', 1, 'answer.submitted')).toBeUndefined();
+  });
+
+  it('eventValidatorFor compiles, caches and validates the registered schema', () => {
+    const svc = new AppRegistryService([validManifests[0]]);
+    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
+    if (!def) throw new Error('fixture must define answer.submitted');
+    const v1 = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
+    const v2 = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
+    expect(v1).toBe(v2); // кэш REQ-CORE-007
+    expect(v1({ roundId: 'r1', choice: 2 })).toBe(true);
+    expect(v1({ roundId: 'r1', choice: 'x' })).toBe(false);
+  });
+
+  it('describeEventErrors renders ajv errors after a failed validation', () => {
+    const svc = new AppRegistryService([validManifests[0]]);
+    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
+    if (!def) throw new Error('fixture must define answer.submitted');
+    const v = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
+    expect(v({})).toBe(false);
+    expect(svc.describeEventErrors(v)).toMatch(/roundId|required/);
+  });
+});
+
 describe('AppRegistryModule', () => {
   it('provides AppRegistryService with an empty registry by default', async () => {
     const moduleRef = await Test.createTestingModule({
