@@ -1,4 +1,4 @@
-import { loadConfig } from './config.schema';
+import { configSchema, loadConfig } from './config.schema';
 
 const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db', JWT_SECRET: 's'.repeat(32) };
 
@@ -93,5 +93,21 @@ describe('loadConfig', () => {
     } as NodeJS.ProcessEnv);
     expect(cfg.TRUST_PROXY).toBe(true);
     expect(cfg.CORS_ORIGINS).toEqual(['https://a.example', 'https://b.example']);
+  });
+
+  it('applies §4 defaults for event emission params', () => {
+    const cfg = configSchema.parse({
+      DATABASE_URL: 'postgresql://x',
+      JWT_SECRET: 'x'.repeat(32),
+    });
+    expect(cfg.EVENT_EMIT_RATE_LIMIT_PER_MIN).toBe(30);
+    expect(cfg.MAX_EVENT_PAYLOAD_BYTES).toBe(16_384);
+  });
+
+  it('rejects out-of-range event emission params (REQ-RT-012/014, §4 bounds)', () => {
+    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+    expect(configSchema.safeParse({ ...envBase, EVENT_EMIT_RATE_LIMIT_PER_MIN: 0 }).success).toBe(false);
+    expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 512 }).success).toBe(false);
+    expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 300_000 }).success).toBe(false);
   });
 });
