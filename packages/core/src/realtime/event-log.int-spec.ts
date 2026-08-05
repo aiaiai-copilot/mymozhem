@@ -95,6 +95,17 @@ describe('EventLogService.commitCoreEvent', () => {
     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
   });
 
+  it('records actorId on lifecycle events when the caller supplies it (REQ-RT-009)', async () => {
+    const ACTOR = '00000000-0000-0000-0000-0000000000c3';
+    await seedIdentity(db.prisma, { id: ACTOR, email: 'actor@example.test' });
+    const room = await rooms.create(ORG);
+    await rooms.cancel(room.id, ACTOR);
+
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ type: 'core.room.cancelled', actorId: ACTOR });
+  });
+
   it('serializes concurrent commits via the advisory lock: dense seqs 1..N (REQ-RT-007)', async () => {
     const room = await rooms.create(ORG);
     const N = 8;
