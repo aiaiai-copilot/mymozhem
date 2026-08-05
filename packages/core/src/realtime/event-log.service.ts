@@ -22,6 +22,23 @@ import {
   RoomNotActiveError,
 } from './realtime.errors';
 
+// JSON-сериализация app-payload (шаг размера REQ-RT-012 и append). Несериализуемый
+// payload (undefined, BigInt, циклические ссылки) — typed EVENT_PAYLOAD_INVALID,
+// не сырой TypeError: отказ должен жить в таксономии design §6, а не утекать
+// из цепочки как необработанное исключение рантайма.
+function stringifyAppPayload(payload: unknown, eventType: string): string {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch {
+    throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
+  }
+  if (serialized === undefined) {
+    throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
+  }
+  return serialized;
+}
+
 // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
 // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
 // Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
@@ -99,7 +116,8 @@ export class EventLogService {
       );
     }
     // 3. Размер (REQ-RT-012) — до реестра: дешевле и не требует manifest lookup.
-    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
+    const serialized = stringifyAppPayload(payload, `${appId}.${name}`);
+    if (Buffer.byteLength(serialized, 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
       throw new EventPayloadTooLargeError(
         `payload of ${appId}.${name} exceeds MAX_EVENT_PAYLOAD_BYTES (${this.config.MAX_EVENT_PAYLOAD_BYTES})`,
       );
@@ -132,6 +150,7 @@ export class EventLogService {
       }
     }
     // 8. Append: schemaVersion = пиннутый manifestVersion — версия схемы app-события.
+    // recheckRoomActive: post-lock перепроверка статуса (см. appendLocked).
     return this.appendLocked(
       tx,
       roomId,
@@ -140,6 +159,7 @@ export class EventLogService {
       actorId,
       visibility,
       manifestVersion,
+      true,
     );
   }
 
@@ -151,10 +171,30 @@ export class EventLogService {
     actorId: string | null,
     visibility: Visibility,
     schemaVersion: number,
+    recheckRoomActive = false,
   ): Promise<LogEvent> {
     // $executeRaw, не $queryRaw: pg_advisory_xact_lock возвращает void, а $queryRaw
     // пытается десериализовать колонку результата и падает на типе 'void'.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roomId}, 0))`;
+    if (recheckRoomActive) {
+      // REQ-RT-016, TOCTOU: pre-lock status-гейт (шаг 1) мог отработать по ещё
+      // ACTIVE строке, пока конкурентный терминальный переход коммитил CANCELLED/
+      // COMPLETED и освобождал этот lock — без перепроверки app-событие легло бы
+      // в лог ПОСЛЕ запечатывания. Re-check внутри критической секции:
+      // payload-независимый O(1), поэтому контракт нейтральности REQ-RT-007
+      // (size-dependent валидация строго ДО lock) не нарушен — санкционированное
+      // отступление от буквы design §2 («все проверки ДО lock»), решение владельца.
+      // Отказ бросает до INSERT → tx откатывается, лог остаётся запечатанным.
+      // Core-путь (commitCoreEvent) флаг не ставит: lifecycle-эмит сам держит
+      // row-lock на room."Room" и проверку статуса ему добавлять нельзя — он
+      // эмитит именно переходы ИЗ ACTIVE.
+      const room = await tx.room.findUnique({ where: { id: roomId }, select: { status: true } });
+      if (room?.status !== 'ACTIVE') {
+        throw new RoomNotActiveError(
+          `Room ${roomId} left ACTIVE while this commit waited for the room lock (sealed by a terminal transition)`,
+        );
+      }
+    }
     const rows = await tx.$queryRaw<LogEvent[]>`
       INSERT INTO realtime."LogEvent"
         ("roomId", "seq", "type", "payload", "actorId", "visibility", "schemaVersion")

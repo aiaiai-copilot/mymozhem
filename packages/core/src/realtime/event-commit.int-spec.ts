@@ -175,6 +175,35 @@ describe('EventLogService.commitAppEvent', () => {
     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
   });
 
+  it('rejects an undefined payload with the typed error (EVENT_PAYLOAD_INVALID)', async () => {
+    // JSON.stringify(undefined) === undefined: без safe-stringify шаг размера падал
+    // бы сырым TypeError из Buffer.byteLength вне typed-таксономии (design §6).
+    const room = await activeRoom();
+    const err = await db.prisma
+      .$transaction((tx) =>
+        eventLog.commitAppEvent(tx, room.id, 'note.posted', undefined, 'public', null),
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EventPayloadInvalidError);
+    expect((err as EventPayloadInvalidError).code).toBe('EVENT_PAYLOAD_INVALID');
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
+  });
+
+  it('rejects a circular payload with the typed error (EVENT_PAYLOAD_INVALID)', async () => {
+    // JSON.stringify бросает TypeError на циклической ссылке — маппим в typed error.
+    const room = await activeRoom();
+    const circular: Record<string, unknown> = { n: 1 };
+    circular.self = circular;
+    const err = await db.prisma
+      .$transaction((tx) =>
+        eventLog.commitAppEvent(tx, room.id, 'note.posted', circular, 'public', null),
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EventPayloadInvalidError);
+    expect((err as EventPayloadInvalidError).code).toBe('EVENT_PAYLOAD_INVALID');
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
+  });
+
   it('rejects an unknown event type (REQ-CTR-008)', async () => {
     const room = await activeRoom();
     const err = await db.prisma
@@ -410,10 +439,76 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
       const second = bigFirst ? smallEmit : bigEmit;
       const [firstEv, secondEv] = await Promise.all([first(), second()]);
       expect(firstEv.seq).not.toBe(secondEv.seq);
+      // Payload round-trip под гонкой: повреждённая запись (обрезанный/перепутанный
+      // payload) должна провалить тест, а не пройти по одним seq.
+      const bigEv = bigFirst ? firstEv : secondEv;
+      const smallEv = bigFirst ? secondEv : firstEv;
+      expect(bigEv.payload).toEqual(big);
+      expect(smallEv.payload).toEqual(small);
     }
 
     const log = await readRoomLog(db.prisma, room.id);
     expect(log.map((e) => e.seq)).toEqual(Array.from({ length: 1 + ROUNDS * 2 }, (_, i) => i + 1));
-    expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(ROUNDS * 2);
+    const appEvents = log.filter((e) => e.type === 'test-app.note.posted');
+    expect(appEvents).toHaveLength(ROUNDS * 2);
+    // Каждый big payload доехал до storage целиком.
+    const bigEvents = appEvents.filter((e) => (e.payload as { blob?: string }).blob !== undefined);
+    expect(bigEvents).toHaveLength(ROUNDS);
+    for (const e of bigEvents) {
+      expect((e.payload as { blob: string }).blob).toHaveLength(8000);
+    }
+  });
+
+  it('rejects an emit that loses the race to a terminal transition (TOCTOU, REQ-RT-016)', async () => {
+    // Детерминированная гонка без sleep'ов: держим advisory lock комнаты в сырой
+    // транзакции на deferred; эмит проходит status-гейт по ACTIVE строке и встаёт
+    // за lock; пока он ждёт, статус коммитится в CANCELLED напрямую SQL'ем (симулируем
+    // закоммиченный терминальный переход — сознательно БЕЗ lock'а и БЕЗ log-события);
+    // отпускаем lock. С post-lock re-check эмит обязан отказаться ROOM_NOT_ACTIVE,
+    // и лог не должен ничего приобрести.
+    const room = await activeRoomWithP1P2();
+
+    let lockAcquired!: () => void;
+    let releaseLock!: () => void;
+    const acquired = new Promise<void>((resolve) => (lockAcquired = resolve));
+    const released = new Promise<void>((resolve) => (releaseLock = resolve));
+    const holdTx = db.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${room.id}, 0))`;
+      lockAcquired();
+      await released; // транзакция (и lock) открыты до сигнала
+    });
+    await acquired;
+
+    // Эмит: status-гейт пройдёт по ACTIVE, дальше — блокировка на advisory lock.
+    const emit = db.prisma
+      .$transaction((tx) =>
+        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
+      )
+      .catch((e: unknown) => e);
+
+    // Детерминированно ждём, пока эмит реально встанет в очередь за lock:
+    // в pg_locks появляется не-granted advisory-запрос (condition-poll, не sleep).
+    for (let i = 0; ; i++) {
+      const rows = await db.prisma.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+      if (rows[0].n > 0) break;
+      if (i > 1000) throw new Error('emit never queued on the room advisory lock');
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // Терминальный переход коммитится, пока эмит ждёт lock (статус пишется ДО lock'а
+    // по конвенции порядка блокировок — здесь симулируем его закоммиченный результат).
+    await db.prisma.$executeRaw`
+      UPDATE room."Room" SET status = 'CANCELLED' WHERE id = ${room.id}::uuid`;
+
+    releaseLock();
+    await holdTx;
+
+    const err = await emit;
+    expect(err).toBeInstanceOf(RoomNotActiveError);
+    expect((err as RoomNotActiveError).code).toBe('ROOM_NOT_ACTIVE');
+    // Лог запечатан: попытка эмита после терминального перехода ничего не добавила
+    // (seq 1 — core.room.activated).
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
   });
 });
