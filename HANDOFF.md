@@ -1,28 +1,28 @@
 # HANDOFF
 
-**Date:** 2026-08-05 (срез **event-commit** исполнен целиком — 9/9 задач, финальный ревью clean после фикс-волны — и слит в `main`; **push — решение владельца**)
-**Branch:** `main` (на 2 коммита впереди `origin/main`: LOC-снапшот + handoff этой сессии; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-08-05 (срез **realtime read/handshake** выбран, спроектирован и распланирован — дизайн `a749423`, план `1647f2b`, оба утверждены владельцем; **исполнение НЕ начато** — оно и есть следующая сессия; **push — решение владельца**)
+**Branch:** `main` (на 5 коммитов впереди `origin/main`: LOC-снапшот + handoff event-commit + дизайн + план + handoff этой сессии; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, **event-commit** — реализованы и слиты в `main`. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit — реализованы и слиты в `main`. **Realtime read/handshake (полный duplex) — распланирован, ждёт исполнения.** Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 **Что построил срез (event-commit):** `EventLogService.commitAppEvent` — запись app-событий в лог ядра: commit-цепочка из 8 шагов до advisory lock (status-гейт ACTIVE = запечатывание REQ-RT-016; per-actor лимит попыток REQ-RT-014 в объёме v1.3; размер REQ-RT-012; реестр+схема REQ-CTR-008; потолок видимости REQ-CTR-009 через `isWithinCeiling`; membership-гейт; append через общий приватный `appendLocked`), плюс **post-lock перечитывание статуса** (TOCTOU-фикс финального ревью — санкционированное владельцем отступление от буквы дизайна §2 «все проверки до lock»; payload-нейтральность REQ-RT-007 сохранена). Конфиг `EVENT_EMIT_RATE_LIMIT_PER_MIN`/`MAX_EVENT_PAYLOAD_BYTES` (REQ-OPS-003); типизированные realtime-ошибки (7 кодов); event read-path в `AppRegistryService`; actorId в lifecycle-эмит через `transition` (REQ-RT-009, service-уровень); характеризующие тесты конкурентного seq и payload-нейтральности (критерий выхода ф.1). Гейты на мердже: build/lint/typecheck/test(330)/test:int(106)/boundary-check/guardrails — зелёные.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
-2. **`docs/sessions/2026-08-03-event-commit-design.md` + `2026-08-04-event-commit-implementation-plan.md` — исполнены, читать только при разборе истории.** Работа в коммитах (`git log fc53f2d..0ae4608`). Живой фронт — выбор следующего среза (см. «Следующее действие»).
+2. **`docs/sessions/2026-08-05-realtime-read-handshake-design.md` + `2026-08-05-realtime-read-handshake-implementation-plan.md` — ЖИВОЙ ФРОНТ: утверждённый дизайн и план следующего среза. Исполнять план.** Решения владельца — §0 дизайна (не переоткрывать при исполнении).
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md`, `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md`, `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` — леджеры завершённых срезов (не переисполнять). Леджеры не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит. Новый леджер следующего среза создаётся рядом по той же конвенции.
+5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md`, `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md`, `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` — леджеры завершённых срезов (не переисполнять). Леджеры не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит. Новый леджер realtime-среза создаётся рядом по той же конвенции.
 6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы прежних срезов (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, membership-guest-join, transport-http-auth) читать только при разборе истории — их работа в коммитах.
+Исполненные планы прежних срезов (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, membership-guest-join, transport-http-auth, event-commit) читать только при разборе истории — их работа в коммитах.
 
 ## Следующее действие
 
-**Выбор следующего среза — решение владельца.** Кандидаты (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `commitAppEvent` + `TokenService.verifyAccessToken` + claims-формат — самый прямой шов; **требует заранее таблицы маппинга core→contract кодов ошибок** — решение владельца 2026-08-05, см. follow-up), OAuth-срез (`POST /rooms` + Google-флоу, REQ-ID-015/009).
+**Исполнение плана realtime read/handshake — subagent-driven, батчами по 3 задачи** (решение владельца 2026-08-05; батч-ограничение подтверждено). План: `docs/sessions/2026-08-05-realtime-read-handshake-implementation-plan.md` — 9 задач: (1) конфиг RECONNECT_RATE_LIMIT_PER_MIN → (2) SDK 1.2.0 wire-конверты + ACTOR_NOT_MEMBER → (3) таблица маппинга core→contract → (4) ProjectionService → (5) EventOutbox+RealtimeBus+переход RoomService на runner (атомарная, широкая) → (6) SubscriptionRegistry+findActiveMembership → (7) RealtimeGateway+IoAdapter → (8) e2e socket.io-client → (9) финальные гейты. Перед стартом — Docker Desktop запущен. После мерджа среза: LOC-снапшот по методике `docs/stats/loc-snapshots.md`.
 
-**LOC-базлайн:** `docs/stats/loc-snapshots.md` — после каждого слитого среза дописывать строку снапшота по зафиксированной там методике (сравнение роста между фазами).
+**Дальше после realtime:** OAuth-срез (`POST /rooms` + Google-флоу, REQ-ID-015/009) либо срез исключения (membership + вызов `SubscriptionRegistry.revokeRoomAccess` — закроет критерий ф.1 «немедленный отзыв подписки» целиком) — решение владельца.
 
 **Остаточные риски, принятые мерджем (из финального ревью):**
 - Строгая ротация refresh: потерянный ответ → безобидный ретрай старого токена → ревок семейства (REQ-ID-007 как спроектировано, без grace-окна; дизайн §4 принял strict detection).
@@ -57,15 +57,13 @@
 - guard в `configure` на `settings === undefined || settings === null` → `AppSettingsInvalidError` (сейчас: permissive-схема + null даёт сырую P2011 от CHECK, а re-configure с `undefined` молча оставляет stale settings под новым пином; гейт активации ловит до эмита, но отказ нетипизирован);
 - `ValidateFunction` импортировать из `ajv/dist/2020`, а не из `ajv` (type-only косметика);
 - race-тест configure-vs-activate со второй версией манифеста (quiz@2) — сейчас обе стороны гонки пинят quiz@1, и ассерт «пин == строке» проходит тривиально;
-- при появлении транспорта: зафиксировать в контрактных доках допущение «settings — не-null JSON value». (Транспорт появляется в текущем срезе — пункт можно подобрать при HTTP для configure.)
+- при появлении транспорта: зафиксировать в контрактных доках допущение «settings — не-null JSON value».
 
 **Из membership/guest-join финального ревью** (три parked-minor'а подобраны транспортным срезом; health e2e placeholder — Task 9 его плана):
 - гонка soft-delete/status-flip между проверкой и insert в `MembershipService.join` — принятый класс гонки (design fork (б)); acceptance в леджере; fail-safe (сиротская membership-строка безвредна);
 - JSDoc на `RoomService.create`: словарь политики lowercase-in (`'registered'`) / Prisma-name-out (`'REGISTERED'`).
 
-**Для плана realtime read / handshake:** проекции appSettings (ядро проецирует конфиг наравне с состоянием, ADR-008); handshake берёт готовые `TokenService.verifyAccessToken` и формат claims (`sub`, `sid`, `kind`, `roomId?`); write-path готов (`commitAppEvent`).
-
-**Для плана realtime transport (решение владельца 2026-08-05 — подобрать ОБЯЗАТЕЛЬНО):** таблица маппинга core→contract кодов ошибок event-commit. Core-имена (дизайн §6, утверждены, НЕ переименованы) расходятся с SDK-резервациями: `ROOM_NOT_ACTIVE` vs `ROOM_LOG_SEALED`, `EVENT_TYPE_UNKNOWN` vs `EVENT_UNKNOWN_TYPE`, `EVENT_VISIBILITY_EXCEEDED` vs `EVENT_VISIBILITY_WEAKER_THAN_DECLARED`, `EVENT_EMIT_RATE_LIMITED` vs `EVENT_RATE_LIMITED` (при этом header realtime.errors.ts обещает маппинг в `RATE_LIMITED` — неоднозначность разрешить в таблице); parity держат `EVENT_PAYLOAD_INVALID`, `EVENT_PAYLOAD_TOO_LARGE`. Прецедент parity-документации — `room.errors.ts:10-12`. Прочие швы транспорта: wire-exposure commit (Socket.io `publish`), подстановка actorId из auth-контекста.
+**Follow-up'ы realtime-транспорта ПОДОБРАНЫ дизайном среза** (`2026-08-05-realtime-read-handshake-design.md`): таблица маппинга core→contract — design §3 (включая разрешение неоднозначности `EVENT_RATE_LIMITED` vs `RATE_LIMITED` — §0.4, и новый код `ACTOR_NOT_MEMBER` — §0.5); wire-exposure commit (Socket.io `publish`) и подстановка actorId из auth-контекста — design §5; проекции appSettings — design §6; handshake на `verifyAccessToken` + claims — design §4.
 
 **Швы event-commit после среза (зафиксированы в плане, «Швы после среза»):** read-path (проекции, replay, курсор) → realtime read план; `soft_room_event_cap`/алерт/`room_event_cap_mode` → фаза 4; права эмита по ролям (SPECTATOR) → app-семантика, фаза 2.
 
@@ -108,36 +106,35 @@
 
 ## Осталось недоделанным
 
-- **Выбор следующего среза** (realtime read/handshake vs OAuth) — решение владельца.
-- **Push `main`** (2 коммита впереди origin после handoff-коммита) — решение владельца.
+- **Исполнение плана realtime read/handshake** (9 задач, subagent-driven, батчи по 3) — следующая сессия.
+- **Push `main`** (5 коммитов впереди origin после handoff-коммита) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **Судьба untracked `AGENTS.md`** в корне — вопрос владельцу открыт.
 
-## Session 2026-08-05 (исполнение и мердж event-commit)
+## Session 2026-08-05 (дизайн и план realtime read/handshake)
 
 ### Что сделано
 
-- **Event-commit исполнен целиком (9/9 задач)** за одну сессию, subagent-driven (свежий имплементер на задачу + двухстадийное ревью; батч-ограничение «3 задачи на сессию» снято владельцем после batch 1). Все ревью задач — clean с первого прохода, fix-лупов не было.
-- **Финальное whole-branch ревью (fable): With fixes** — 2 Important: TOCTOU в status-гейте (REQ-RT-016 держалось только последовательно) и сырой TypeError на нестрингифицируемом payload. По решению владельца оба исправлены до мерджа одной фикс-волной (`aefe96d`) + scoped re-review: все ADDRESSED, новых поломок нет.
-- **Решения владельца на финальном ревью:** TOCTOU — чинить сейчас (санкционированное отступление от буквы дизайна §2); parity имён core-кодов с SDK — НЕ переименовывать, зафиксировать таблицу core→contract маппинга как обязательный шов realtime transport плана (см. follow-up выше).
-- **Мердж по конвенции:** merge `phase-1-event-commit` → `main` (`0ae4608`, --no-ff), тесты на merged-результате зелёные, ветка удалена, `main` запушен (`e28daec..0ae4608` — включая докоммиты прошлой сессии).
-- **LOC-снапшот** дописан (`4cef61b`): prod 2 959 / tests 3 767, ratio 1.27.
+- **Выбран срез realtime read/handshake** (альтернатива — OAuth-срез; решение владельца) и пройден полный цикл brainstorm → дизайн → план.
+- **Дизайн утверждён по секциям** (`2026-08-05-realtime-read-handshake-design.md`). Ключевые решения владельца (§0): скоуп — полный duplex (handshake + subscribe/replay + live-доставка + publish в `commitAppEvent` + полная таблица маппинга); REQ-SEC-003 — hook `revokeRoomAccess` + реестр подписок сейчас, flow исключения — отдельный membership-срез; fan-out — **ALS-outbox fail-closed** (подход A; caller-side publish и LISTEN/NOTIFY отклонены); `EVENT_EMIT_RATE_LIMITED → EVENT_RATE_LIMITED` (НЕ `RATE_LIMITED` — тот остаётся транспортным); новый аддитивный код `ACTOR_NOT_MEMBER` в SDK; дефолт `visibility` в publish = потолок типа; per-event re-check членства в live-доставке не делаем.
+- **План утверждён** (`2026-08-05-realtime-read-handshake-implementation-plan.md`): 9 задач, TDD, контрактные тесты первыми; SDK minor-бамп 1.2.0; миграций БД нет; новые зависимости — socket.io + @nestjs/websockets + @nestjs/platform-socket.io (core), socket.io-client (server, dev).
+- Исполнение в этой сессии **не начиналось** — перенесено в новую сессию по решению владельца (subagent-driven, батчи по 3 задачи).
 
 ### Коммиты этой сессии
 
-- `39f3a2e` config params · `c54d5a0` EventEmitLimiter · `ec7f15e` realtime errors + registry read-path · `f9e3076` EventLogService refactor (appendLocked) · `964859c` commitAppEvent chain · `2794691` rate-limit int-tests · `57b32ec` actorId lifecycle · `64d2447` concurrency tests · `aefe96d` TOCTOU + stringify fixes
-- `0ae4608` merge(core): event-commit slice · `4cef61b` docs(stats): LOC snapshot
+- `a749423` docs(design): realtime read/handshake — полный duplex-транспорт
+- `1647f2b` docs(plan): realtime read/handshake — 9 задач
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен (int/e2e). `lt-pg` на 5432 нетронут.
+- Docker Desktop был запущен на момент сессии (нужен для int/e2e следующей сессии). `lt-pg` на 5432 нетронут.
 - Untracked `AGENTS.md` — вопрос владельцу открыт.
-- Леджер среза: `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` (полная история ревью/решений; не в git).
-- Внешние side-effects: `git push origin main` (`e28daec..0ae4608`) — по выбору владельца «мёрдж в main» в меню завершения ветки (push следует конвенции прошлых срезов).
+- Леджеров новых нет — леджер среза создастся при исполнении (`.superpowers/sdd/2026-08-05-realtime-read-handshake-implementation-plan/progress.md`).
+- Внешних side-effects нет (код не писался, push не делался).
 
 ### Осталось недоделанным
 
-- Выбор следующего среза — решение владельца.
-- Push handoff/LOC коммитов — решение владельца.
+- Исполнение плана — следующая сессия (см. «Следующее действие»).
+- Push handoff/design/plan коммитов — решение владельца.
 - Юрист — гейт 1 открыт, действие вне агента.
