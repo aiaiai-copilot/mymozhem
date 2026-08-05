@@ -319,3 +319,101 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
     expect(err).toBeInstanceOf(EventEmitRateLimitedError);
   });
 });
+
+describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
+  let db: TestDb;
+  let rooms: RoomService;
+  let eventLog: EventLogService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+    await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
+    const registry = new AppRegistryService([TEST_APP]);
+    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG);
+    rooms = new RoomService(
+      db.prisma,
+      eventLog,
+      registry,
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+      ),
+      TEST_CONFIG,
+    );
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+  });
+
+  async function activeRoomWithP1P2() {
+    const room = await rooms.create(ORG);
+    await rooms.configure(room.id, { appId: 'test-app', manifestVersion: 1, settings: { label: 'x' } });
+    await rooms.activate(room.id);
+    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
+    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P2, role: 'PARTICIPANT' } });
+    return room;
+  }
+
+  it('serializes concurrent app commits: dense seqs after activation', async () => {
+    const room = await activeRoomWithP1P2();
+    const N = 8;
+
+    const committed = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        db.prisma.$transaction((tx) =>
+          eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: i }, 'public', P1),
+        ),
+      ),
+    );
+
+    // seq 1 — core.room.activated; app-события занимают ровно {2..N+1}.
+    expect(new Set(committed.map((e) => e.seq))).toEqual(
+      new Set(Array.from({ length: N }, (_, i) => i + 2)),
+    );
+    expect((await readRoomLog(db.prisma, room.id)).map((e) => e.seq)).toEqual(
+      Array.from({ length: N + 1 }, (_, i) => i + 1),
+    );
+  });
+
+  it('payload-neutrality: mixed-size races stay dense and all-valid', async () => {
+    // Отложенный тест lifecycle-среза (§10). Принуждаемое свойство: валидация —
+    // до lock (design §2), поэтому размер payload не меняет исход гонки — обе
+    // записи валидны, seq плотные при любом порядке старта. Порядок захвата lock
+    // black-box не наблюдаем; детерминированно проверяем контракт на смешанных
+    // размерах с чередованием порядка старта.
+    const room = await activeRoomWithP1P2();
+    const ROUNDS = 20;
+    const big = { n: 1, blob: 'x'.repeat(8000) }; // < MAX_EVENT_PAYLOAD_BYTES
+    const small = { n: 2 };
+
+    for (let round = 0; round < ROUNDS; round++) {
+      const bigFirst = round % 2 === 0;
+      const bigEmit = () =>
+        db.prisma.$transaction((tx) =>
+          eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', P1),
+        );
+      const smallEmit = () =>
+        db.prisma.$transaction((tx) =>
+          eventLog.commitAppEvent(tx, room.id, 'note.posted', small, 'public', P2),
+        );
+      // Чередуем порядок СТАРТА (создания промисов): bigFirst либо smallFirst.
+      const first = bigFirst ? bigEmit : smallEmit;
+      const second = bigFirst ? smallEmit : bigEmit;
+      const [firstEv, secondEv] = await Promise.all([first(), second()]);
+      expect(firstEv.seq).not.toBe(secondEv.seq);
+    }
+
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log.map((e) => e.seq)).toEqual(Array.from({ length: 1 + ROUNDS * 2 }, (_, i) => i + 1));
+    expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(ROUNDS * 2);
+  });
+});
