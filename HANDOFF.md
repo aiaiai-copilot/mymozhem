@@ -1,30 +1,28 @@
 # HANDOFF
 
-**Date:** 2026-08-04 (выбран и спланирован срез **event-commit**; дизайн и план утверждены и закоммичены; исполнение — subagent-driven, батч 1 = tasks 1–3, в НОВОЙ сессии по решению владельца)
-**Branch:** `main` (на 5 коммитов впереди `origin/main`: handoff + LOC-базлайн + pointer + дизайн + план event-commit; **push — решение владельца**; untracked `AGENTS.md` — не сессионный, не трогать).
+**Date:** 2026-08-05 (срез **event-commit** исполнен целиком — 9/9 задач, финальный ревью clean после фикс-волны — и слит в `main`; **push — решение владельца**)
+**Branch:** `main` (на 2 коммита впереди `origin/main`: LOC-снапшот + handoff этой сессии; untracked `AGENTS.md` — не сессионный, не трогать).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP — реализованы и слиты в `main`. **Event-commit — спланирован, не исполнен.** Леджеры исполнения прежних срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, **event-commit** — реализованы и слиты в `main`. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
-**Что построил срез:** `POST /rooms/join` + `POST /auth/refresh`; access JWT HS256 + httpOnly refresh-cookie с ротацией семейств и reuse-detection (`identity."Session"`, REQ-ID-007/008/016); единый фильтр ошибок, наружу ровно `{code}` (REQ-SEC-006); join/refresh rate-limit с lazy sweep (REQ-ID-006, REQ-SEC-007); helmet/CORS-allowlist/trustProxy из конфига (REQ-SEC-008); fail-closed JWT_SECRET (REQ-SEC-002); SDK-контракт 1.1.0; seed-скрипт `pnpm create-room` (REQ-SEC-001). Гейты: build/lint/typecheck/test(320)/test:int(88)/boundary-check/guardrails — зелёные; docker smoke: 403 ROOM_JOIN_DENIED на join с неверным кодом.
+**Что построил срез (event-commit):** `EventLogService.commitAppEvent` — запись app-событий в лог ядра: commit-цепочка из 8 шагов до advisory lock (status-гейт ACTIVE = запечатывание REQ-RT-016; per-actor лимит попыток REQ-RT-014 в объёме v1.3; размер REQ-RT-012; реестр+схема REQ-CTR-008; потолок видимости REQ-CTR-009 через `isWithinCeiling`; membership-гейт; append через общий приватный `appendLocked`), плюс **post-lock перечитывание статуса** (TOCTOU-фикс финального ревью — санкционированное владельцем отступление от буквы дизайна §2 «все проверки до lock»; payload-нейтральность REQ-RT-007 сохранена). Конфиг `EVENT_EMIT_RATE_LIMIT_PER_MIN`/`MAX_EVENT_PAYLOAD_BYTES` (REQ-OPS-003); типизированные realtime-ошибки (7 кодов); event read-path в `AppRegistryService`; actorId в lifecycle-эмит через `transition` (REQ-RT-009, service-уровень); характеризующие тесты конкурентного seq и payload-нейтральности (критерий выхода ф.1). Гейты на мердже: build/lint/typecheck/test(330)/test:int(106)/boundary-check/guardrails — зелёные.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
-2. **`docs/sessions/2026-08-03-event-commit-design.md` + `2026-08-04-event-commit-implementation-plan.md` — текущий фронт работ.** Дизайн: §0 — решения владельца (только core-service API, membership-гейт, actorId в lifecycle в скоупе, подход A — цепочка в EventLogService), §2 — commit-цепочка из 8 шагов, §10 — швы. План: 9 задач с TDD-циклами, отступления от буквы дизайна (implementation-уровень) зафиксированы в шапке плана, таблица spec coverage в конце.
+2. **`docs/sessions/2026-08-03-event-commit-design.md` + `2026-08-04-event-commit-implementation-plan.md` — исполнены, читать только при разборе истории.** Работа в коммитах (`git log fc53f2d..0ae4608`). Живой фронт — выбор следующего среза (см. «Следующее действие»).
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` и `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md` — леджеры завершённых срезов (не переисполнять). Леджеры не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит. Новый леджер следующего среза создаётся рядом по той же конвенции.
+5. `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md`, `.superpowers/sdd/2026-07-30-transport-http-auth-implementation-plan/progress.md`, `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` — леджеры завершённых срезов (не переисполнять). Леджеры не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит. Новый леджер следующего среза создаётся рядом по той же конвенции.
 6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
 Исполненные планы прежних срезов (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, membership-guest-join, transport-http-auth) читать только при разборе истории — их работа в коммитах.
 
 ## Следующее действие
 
-**Исполнение плана event-commit, батч 1 = tasks 1–3** (subagent-driven: свежий имплементер + двухстадийное ревью на задачу; батч = сессия — решение владельца, исполнение стартует в новой сессии). План: `docs/sessions/2026-08-04-event-commit-implementation-plan.md` (9 задач, spec coverage в конце). Перед стартом: создать SDD-леджер `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` по конвенции прежних срезов; Docker Desktop нужен уже с Task 5 (int-спеки).
+**Выбор следующего среза — решение владельца.** Кандидаты (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `commitAppEvent` + `TokenService.verifyAccessToken` + claims-формат — самый прямой шов; **требует заранее таблицы маппинга core→contract кодов ошибок** — решение владельца 2026-08-05, см. follow-up), OAuth-срез (`POST /rooms` + Google-флоу, REQ-ID-015/009).
 
 **LOC-базлайн:** `docs/stats/loc-snapshots.md` — после каждого слитого среза дописывать строку снапшота по зафиксированной там методике (сравнение роста между фазами).
-
-**Кандидаты на следующий срез** (из follow-up пакетов ниже): realtime read/handshake (берёт готовые `TokenService.verifyAccessToken` + claims-формат — самый прямой шов, дизайн §10), event-commit (отложенные тесты actorId≠null и payload-нейтральности гонки за seq), OAuth-срез (`POST /rooms` + Google-флоу, REQ-ID-015/009).
 
 **Остаточные риски, принятые мерджем (из финального ревью):**
 - Строгая ротация refresh: потерянный ответ → безобидный ретрай старого токена → ревок семейства (REQ-ID-007 как спроектировано, без grace-окна; дизайн §4 принял strict detection).
@@ -34,20 +32,17 @@
 - **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
 
 **Принятые при исполнении отклонения от плана (все прошли ревью, зафиксированы в леджере):**
-- `packages/core` без fastify-зависимости → структурные типы `RequestLike`/`ReplyLike` (`transport/http.types.ts`) вместо `FastifyReply/FastifyRequest` (чистота границы, ADR-002-friendly).
-- HttpException сохраняет свой статус (404→`REQUEST_INVALID`, 503→`INTERNAL_ERROR`) — плановая таблица важнее код-скетча.
-- Race-тест rotate: alive-count по `{revokedAt: null, replacedById: null}` (design §4 метит ротированные через `replacedById`).
-- Терминальная комната в тестах — через `cancel` (DRAFT→CANCELLED); DRAFT→COMPLETED нелегален.
-- `NODE_OPTIONS=--experimental-vm-modules` в test-скрипте apps/server (ESM-only `cookie@2` под jest 29 CJS — верифицировано, изолировано).
-- Seed-скрипт импортирует core через `dist/*.js` subpath'ы (баррел тянет testcontainers — см. ограничения ниже).
-- **Финальное ревью (fable, whole-branch):** MERGE-READY. Единственный Important — reuse-detection не логировался, хотя дизайн §11 обосновывает коллапс кодов серверным логом — по решению владельца исправлен до мерджа (`519fd8a`: `logger.warn` на AuthError-ветке, wire неизменён, токен-материала в логах нет). Все deferred-миноры леджера оттриажены: fix-before-merge нет.
+- **TOCTOU-фикс (финальное ревью, решение владельца):** post-lock перечитывание статуса комнаты в `commitAppEvent` — санкционированное отступление от буквы дизайна §2 «все проверки ДО lock»; guard app-only (`commitCoreEvent` не тронут), детерминированный гоночный int-тест (pg_locks condition-poll) с fails-without-fix верификацией. Дух дизайна (payload-нейтральность) сохранён: перечитывание O(1), от размера payload не зависит.
+- Safe-stringify helper: нестрингифицируемый payload (undefined/BigInt/circular) → типизированная `EVENT_PAYLOAD_INVALID` вместо сырого TypeError (порядок шагов цепочки не изменён).
+- Косметика: unused-импорт `EventEmitRateLimitedError` убран из int-спеки в Task 5 (lint-гейт) и возвращён в Task 6; локаль `base` → `envBase` в config-спеке (тень от top-level).
+- Транспортный срез — его отклонения и опыт батчей: `git show 2baf523:HANDOFF.md` (вырезано по принципу роста).
 
-Опыт батча 1 для следующих сессий:
-- Имплементеры дважды пытались писать report/brief в `~/.superpowers` вместо репозиторного `.superpowers` — после каждого имплементера проверять наличие report-файла в workspace ДО диспатча ревьюера (промпт даёт абсолютный путь, но проверка дешевле резюма агента).
-- Плановый jest-фильтр Task 3 `-t "Session schema"` матчит ноль тестов (кавычка в имени describe) — писать в диспатчах рабочую форму фильтра, ловушка «0 tests, exit 0» реальна.
-- Docker Desktop нужен уже с Task 3 (миграция) и далее (int-ланы, e2e, smoke).
+Опыт этой сессии для следующих:
+- Имплементеры стабильно путают `~/.superpowers` с репозиторным `.superpowers` — проверять наличие report-файла в workspace ДО диспатча ревьюера.
+- **apps/server e2e резолвит `@mymozhem/core` из dist** — перед `pnpm --filter @mymozhem/server test` обязателен `pnpm build`, иначе TS2305 на свежих экспортах (поймано дважды: Tasks 4 и 7).
+- Jest-фильтр без `--` (ловушка «0 tests, exit 0») — уже в «Долгоживущих ограничениях»; фильтр всегда проверять на >0 матчей.
 
-Перед стартом батча — Docker Desktop должен быть запущен (int/e2e/smoke поднимают контейнеры Postgres).
+Перед стартом работ — Docker Desktop должен быть запущен (int/e2e/smoke поднимают контейнеры Postgres).
 
 **Ключевые решения владельца, зашитые в дизайн (§0) — не переоткрывать при исполнении:**
 - Google OAuth НЕ в срезе; комнаты к первому событию — seed-скриптом через core-сервисы (Task 11), служебный REGISTERED-организатор без логина.
@@ -64,13 +59,17 @@
 - race-тест configure-vs-activate со второй версией манифеста (quiz@2) — сейчас обе стороны гонки пинят quiz@1, и ассерт «пин == строке» проходит тривиально;
 - при появлении транспорта: зафиксировать в контрактных доках допущение «settings — не-null JSON value». (Транспорт появляется в текущем срезе — пункт можно подобрать при HTTP для configure.)
 
-**Для среза event-commit (из дизайна lifecycle-эмита, §10):** подобрать отложенные тесты actorId≠null и payload-нейтральности гонки за seq.
-
-**Из membership/guest-join финального ревью — ОСТАЁТСЯ после транспортного среза** (три parked-minor'а подобраны планом: eviction лимитера, real-IP, uuid-маппинг; health e2e placeholder — Task 9 плана):
+**Из membership/guest-join финального ревью** (три parked-minor'а подобраны транспортным срезом; health e2e placeholder — Task 9 его плана):
 - гонка soft-delete/status-flip между проверкой и insert в `MembershipService.join` — принятый класс гонки (design fork (б)); acceptance в леджере; fail-safe (сиротская membership-строка безвредна);
 - JSDoc на `RoomService.create`: словарь политики lowercase-in (`'registered'`) / Prisma-name-out (`'REGISTERED'`).
 
-**Для плана realtime read / handshake:** проекции appSettings (ядро проецирует конфиг наравне с состоянием, ADR-008); handshake берёт готовые `TokenService.verifyAccessToken` и формат claims (`sub`, `sid`, `kind`, `roomId?`) — шов зафиксирован в дизайне §10.
+**Для плана realtime read / handshake:** проекции appSettings (ядро проецирует конфиг наравне с состоянием, ADR-008); handshake берёт готовые `TokenService.verifyAccessToken` и формат claims (`sub`, `sid`, `kind`, `roomId?`); write-path готов (`commitAppEvent`).
+
+**Для плана realtime transport (решение владельца 2026-08-05 — подобрать ОБЯЗАТЕЛЬНО):** таблица маппинга core→contract кодов ошибок event-commit. Core-имена (дизайн §6, утверждены, НЕ переименованы) расходятся с SDK-резервациями: `ROOM_NOT_ACTIVE` vs `ROOM_LOG_SEALED`, `EVENT_TYPE_UNKNOWN` vs `EVENT_UNKNOWN_TYPE`, `EVENT_VISIBILITY_EXCEEDED` vs `EVENT_VISIBILITY_WEAKER_THAN_DECLARED`, `EVENT_EMIT_RATE_LIMITED` vs `EVENT_RATE_LIMITED` (при этом header realtime.errors.ts обещает маппинг в `RATE_LIMITED` — неоднозначность разрешить в таблице); parity держат `EVENT_PAYLOAD_INVALID`, `EVENT_PAYLOAD_TOO_LARGE`. Прецедент parity-документации — `room.errors.ts:10-12`. Прочие швы транспорта: wire-exposure commit (Socket.io `publish`), подстановка actorId из auth-контекста.
+
+**Швы event-commit после среза (зафиксированы в плане, «Швы после среза»):** read-path (проекции, replay, курсор) → realtime read план; `soft_room_event_cap`/алерт/`room_event_cap_mode` → фаза 4; права эмита по ролям (SPECTATOR) → app-семантика, фаза 2.
+
+**Deferred-миноры event-commit (оттриажены финальным ревью, ride — не гейтят):** `eventValidatorFor` игнорирует schema-аргумент на cache-hit (структурно безопасно при boot-реестре; hardening — вычислять схему внутри по ключу); некомпилируемая app-схема падает лениво на первом коммите, не при регистрации манифеста (кандидат для app-registration среза — boot-time compile-check, fail-closed); 6 точек ручного конструирования `EventLogService` в спеках дрейфуют при росте зависимостей (кандидат — test-module builder); размер-раньше-реестра → oversized payload для неизвестного типа даёт `EVENT_PAYLOAD_TOO_LARGE` (осознанный порядок, не дефект).
 
 **Для OAuth-среза:** `POST /rooms` + Google-флоу (REQ-ID-015/009); REGISTERED-ветка `TokenService` без roomId-scope; таблица сессий и фильтр уже будут на месте (швы дизайна §10).
 
@@ -105,43 +104,40 @@
 - **`updateManyAndReturn` доступен на закреплённой Prisma 7.8.0** — схлопнет 3 запроса в 2 в обеих мутациях `RoomService` (transition/softDelete) и попутно уберёт дублирование хвоста `if (count===0) throw` + re-read. Проверено ревьюером, не гипотеза. **Осторожно:** `transition` — транзакция с побочным эмитом; применение updateManyAndReturn не должно разорвать атомарность «UPDATE + лог». После appSettings-среза в transition есть ещё и post-lock re-read — его роль (консистентный снимок пина) не спутать с рефакторингом. Аналогичный 2-запросный паттерн и в `configure` — тот же кандидат.
 - **Нет гейта на дрейф миграций.** `prisma migrate diff --from-migrations` здесь непригоден: Prisma 7.8 требует `datasource.shadowDatabaseUrl` в `prisma.config.ts`, которого нет. Стоит завести настоящий гейт, пока миграций мало.
 - **Общая рекурсивная `jsonValueSchema`** для payload в `log-event`/`projected-event` — `z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002.
-- **Комментарий-шов о конвенции порядка блокировок в `event-log.service.ts`** (advisory lock — всегда leaf-most) — добавить в ближайшем срезе, трогающем файл, без отдельного коммита (appSettings-срез файл не трогал).
 - Косметика: breadcrumb в `schema.prisma` о существовании рукописного CHECK; ассерт ортогональности soft-delete добавлен только для ветки CANCELLED (из трёх удаляемых статусов).
 
 ## Осталось недоделанным
 
-- **Исполнение плана event-commit** — не начато (батч 1 = tasks 1–3, новая сессия).
-- **Push `main`** (5 коммитов впереди origin) — решение владельца.
+- **Выбор следующего среза** (realtime read/handshake vs OAuth) — решение владельца.
+- **Push `main`** (2 коммита впереди origin после handoff-коммита) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **Судьба untracked `AGENTS.md`** в корне — вопрос владельцу открыт.
 
-## Session 2026-08-04 (мердж транспортного среза + выбор/планирование event-commit)
+## Session 2026-08-05 (исполнение и мердж event-commit)
 
 ### Что сделано
 
-- **Мердж и push транспортного среза** по решению владельца: гейты на ветке зелёные → merge `phase-1-transport-http-auth` → `main` (`e28daec`, --no-ff) → тесты на результате зелёные → ветка удалена локально и на origin → `main` запушен (`f4ec5a7..e28daec`).
-- **LOC-базлайн:** `docs/stats/loc-snapshots.md` + указатель в HANDOFF (дописывать снапшот после каждого слитого среза).
-- **Выбран следующий срез — event-commit** (альтернативы realtime read/handshake и OAuth — в follow-up; realtime идёт после event-commit, чтобы replay/проекции тестировать на реальном потоке app-событий).
-- **Brainstorm → дизайн → план по конвейеру superpowers.** Развилки закрыты владельцем: только core-service API (без HTTP-эндпоинта и test-app пакета); membership-гейт актора; actorId в lifecycle — в скоупе; подход A (цепочка в EventLogService, общий приватный appendLocked).
-- **Дизайн** `docs/sessions/2026-08-03-event-commit-design.md` утверждён по секциям (§1–7): commit-цепочка 8 шагов (status-гейт только ACTIVE = запечатывание REQ-RT-016; per-actor лимит REQ-RT-014 в объёме v1.3; размер REQ-RT-012; реестр+схема REQ-CTR-008; потолок видимости REQ-CTR-009; membership), конфиг-параметры §4, realtime-ошибки, проводка actorId через transition.
-- **План** `docs/sessions/2026-08-04-event-commit-implementation-plan.md` — 9 задач с TDD-циклами и готовым кодом; self-review пройден (UUID-константа, порядок промисов в race-тесте). Вскрыто при планировании: `isWithinCeiling` уже существует в SDK (переиспользование), фикстурный `test-app@1` — сырым JSON по паттерну validManifests.
-- Решение владельца: исполнение subagent-driven, **батч 1 = tasks 1–3 в новой сессии**.
+- **Event-commit исполнен целиком (9/9 задач)** за одну сессию, subagent-driven (свежий имплементер на задачу + двухстадийное ревью; батч-ограничение «3 задачи на сессию» снято владельцем после batch 1). Все ревью задач — clean с первого прохода, fix-лупов не было.
+- **Финальное whole-branch ревью (fable): With fixes** — 2 Important: TOCTOU в status-гейте (REQ-RT-016 держалось только последовательно) и сырой TypeError на нестрингифицируемом payload. По решению владельца оба исправлены до мерджа одной фикс-волной (`aefe96d`) + scoped re-review: все ADDRESSED, новых поломок нет.
+- **Решения владельца на финальном ревью:** TOCTOU — чинить сейчас (санкционированное отступление от буквы дизайна §2); parity имён core-кодов с SDK — НЕ переименовывать, зафиксировать таблицу core→contract маппинга как обязательный шов realtime transport плана (см. follow-up выше).
+- **Мердж по конвенции:** merge `phase-1-event-commit` → `main` (`0ae4608`, --no-ff), тесты на merged-результате зелёные, ветка удалена, `main` запушен (`e28daec..0ae4608` — включая докоммиты прошлой сессии).
+- **LOC-снапшот** дописан (`4cef61b`): prod 2 959 / tests 3 767, ratio 1.27.
 
 ### Коммиты этой сессии
 
-- `e28daec` merge(core): transport auth/HTTP slice (уже был на ветке) + push
-- `2baf523` docs(handoff): transport slice merged · `37f09de` docs(stats): LOC baseline · `9028040` docs(handoff): pointer
-- `ad8688a` docs(design): event-commit slice design · `ddf18ac` docs(plan): event-commit implementation plan
+- `39f3a2e` config params · `c54d5a0` EventEmitLimiter · `ec7f15e` realtime errors + registry read-path · `f9e3076` EventLogService refactor (appendLocked) · `964859c` commitAppEvent chain · `2794691` rate-limit int-tests · `57b32ec` actorId lifecycle · `64d2447` concurrency tests · `aefe96d` TOCTOU + stringify fixes
+- `0ae4608` merge(core): event-commit slice · `4cef61b` docs(stats): LOC snapshot
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop запущен (нужен с Task 5 плана — int-спеки). `lt-pg` на 5432 нетронут.
+- Docker Desktop запущен (int/e2e). `lt-pg` на 5432 нетронут.
 - Untracked `AGENTS.md` — вопрос владельцу открыт.
-- Внешние side-effects: `git push origin main` + удаление удалённой ветки среза (по явному решению владельца).
+- Леджер среза: `.superpowers/sdd/2026-08-04-event-commit-implementation-plan/progress.md` (полная история ревью/решений; не в git).
+- Внешние side-effects: `git push origin main` (`e28daec..0ae4608`) — по выбору владельца «мёрдж в main» в меню завершения ветки (push следует конвенции прошлых срезов).
 
 ### Осталось недоделанным
 
-- Исполнение плана event-commit (батч 1 = tasks 1–3, новая сессия).
-- Push `main` (коммиты этой сессии) — решение владельца.
+- Выбор следующего среза — решение владельца.
+- Push handoff/LOC коммитов — решение владельца.
 - Юрист — гейт 1 открыт, действие вне агента.
