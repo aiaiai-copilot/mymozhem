@@ -1,13 +1,13 @@
 // Core-internal typed errors of the event-commit chain (design §6). Не часть
-// SDK-контракта: wire-маппинг придёт с realtime-транспортом (EVENT_EMIT_RATE_LIMITED
-// → единый RATE_LIMITED по конвенции transport-среза).
+// SDK-контракта: wire-маппинг — error-mapping.ts (EVENT_EMIT_RATE_LIMITED →
+// EVENT_RATE_LIMITED, решение владельца 2026-08-05, design realtime §0.4).
 export const REALTIME_ERROR_CODES = {
   ROOM_NOT_ACTIVE: 'ROOM_NOT_ACTIVE',
   EVENT_EMIT_RATE_LIMITED: 'EVENT_EMIT_RATE_LIMITED',
   EVENT_PAYLOAD_TOO_LARGE: 'EVENT_PAYLOAD_TOO_LARGE',
   EVENT_TYPE_UNKNOWN: 'EVENT_TYPE_UNKNOWN',
-  // Строковый паритет с кодом ContractError SDK (commitCoreEvent): будущий транспорт
-  // отобразит code→code 1:1.
+  // Строковый паритет с кодом ContractError SDK (commitCoreEvent): транспорт
+  // отображает code→code 1:1 в error-mapping.ts.
   EVENT_PAYLOAD_INVALID: 'EVENT_PAYLOAD_INVALID',
   EVENT_VISIBILITY_EXCEEDED: 'EVENT_VISIBILITY_EXCEEDED',
   ACTOR_NOT_MEMBER: 'ACTOR_NOT_MEMBER',

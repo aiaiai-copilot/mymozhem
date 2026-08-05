@@ -8,9 +8,11 @@ import {
   AppRegistryService,
   EventEmitLimiter,
   EventLogService,
+  EventOutbox,
   IdentityService,
   JoinRateLimiter,
   MembershipService,
+  RealtimeBus,
   RoomService,
   TEST_CONFIG,
   TokenService,
@@ -93,13 +95,16 @@ describe('Transport HTTP (e2e)', () => {
     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(
         new AppRegistryService([]),
         new EventEmitLimiter(1000),
         TEST_CONFIG,
+        outbox,
       ),
+      outbox,
       new AppRegistryService([]),
       new MembershipService(
         db.prisma,

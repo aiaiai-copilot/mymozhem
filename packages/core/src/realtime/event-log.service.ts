@@ -12,6 +12,7 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { EventEmitLimiter } from './event-emit-limiter';
+import { EventOutbox } from './event-outbox';
 import {
   ActorNotMemberError,
   EventEmitRateLimitedError,
@@ -39,6 +40,22 @@ function stringifyAppPayload(payload: unknown, eventType: string): string {
   return serialized;
 }
 
+// $queryRaw обходит клиентское маппирование enum (schema.prisma: PUBLIC @map("public")):
+// INSERT ... RETURNING * отдаёт сырую DB-метку ('public'), а контракт LogEvent —
+// Prisma-enum ('PUBLIC'). Staged/возвращаемое событие обязано быть LogEvent: fan-out
+// gateway сравнивает visibility с Prisma-enum (вскрыто realtime e2e, Task 8 —
+// live-доставка молча пропадала для всех событий; replay читает через Prisma-клиент
+// и затронут не был).
+const VISIBILITY_FROM_DB: Record<string, LogEvent['visibility']> = {
+  public: 'PUBLIC',
+  organizer: 'ORGANIZER',
+  'module-private': 'MODULE_PRIVATE',
+};
+
+function asLogEvent(row: LogEvent): LogEvent {
+  return { ...row, visibility: VISIBILITY_FROM_DB[row.visibility as string] ?? row.visibility };
+}
+
 // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
 // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
 // Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
@@ -46,12 +63,14 @@ function stringifyAppPayload(payload: unknown, eventType: string): string {
 // Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
 // комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
 // в room."Room".
+// Commit без EventOutbox.run отклоняется (fail-closed staging в appendLocked).
 @Injectable()
 export class EventLogService {
   constructor(
     private readonly appRegistry: AppRegistryService,
     private readonly emitLimiter: EventEmitLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly outbox: EventOutbox,
   ) {}
 
   async commitCoreEvent(
@@ -209,6 +228,11 @@ export class EventLogService {
       WHERE "roomId" = ${roomId}::uuid
       RETURNING *
     `;
-    return rows[0];
+    // Staging в tx-outbox (design §5): доставка — после коммита, через runner.
+    // Вне контекста — fail-closed: событие без пути доставки не коммитится.
+    // asLogEvent: RETURNING * — сырой результат, enum-метки нормализуются (см. выше).
+    const event = asLogEvent(rows[0]);
+    this.outbox.stage(event);
+    return event;
   }
 }

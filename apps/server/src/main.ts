@@ -4,7 +4,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
-import { loadConfig } from '@mymozhem/core';
+import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
@@ -23,6 +23,9 @@ async function bootstrap(): Promise<void> {
   await app.register(fastifyHelmet);
   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
+  // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
+  // HTTP-сервер передаём явно: Nest не инжектирует его в пользовательский адаптер.
+  app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
   await app.listen(config.PORT, '0.0.0.0');
 }
 

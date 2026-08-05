@@ -18,6 +18,9 @@ import { IdentityService } from '@mymozhem/core/dist/identity/identity.service.j
 import { MembershipService } from '@mymozhem/core/dist/membership/membership.service.js';
 import { JoinRateLimiter } from '@mymozhem/core/dist/membership/join-rate-limiter.js';
 import { EventLogService } from '@mymozhem/core/dist/realtime/event-log.service.js';
+import { EventEmitLimiter } from '@mymozhem/core/dist/realtime/event-emit-limiter.js';
+import { RealtimeBus } from '@mymozhem/core/dist/realtime/realtime-bus.js';
+import { EventOutbox } from '@mymozhem/core/dist/realtime/event-outbox.js';
 import { AppRegistryService } from '@mymozhem/core/dist/app-registry/app-registry.service.js';
 import { RoomService } from '@mymozhem/core/dist/room/room.service.js';
 
@@ -32,7 +35,8 @@ const prisma = new PrismaService();
 await prisma.onModuleInit();
 try {
   // Ручная сборка по паттерну core int-спек (design §8): порядок зависимостей
-  // PrismaService → IdentityService/JoinRateLimiter → MembershipService → RoomService.
+  // PrismaService → IdentityService/JoinRateLimiter → MembershipService →
+  // RealtimeBus/EventOutbox → EventLogService → RoomService.
   const identity = new IdentityService(prisma);
   const membership = new MembershipService(
     prisma,
@@ -40,10 +44,13 @@ try {
     new JoinRateLimiter(config.JOIN_RATE_LIMIT_IP),
     config,
   );
+  const registry = new AppRegistryService([]);
+  const outbox = new EventOutbox(prisma, new RealtimeBus());
   const rooms = new RoomService(
     prisma,
-    new EventLogService(),
-    new AppRegistryService([]),
+    new EventLogService(registry, new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN), config, outbox),
+    outbox,
+    registry,
     membership,
     config,
   );
