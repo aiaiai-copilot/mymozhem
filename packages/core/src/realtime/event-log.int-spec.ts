@@ -9,6 +9,7 @@ import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
+import { EventEmitLimiter } from './event-emit-limiter';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -22,7 +23,11 @@ describe('EventLogService.commitCoreEvent', () => {
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     rooms = new RoomService(
       db.prisma,
-      new EventLogService(),
+      new EventLogService(
+        new AppRegistryService([validManifests[0]]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+      ),
       new AppRegistryService([validManifests[0]]),
       new MembershipService(
         db.prisma,
@@ -32,7 +37,11 @@ describe('EventLogService.commitCoreEvent', () => {
       ),
       TEST_CONFIG,
     );
-    eventLog = new EventLogService();
+    eventLog = new EventLogService(
+      new AppRegistryService([validManifests[0]]),
+      new EventEmitLimiter(1000),
+      TEST_CONFIG,
+    );
   }, 120000);
 
   afterAll(async () => {

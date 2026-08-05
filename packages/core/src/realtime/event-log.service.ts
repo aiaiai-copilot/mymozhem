@@ -1,16 +1,32 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { LogEvent, Prisma } from '@prisma/client';
-import { CORE_EVENTS, ContractError, coreEventType, type CoreEventName } from '@mymozhem/sdk';
+import {
+  CORE_EVENTS,
+  ContractError,
+  coreEventType,
+  type CoreEventName,
+  type Visibility,
+} from '@mymozhem/sdk';
+import { APP_CONFIG } from '../config/config.tokens';
+import type { AppConfig } from '../config/config.schema';
+import { AppRegistryService } from '../app-registry/app-registry.service';
+import { EventEmitLimiter } from './event-emit-limiter';
 
-// Append-only commit-примитив для core-типов событий (design §3). ЕДИНСТВЕННЫЙ путь
-// записи в realtime."LogEvent". Порядок шагов контрактуален (SDK-дизайн §7):
-// валидация payload — ДО входа в критическую секцию, затем advisory lock на комнату
-// и атомарное присвоение seq — размер payload не влияет на исход гонки (REQ-RT-007).
-// Шаги 1–7 цепочки app-событий (sealing REQ-RT-016, размер REQ-RT-012, rate-limit
-// REQ-RT-014, actorId из auth REQ-RT-009, реестр REQ-CTR-008) встают перед шагом 3
-// без изменения шагов 3–4 — шов event-commit плана (design §10).
+// Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
+// realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
+// Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
+// ДО advisory lock, размер payload не влияет на исход гонки за seq.
+// Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
+// комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
+// в room."Room".
 @Injectable()
 export class EventLogService {
+  constructor(
+    private readonly appRegistry: AppRegistryService,
+    private readonly emitLimiter: EventEmitLimiter,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+  ) {}
+
   async commitCoreEvent(
     tx: Prisma.TransactionClient,
     roomId: string,
@@ -26,6 +42,28 @@ export class EventLogService {
         `payload of ${coreEventType(name)} does not match its core schema`,
       );
     }
+    return this.appendLocked(
+      tx,
+      roomId,
+      coreEventType(name),
+      parsed.data,
+      actorId,
+      definition.visibility,
+      definition.version,
+    );
+  }
+
+  // commitAppEvent добавляется Task 5 — шов дизайна §2.
+
+  private async appendLocked(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    type: string,
+    payload: unknown,
+    actorId: string | null,
+    visibility: Visibility,
+    schemaVersion: number,
+  ): Promise<LogEvent> {
     // $executeRaw, не $queryRaw: pg_advisory_xact_lock возвращает void, а $queryRaw
     // пытается десериализовать колонку результата и падает на типе 'void'.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roomId}, 0))`;
@@ -34,11 +72,11 @@ export class EventLogService {
         ("roomId", "seq", "type", "payload", "actorId", "visibility", "schemaVersion")
       SELECT ${roomId}::uuid,
              COALESCE(MAX("seq"), 0) + 1,
-             ${coreEventType(name)},
-             ${JSON.stringify(parsed.data)}::jsonb,
+             ${type},
+             ${JSON.stringify(payload)}::jsonb,
              ${actorId}::uuid,
-             ${definition.visibility}::realtime."EventVisibility",
-             ${definition.version}
+             ${visibility}::realtime."EventVisibility",
+             ${schemaVersion}
       FROM realtime."LogEvent"
       WHERE "roomId" = ${roomId}::uuid
       RETURNING *

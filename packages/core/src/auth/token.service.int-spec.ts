@@ -2,6 +2,7 @@ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { TEST_CONFIG } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
+import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
 import { IdentityService } from '../identity/identity.service';
@@ -38,7 +39,11 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
     );
     roomService = new RoomService(
       db.prisma,
-      new EventLogService(),
+      new EventLogService(
+        new AppRegistryService([]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+      ),
       new AppRegistryService([]),
       membership,
       TEST_CONFIG,

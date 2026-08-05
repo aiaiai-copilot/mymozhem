@@ -4,6 +4,7 @@ import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
 import { TEST_CONFIG } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
+import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -27,7 +28,11 @@ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
 const makeService = (db: TestDb) =>
   new RoomService(
     db.prisma,
-    new EventLogService(),
+    new EventLogService(
+      new AppRegistryService([validManifests[0]]),
+      new EventEmitLimiter(1000),
+      TEST_CONFIG,
+    ),
     new AppRegistryService([validManifests[0]]),
     new MembershipService(
       db.prisma,
@@ -550,7 +555,11 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
     await configureQuiz(service, room.id);
     const emptyRegistryService = new RoomService(
       db.prisma,
-      new EventLogService(),
+      new EventLogService(
+        new AppRegistryService([]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+      ),
       new AppRegistryService([]),
       new MembershipService(
         db.prisma,
