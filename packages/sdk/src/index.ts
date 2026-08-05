@@ -24,3 +24,4 @@ export * from './membership/room-join-policy.fixtures';
 export * from './auth/join-request';
 export * from './auth/join-request.fixtures';
 export * from './auth/token-response';
+export * from './realtime/realtime-messages';

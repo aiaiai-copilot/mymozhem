@@ -18,6 +18,7 @@ describe('contract errors', () => {
       'EVENT_RATE_LIMITED',
       'ROOM_LOG_SEALED',
       'ROOM_SETTINGS_FROZEN',
+      'ACTOR_NOT_MEMBER',
       'ROOM_JOIN_DENIED',
       'ROOM_PARTICIPANT_LIMIT_REACHED',
       'RATE_LIMITED',
