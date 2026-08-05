@@ -17,6 +17,7 @@ import {
 } from './membership.errors';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
+const P1 = '00000000-0000-0000-0000-000000000002';
 const IP = '203.0.113.7';
 const IP2 = '198.51.100.9';
 
@@ -35,6 +36,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
     const outbox = new EventOutbox(db.prisma, new RealtimeBus());
     roomService = new RoomService(
       db.prisma,
@@ -194,5 +196,30 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     await service.join({ code: room.code, displayName: 'A', ip: IP });
     const other = await service.join({ code: room.code, displayName: 'B', ip: IP2 });
     expect(other.membership.role).toBe('PARTICIPANT');
+  });
+
+  describe('findActiveMembership', () => {
+    it('returns the membership of a live member in a live room', async () => {
+      const room = await roomService.create(ORG);
+      await db.prisma.membership.create({
+        data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' },
+      });
+      const found = await makeMembership().findActiveMembership(room.id, P1);
+      expect(found?.role).toBe('PARTICIPANT');
+    });
+
+    it('returns null for a non-member', async () => {
+      const room = await roomService.create(ORG);
+      expect(await makeMembership().findActiveMembership(room.id, P1)).toBeNull();
+    });
+
+    it('returns null when the room is soft-deleted (REQ-SEC-003)', async () => {
+      const room = await roomService.create(ORG);
+      await db.prisma.membership.create({
+        data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' },
+      });
+      await roomService.softDelete(room.id);
+      expect(await makeMembership().findActiveMembership(room.id, P1)).toBeNull();
+    });
   });
 });

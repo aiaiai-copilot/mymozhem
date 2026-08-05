@@ -39,6 +39,19 @@ export class MembershipService {
     });
   }
 
+  // Read-path realtime-среза (REQ-SEC-003): живое членство в живой комнате.
+  // Мягкое удаление комнаты гасит членство для чтения; мягкого удаления самой
+  // membership в схеме пока нет — появится со срезом исключения (там же hook
+  // SubscriptionRegistry.revokeRoomAccess получит вызывающего).
+  async findActiveMembership(roomId: string, identityId: string): Promise<Membership | null> {
+    const membership = await this.prisma.membership.findUnique({
+      where: { roomId_identityId: { roomId, identityId } },
+      include: { room: true },
+    });
+    if (!membership || membership.room.deletedAt !== null) return null;
+    return membership;
+  }
+
   // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
