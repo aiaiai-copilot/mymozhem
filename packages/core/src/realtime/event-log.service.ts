@@ -40,6 +40,22 @@ function stringifyAppPayload(payload: unknown, eventType: string): string {
   return serialized;
 }
 
+// $queryRaw обходит клиентское маппирование enum (schema.prisma: PUBLIC @map("public")):
+// INSERT ... RETURNING * отдаёт сырую DB-метку ('public'), а контракт LogEvent —
+// Prisma-enum ('PUBLIC'). Staged/возвращаемое событие обязано быть LogEvent: fan-out
+// gateway сравнивает visibility с Prisma-enum (вскрыто realtime e2e, Task 8 —
+// live-доставка молча пропадала для всех событий; replay читает через Prisma-клиент
+// и затронут не был).
+const VISIBILITY_FROM_DB: Record<string, LogEvent['visibility']> = {
+  public: 'PUBLIC',
+  organizer: 'ORGANIZER',
+  'module-private': 'MODULE_PRIVATE',
+};
+
+function asLogEvent(row: LogEvent): LogEvent {
+  return { ...row, visibility: VISIBILITY_FROM_DB[row.visibility as string] ?? row.visibility };
+}
+
 // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
 // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
 // Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
@@ -214,7 +230,9 @@ export class EventLogService {
     `;
     // Staging в tx-outbox (design §5): доставка — после коммита, через runner.
     // Вне контекста — fail-closed: событие без пути доставки не коммитится.
-    this.outbox.stage(rows[0]);
-    return rows[0];
+    // asLogEvent: RETURNING * — сырой результат, enum-метки нормализуются (см. выше).
+    const event = asLogEvent(rows[0]);
+    this.outbox.stage(event);
+    return event;
   }
 }

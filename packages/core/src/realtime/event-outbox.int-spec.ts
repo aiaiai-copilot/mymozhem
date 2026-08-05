@@ -1,4 +1,5 @@
 import type { AppManifest } from '@mymozhem/sdk';
+import type { LogEvent } from '@prisma/client';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
@@ -117,6 +118,20 @@ describe('EventOutbox', () => {
     });
 
     expect(batches).toEqual([2]);
+  });
+
+  it('delivered events carry the Prisma-enum visibility (LogEvent contract for fan-out)', async () => {
+    const room = await activeRoom();
+    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
+    const delivered: LogEvent[] = [];
+    bus.subscribe((events) => delivered.push(...events));
+
+    await outbox.run((tx) => eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1));
+
+    // INSERT ... RETURNING * отдаёт сырую DB-метку enum ('public'); staged событие
+    // обязано быть нормализовано до Prisma-enum — fan-out gateway сравнивает
+    // visibility с 'PUBLIC' (вскрыто realtime e2e, Task 8: live-доставка пропадала).
+    expect(delivered.map((e) => e.visibility)).toEqual(['PUBLIC']);
   });
 
   it('rollback delivers nothing and writes nothing (REQ-DEV-008)', async () => {

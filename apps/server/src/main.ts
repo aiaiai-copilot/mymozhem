@@ -24,7 +24,8 @@ async function bootstrap(): Promise<void> {
   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
   // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
-  app.useWebSocketAdapter(new ConfigurableIoAdapter(config));
+  // HTTP-сервер передаём явно: Nest не инжектирует его в пользовательский адаптер.
+  app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
   await app.listen(config.PORT, '0.0.0.0');
 }
 

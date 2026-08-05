@@ -109,50 +109,58 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       ack({ code: 'REQUEST_INVALID' });
       return;
     }
-    const claims = claimsOf(socket);
-    const { roomId } = parsed.data;
-    // REQ-ID-016: гостевой scope зашит в токен — GUEST подписывается только на свою
-    // комнату; REGISTERED (токены — с OAuth-среза) решает membership-гейт.
-    if (claims.kind === 'GUEST' && claims.roomId !== roomId) {
-      ack({ code: 'ACTOR_NOT_MEMBER' });
-      return;
+    // Error containment (санкционированный фикс, леджер Task 7 → Task 8): вызов идёт
+    // через `void this.handleSubscribe(...)` — неожиданный throw (prisma, join) без
+    // try/catch стал бы unhandled rejection и клиент остался бы без ack. Семантика
+    // — та же, что у handlePublish: wireCodeOf, наружу ровно {code} (REQ-SEC-006).
+    try {
+      const claims = claimsOf(socket);
+      const { roomId } = parsed.data;
+      // REQ-ID-016: гостевой scope зашит в токен — GUEST подписывается только на свою
+      // комнату; REGISTERED (токены — с OAuth-среза) решает membership-гейт.
+      if (claims.kind === 'GUEST' && claims.roomId !== roomId) {
+        ack({ code: 'ACTOR_NOT_MEMBER' });
+        return;
+      }
+      // Мульти-подписка не строится (design §4): re-subscribe в ту же комнату —
+      // идемпотентный повторный snapshot, в чужую — отказ.
+      const existing = this.registry.get(socket.id);
+      if (existing !== undefined && existing.roomId !== roomId) {
+        ack({ code: 'REQUEST_INVALID' });
+        return;
+      }
+      // REQ-SEC-003: чтение подресурсов комнаты — только членам.
+      const membership = await this.membership.findActiveMembership(roomId, claims.sub);
+      if (!membership) {
+        ack({ code: 'ACTOR_NOT_MEMBER' });
+        return;
+      }
+      // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
+      const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
+      const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+      const events = await this.prisma.logEvent.findMany({
+        where: { roomId },
+        orderBy: { seq: 'asc' },
+      });
+      const manifest =
+        room?.appId != null && room.manifestVersion != null
+          ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
+          : undefined;
+      const snapshot: RoomSnapshot = {
+        events: this.projection.projectEvents(events, level),
+        appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
+      };
+      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
+      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
+      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
+      // индексов не возникает.
+      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
+      await socket.join(roomChannel(roomId));
+      if (level === 'organizer') await socket.join(organizerChannel(roomId));
+      ack({ ok: true, snapshot });
+    } catch (err) {
+      ack({ code: this.wireCodeOf(err) });
     }
-    // Мульти-подписка не строится (design §4): re-subscribe в ту же комнату —
-    // идемпотентный повторный snapshot, в чужую — отказ.
-    const existing = this.registry.get(socket.id);
-    if (existing !== undefined && existing.roomId !== roomId) {
-      ack({ code: 'REQUEST_INVALID' });
-      return;
-    }
-    // REQ-SEC-003: чтение подресурсов комнаты — только членам.
-    const membership = await this.membership.findActiveMembership(roomId, claims.sub);
-    if (!membership) {
-      ack({ code: 'ACTOR_NOT_MEMBER' });
-      return;
-    }
-    // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
-    const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
-    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
-    const events = await this.prisma.logEvent.findMany({
-      where: { roomId },
-      orderBy: { seq: 'asc' },
-    });
-    const manifest =
-      room?.appId != null && room.manifestVersion != null
-        ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
-        : undefined;
-    const snapshot: RoomSnapshot = {
-      events: this.projection.projectEvents(events, level),
-      appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
-    };
-    // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
-    // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
-    // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
-    // индексов не возникает.
-    this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
-    await socket.join(roomChannel(roomId));
-    if (level === 'organizer') await socket.join(organizerChannel(roomId));
-    ack({ ok: true, snapshot });
   }
 
   async handlePublish(socket: Socket, payload: unknown, ack: Ack<PublishOkAck>): Promise<void> {

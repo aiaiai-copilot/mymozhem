@@ -91,6 +91,24 @@ describe('RealtimeGateway.handleSubscribe', () => {
     expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
   });
 
+  // Санкционированный фикс (леджер Task 7 → Task 8): неожиданный throw внутри
+  // handleSubscribe (prisma упала, join отклонился) не должен улетать unhandled
+  // rejection'ом через `void this.handleSubscribe(...)` — клиент получает ack
+  // ровно {code: 'INTERNAL_ERROR'}, детали только в серверный лог (REQ-SEC-006).
+  it('unexpected infrastructure failure is contained: ack INTERNAL_ERROR, no throw escapes', async () => {
+    const { gateway } = makeGateway({
+      membership: { findActiveMembership: jest.fn().mockRejectedValue(new Error('prisma down')) },
+    });
+    const logger = { error: jest.fn(), warn: jest.fn() };
+    (gateway as unknown as { logger: unknown }).logger = logger;
+    const { ack, calls } = ackOf();
+    await expect(
+      gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
   it('participant joins the room channel with a public snapshot', async () => {
     const registry = new SubscriptionRegistry();
     const { gateway } = makeGateway({ registry });
