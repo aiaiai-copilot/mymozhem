@@ -137,6 +137,19 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       }
       // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
       const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
+      // Порядок design §4 — join-first: подписка (реестр + каналы) ДО чтения лога.
+      // При порядке «чтение → join» событие, закоммиченное между чтением и join,
+      // терялось бы для подписчика (нет ни в snapshot, ни в live), а клиент без
+      // seq/cursor (REQ-RT-011a) не смог бы заметить разрыв. При join-first гонка
+      // даёт дубликат — событие придёт live И попадёт в snapshot; это принятый
+      // trade-off cursor-less MVP (duplicate-acceptance).
+      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
+      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
+      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
+      // индексов не возникает.
+      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
+      await socket.join(roomChannel(roomId));
+      if (level === 'organizer') await socket.join(organizerChannel(roomId));
       const room = await this.prisma.room.findUnique({ where: { id: roomId } });
       const events = await this.prisma.logEvent.findMany({
         where: { roomId },
@@ -150,15 +163,16 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
         events: this.projection.projectEvents(events, level),
         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
       };
-      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
-      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
-      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
-      // индексов не возникает.
-      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
-      await socket.join(roomChannel(roomId));
-      if (level === 'organizer') await socket.join(organizerChannel(roomId));
       ack({ ok: true, snapshot });
     } catch (err) {
+      // Полуподписка недопустима: join теперь ДО чтения лога (design §4), поэтому
+      // при сбое после registry.add чистим и реестр, и каналы — иначе клиент,
+      // получивший ack-ошибку, продолжал бы получать live-поток комнаты. До join
+      // (отказы гейтов — return'ы выше; throw на ранних шагах) remove/leave —
+      // безвредные no-op.
+      this.registry.remove(socket.id);
+      socket.leave(roomChannel(parsed.data.roomId));
+      socket.leave(organizerChannel(parsed.data.roomId));
       ack({ code: this.wireCodeOf(err) });
     }
   }

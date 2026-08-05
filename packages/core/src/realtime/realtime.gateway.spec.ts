@@ -109,6 +109,27 @@ describe('RealtimeGateway.handleSubscribe', () => {
     expect(logger.error).toHaveBeenCalledTimes(1);
   });
 
+  // Join-first (design §4, final-review fix I-1): join теперь внутри try до чтения
+  // лога — сбой join ПОСЛЕ registry.add обязан откатить полуподписку (реестр +
+  // каналы), иначе клиент с ack-ошибкой продолжал бы получать live-поток.
+  it('join failure after registry.add leaves no stale subscription', async () => {
+    const registry = new SubscriptionRegistry();
+    const { gateway } = makeGateway({ registry });
+    const logger = { error: jest.fn(), warn: jest.fn() };
+    (gateway as unknown as { logger: unknown }).logger = logger;
+    const socket = fakeSocket();
+    socket.join = () => {
+      throw new Error('adapter down');
+    };
+    const { ack, calls } = ackOf();
+    await expect(
+      gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
+    expect(registry.get('socket-1')).toBeUndefined();
+    expect(socket.left).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
+  });
+
   it('participant joins the room channel with a public snapshot', async () => {
     const registry = new SubscriptionRegistry();
     const { gateway } = makeGateway({ registry });

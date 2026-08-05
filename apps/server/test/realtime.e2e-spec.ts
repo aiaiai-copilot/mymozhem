@@ -45,6 +45,7 @@ const TEST_APP: AppManifest = {
     type: 'object',
     properties: {
       label: { type: 'string', 'x-visibility': 'public' },
+      orgNote: { type: 'string', 'x-visibility': 'organizer' },
       answers: { type: 'object' }, // без аннотации → module-private (fail-safe)
     },
   },
@@ -187,7 +188,7 @@ describe('Realtime (e2e)', () => {
     await roomService.configure(room.id, {
       appId: 'test-app',
       manifestVersion: 1,
-      settings: { label: 'live', answers: { r1: 2 } },
+      settings: { label: 'live', orgNote: 'o', answers: { r1: 2 } },
     });
     await roomService.activate(room.id, ORG);
     const res = await app.inject({
@@ -288,6 +289,32 @@ describe('Realtime (e2e)', () => {
     organizer.close();
     participant.close();
     pub.close();
+  });
+
+  it('replay-видимость: snapshot участника — только public, организатора — public+organizer, module-private никому (REQ-CORE-005/008)', async () => {
+    const { room, accessToken } = await activeRoomWithGuest();
+    // Пре-коммит ДО подключения подписчиков: organizer- и module-private события
+    // уже в логе — replay обязан построить видимость по уровню запрашивающего.
+    const pub = await connect(port, accessToken);
+    await emitAck(pub, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+    await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.round.hinted', payload: { hint: 'h' } });
+    await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.secret.recorded', payload: { n: 9 } });
+    pub.close();
+
+    const participant = await connect(port, accessToken);
+    const organizer = await connect(port, await organizerToken(room.id));
+    type Snap = { ok: true; snapshot: { events: { type: string }[]; appSettings: Record<string, unknown> } };
+    const pAck = await emitAck<Snap>(participant, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+    const oAck = await emitAck<Snap>(organizer, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+
+    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
+    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'test-app.round.hinted']);
+    // appSettings: label — public (обоим), orgNote — organizer (только организатору),
+    // answers — module-private (никому; fail-safe на неаннотированное свойство).
+    expect(pAck.snapshot.appSettings).toEqual({ label: 'live' });
+    expect(oAck.snapshot.appSettings).toEqual({ label: 'live', orgNote: 'o' });
+    participant.close();
+    organizer.close();
   });
 
   it('гость не подписывается на чужую комнату (scope REQ-ID-016)', async () => {
