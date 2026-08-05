@@ -27,7 +27,9 @@ module.exports = {
       name: 'socketio-only-in-realtime',
       comment: 'socket.io импортируется только из Realtime-модуля ядра (REQ-RT-006).',
       severity: 'error',
-      from: { pathNot: '^packages/core/src/realtime' },
+      // dist/** — скомпилированное эхо src (CI круизит после build): .d.ts gateway
+      // легально ссылается на типы socket.io; правило проверяет исходники.
+      from: { pathNot: ['^packages/core/src/realtime', '[/\\\\]dist[/\\\\]'] },
       to: { path: 'node_modules/socket[.]io' },
     },
     {
