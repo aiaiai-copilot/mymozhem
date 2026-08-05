@@ -138,7 +138,9 @@ export class RoomService {
     return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
   }
 
-  async transition(roomId: string, to: RoomStatus): Promise<Room> {
+  // actorId — актор перехода из auth-контекста вызывающего (REQ-RT-009); null у
+  // вызывающих без auth-контекста (seed-скрипт, системные вызовы).
+  async transition(roomId: string, to: RoomStatus, actorId: string | null = null): Promise<Room> {
     return this.prisma.$transaction(async (tx) => {
       const current = await tx.room.findUnique({ where: { id: roomId } });
       if (!current || current.deletedAt !== null) {
@@ -184,30 +186,36 @@ export class RoomService {
         // Эмит — последним в транзакции: advisory lock комнаты всегда leaf-most,
         // после его захвата room."Room" в этой транзакции не пишем (конвенция
         // порядка блокировок, HANDOFF «Долгоживущие ограничения»).
-        await this.eventLog.commitCoreEvent(tx, roomId, 'room.activated', {
-          appId: updated.appId,
-          manifestVersion: updated.manifestVersion,
-        });
+        await this.eventLog.commitCoreEvent(
+          tx,
+          roomId,
+          'room.activated',
+          {
+            appId: updated.appId,
+            manifestVersion: updated.manifestVersion,
+          },
+          actorId,
+        );
       } else {
         const eventName = LIFECYCLE_EVENTS[to];
         if (eventName) {
-          await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
+          await this.eventLog.commitCoreEvent(tx, roomId, eventName, {}, actorId);
         }
       }
       return updated;
     });
   }
 
-  activate(roomId: string): Promise<Room> {
-    return this.transition(roomId, 'ACTIVE');
+  activate(roomId: string, actorId: string | null = null): Promise<Room> {
+    return this.transition(roomId, 'ACTIVE', actorId);
   }
 
-  complete(roomId: string): Promise<Room> {
-    return this.transition(roomId, 'COMPLETED');
+  complete(roomId: string, actorId: string | null = null): Promise<Room> {
+    return this.transition(roomId, 'COMPLETED', actorId);
   }
 
-  cancel(roomId: string): Promise<Room> {
-    return this.transition(roomId, 'CANCELLED');
+  cancel(roomId: string, actorId: string | null = null): Promise<Room> {
+    return this.transition(roomId, 'CANCELLED', actorId);
   }
 
   async softDelete(roomId: string): Promise<Room> {

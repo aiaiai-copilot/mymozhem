@@ -22,6 +22,10 @@ export const configSchema = z.object({
   REFRESH_TOKEN_TTL: z.coerce.number().int().min(60).default(86_400),
   // REQ-SEC-007 (§4 login_rate_limit): refresh-эндпоинт, 10/мин на IP.
   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+  // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
+  EVENT_EMIT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(30),
+  // REQ-RT-012 (§4 max_event_payload): 16 КБ, диапазон 1 КБ … 256 КБ (байты).
+  MAX_EVENT_PAYLOAD_BYTES: z.coerce.number().int().min(1024).max(262_144).default(16_384),
   // Доверие к X-Forwarded-For — свойство деплоя, не кода (transport design §6).
   TRUST_PROXY: z
     .enum(['true', 'false'])

@@ -6,6 +6,7 @@ import fastifyHelmet from '@fastify/helmet';
 import { tokenResponseSchema } from '@mymozhem/sdk';
 import {
   AppRegistryService,
+  EventEmitLimiter,
   EventLogService,
   IdentityService,
   JoinRateLimiter,
@@ -94,7 +95,11 @@ describe('Transport HTTP (e2e)', () => {
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
     roomService = new RoomService(
       db.prisma,
-      new EventLogService(),
+      new EventLogService(
+        new AppRegistryService([]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+      ),
       new AppRegistryService([]),
       new MembershipService(
         db.prisma,

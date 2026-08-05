@@ -9,6 +9,7 @@ import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
+import { EventEmitLimiter } from './event-emit-limiter';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -22,7 +23,11 @@ describe('EventLogService.commitCoreEvent', () => {
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     rooms = new RoomService(
       db.prisma,
-      new EventLogService(),
+      new EventLogService(
+        new AppRegistryService([validManifests[0]]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+      ),
       new AppRegistryService([validManifests[0]]),
       new MembershipService(
         db.prisma,
@@ -32,7 +37,11 @@ describe('EventLogService.commitCoreEvent', () => {
       ),
       TEST_CONFIG,
     );
-    eventLog = new EventLogService();
+    eventLog = new EventLogService(
+      new AppRegistryService([validManifests[0]]),
+      new EventEmitLimiter(1000),
+      TEST_CONFIG,
+    );
   }, 120000);
 
   afterAll(async () => {
@@ -84,6 +93,17 @@ describe('EventLogService.commitCoreEvent', () => {
     expect(err).toBeInstanceOf(ContractError);
     expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+  });
+
+  it('records actorId on lifecycle events when the caller supplies it (REQ-RT-009)', async () => {
+    const ACTOR = '00000000-0000-0000-0000-0000000000c3';
+    await seedIdentity(db.prisma, { id: ACTOR, email: 'actor@example.test' });
+    const room = await rooms.create(ORG);
+    await rooms.cancel(room.id, ACTOR);
+
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ type: 'core.room.cancelled', actorId: ACTOR });
   });
 
   it('serializes concurrent commits via the advisory lock: dense seqs 1..N (REQ-RT-007)', async () => {
