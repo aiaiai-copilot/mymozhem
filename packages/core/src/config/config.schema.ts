@@ -24,6 +24,10 @@ export const configSchema = z.object({
   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
   // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
   EVENT_EMIT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(30),
+  // REQ-RT-015 (§4 reconnect_rate_limit): базовый per-identity потолок на
+  // reconnect/replay, 10/мин. Объём amendment v1.3: потолок — ф.1; экспоненциальный
+  // бэкофф и конфигурируемый режим — ф.4.
+  RECONNECT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(10),
   // REQ-RT-012 (§4 max_event_payload): 16 КБ, диапазон 1 КБ … 256 КБ (байты).
   MAX_EVENT_PAYLOAD_BYTES: z.coerce.number().int().min(1024).max(262_144).default(16_384),
   // Доверие к X-Forwarded-For — свойство деплоя, не кода (transport design §6).

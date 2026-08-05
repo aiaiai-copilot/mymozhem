@@ -110,4 +110,23 @@ describe('loadConfig', () => {
     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 512 }).success).toBe(false);
     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 300_000 }).success).toBe(false);
   });
+
+  it('applies §4 default for reconnect ceiling (REQ-RT-015)', () => {
+    const cfg = configSchema.parse({
+      DATABASE_URL: 'postgresql://x',
+      JWT_SECRET: 'x'.repeat(32),
+    });
+    expect(cfg.RECONNECT_RATE_LIMIT_PER_MIN).toBe(10);
+  });
+
+  it('coerces RECONNECT_RATE_LIMIT_PER_MIN from string and rejects 0', () => {
+    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+    expect(
+      configSchema.parse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: '5' })
+        .RECONNECT_RATE_LIMIT_PER_MIN,
+    ).toBe(5);
+    expect(
+      configSchema.safeParse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: 0 }).success,
+    ).toBe(false);
+  });
 });
