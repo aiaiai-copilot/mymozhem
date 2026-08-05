@@ -23,6 +23,8 @@ export * from './realtime/event-log.service';
 export * from './realtime/event-emit-limiter';
 export * from './realtime/realtime.errors';
 export * from './realtime/realtime.module';
+export * from './realtime/realtime-bus';
+export * from './realtime/event-outbox';
 export * from './auth/auth.constants';
 export * from './auth/auth.errors';
 export * from './auth/token.service';

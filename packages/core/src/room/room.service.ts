@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { EventLogService } from '../realtime/event-log.service';
+import { EventOutbox } from '../realtime/event-outbox';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { generateRoomCode, isRoomCodeCollision } from './room-code';
@@ -45,6 +46,7 @@ export class RoomService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eventLog: EventLogService,
+    private readonly outbox: EventOutbox,
     private readonly appRegistry: AppRegistryService,
     private readonly membership: MembershipService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -141,7 +143,7 @@ export class RoomService {
   // actorId — актор перехода из auth-контекста вызывающего (REQ-RT-009); null у
   // вызывающих без auth-контекста (seed-скрипт, системные вызовы).
   async transition(roomId: string, to: RoomStatus, actorId: string | null = null): Promise<Room> {
-    return this.prisma.$transaction(async (tx) => {
+    return this.outbox.run(async (tx) => {
       const current = await tx.room.findUnique({ where: { id: roomId } });
       if (!current || current.deletedAt !== null) {
         throw new RoomConflictError(`Room ${roomId} not found or deleted`);

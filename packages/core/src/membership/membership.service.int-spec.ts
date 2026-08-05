@@ -3,6 +3,8 @@ import { seedIdentity } from '../testing/seed-identity';
 import { TEST_CONFIG } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+import { RealtimeBus } from '../realtime/realtime-bus';
+import { EventOutbox } from '../realtime/event-outbox';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
 import { IdentityService } from '../identity/identity.service';
@@ -33,13 +35,16 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(
         new AppRegistryService([]),
         new EventEmitLimiter(1000),
         TEST_CONFIG,
+        outbox,
       ),
+      outbox,
       new AppRegistryService([]),
       new MembershipService(
         db.prisma,

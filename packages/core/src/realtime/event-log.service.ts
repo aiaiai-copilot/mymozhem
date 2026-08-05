@@ -12,6 +12,7 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { EventEmitLimiter } from './event-emit-limiter';
+import { EventOutbox } from './event-outbox';
 import {
   ActorNotMemberError,
   EventEmitRateLimitedError,
@@ -46,12 +47,14 @@ function stringifyAppPayload(payload: unknown, eventType: string): string {
 // Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
 // комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
 // в room."Room".
+// Commit без EventOutbox.run отклоняется (fail-closed staging в appendLocked).
 @Injectable()
 export class EventLogService {
   constructor(
     private readonly appRegistry: AppRegistryService,
     private readonly emitLimiter: EventEmitLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly outbox: EventOutbox,
   ) {}
 
   async commitCoreEvent(
@@ -209,6 +212,9 @@ export class EventLogService {
       WHERE "roomId" = ${roomId}::uuid
       RETURNING *
     `;
+    // Staging в tx-outbox (design §5): доставка — после коммита, через runner.
+    // Вне контекста — fail-closed: событие без пути доставки не коммитится.
+    this.outbox.stage(rows[0]);
     return rows[0];
   }
 }

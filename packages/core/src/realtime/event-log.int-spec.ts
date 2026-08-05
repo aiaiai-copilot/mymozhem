@@ -10,6 +10,8 @@ import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
+import { RealtimeBus } from './realtime-bus';
+import { EventOutbox } from './event-outbox';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -17,17 +19,21 @@ describe('EventLogService.commitCoreEvent', () => {
   let db: TestDb;
   let rooms: RoomService;
   let eventLog: EventLogService;
+  let outbox: EventOutbox;
 
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    outbox = new EventOutbox(db.prisma, new RealtimeBus());
     rooms = new RoomService(
       db.prisma,
       new EventLogService(
         new AppRegistryService([validManifests[0]]),
         new EventEmitLimiter(1000),
         TEST_CONFIG,
+        outbox,
       ),
+      outbox,
       new AppRegistryService([validManifests[0]]),
       new MembershipService(
         db.prisma,
@@ -41,6 +47,7 @@ describe('EventLogService.commitCoreEvent', () => {
       new AppRegistryService([validManifests[0]]),
       new EventEmitLimiter(1000),
       TEST_CONFIG,
+      outbox,
     );
   }, 120000);
 
@@ -55,7 +62,7 @@ describe('EventLogService.commitCoreEvent', () => {
 
   it('commits one event with the contract shape (REQ-RT-001)', async () => {
     const room = await rooms.create(ORG);
-    await db.prisma.$transaction((tx) =>
+    await outbox.run((tx) =>
       eventLog.commitCoreEvent(tx, room.id, 'room.completed', {}),
     );
 
@@ -74,9 +81,9 @@ describe('EventLogService.commitCoreEvent', () => {
   it('assigns dense per-room seq, independent across rooms', async () => {
     const a = await rooms.create(ORG);
     const b = await rooms.create(ORG);
-    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.completed', {}));
-    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.cancelled', {}));
-    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, b.id, 'room.cancelled', {}));
+    await outbox.run((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.completed', {}));
+    await outbox.run((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.cancelled', {}));
+    await outbox.run((tx) => eventLog.commitCoreEvent(tx, b.id, 'room.cancelled', {}));
 
     expect((await readRoomLog(db.prisma, a.id)).map((e) => e.seq)).toEqual([1, 2]);
     expect((await readRoomLog(db.prisma, b.id)).map((e) => e.seq)).toEqual([1]);
@@ -84,8 +91,8 @@ describe('EventLogService.commitCoreEvent', () => {
 
   it('rejects a payload mismatch with EVENT_PAYLOAD_INVALID and writes nothing', async () => {
     const room = await rooms.create(ORG);
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitCoreEvent(tx, room.id, 'room.completed', { bogus: 1 }),
       )
       .catch((e: unknown) => e);
@@ -112,7 +119,7 @@ describe('EventLogService.commitCoreEvent', () => {
 
     const committed = await Promise.all(
       Array.from({ length: N }, () =>
-        db.prisma.$transaction((tx) =>
+        outbox.run((tx) =>
           eventLog.commitCoreEvent(tx, room.id, 'room.cancelled', {}),
         ),
       ),

@@ -10,6 +10,8 @@ import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
+import { RealtimeBus } from './realtime-bus';
+import { EventOutbox } from './event-outbox';
 import {
   ActorNotMemberError,
   EventEmitRateLimitedError,
@@ -61,6 +63,7 @@ describe('EventLogService.commitAppEvent', () => {
   let db: TestDb;
   let rooms: RoomService;
   let eventLog: EventLogService;
+  let outbox: EventOutbox;
 
   beforeAll(async () => {
     db = await startTestDb();
@@ -68,10 +71,12 @@ describe('EventLogService.commitAppEvent', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG);
+    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
       eventLog,
+      outbox,
       registry,
       new MembershipService(
         db.prisma,
@@ -113,7 +118,7 @@ describe('EventLogService.commitAppEvent', () => {
     const room = await activeRoom();
     await joinParticipant(room.id, P1);
 
-    await db.prisma.$transaction((tx) =>
+    await outbox.run((tx) =>
       eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
     );
 
@@ -137,8 +142,8 @@ describe('EventLogService.commitAppEvent', () => {
       settings: ACTIVE_SETTINGS,
     });
 
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -151,8 +156,8 @@ describe('EventLogService.commitAppEvent', () => {
     const room = await activeRoom();
     await rooms.cancel(room.id);
 
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -166,8 +171,8 @@ describe('EventLogService.commitAppEvent', () => {
   it('rejects oversized payload (REQ-RT-012)', async () => {
     const room = await activeRoom();
     const big = { n: 1, blob: 'x'.repeat(TEST_CONFIG.MAX_EVENT_PAYLOAD_BYTES) };
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -179,8 +184,8 @@ describe('EventLogService.commitAppEvent', () => {
     // JSON.stringify(undefined) === undefined: без safe-stringify шаг размера падал
     // бы сырым TypeError из Buffer.byteLength вне typed-таксономии (design §6).
     const room = await activeRoom();
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', undefined, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -194,8 +199,8 @@ describe('EventLogService.commitAppEvent', () => {
     const room = await activeRoom();
     const circular: Record<string, unknown> = { n: 1 };
     circular.self = circular;
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', circular, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -206,8 +211,8 @@ describe('EventLogService.commitAppEvent', () => {
 
   it('rejects an unknown event type (REQ-CTR-008)', async () => {
     const room = await activeRoom();
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.v2', { n: 1 }, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -216,8 +221,8 @@ describe('EventLogService.commitAppEvent', () => {
 
   it('rejects payload failing the registered schema (REQ-CTR-008)', async () => {
     const room = await activeRoom();
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', { blob: 1 }, 'public', null),
       )
       .catch((e: unknown) => e);
@@ -228,8 +233,8 @@ describe('EventLogService.commitAppEvent', () => {
   it('rejects visibility weaker than the declared ceiling (REQ-CTR-009)', async () => {
     const room = await activeRoom();
     await joinParticipant(room.id, P1);
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'secret.recorded', { n: 1 }, 'organizer', P1),
       )
       .catch((e: unknown) => e);
@@ -239,7 +244,7 @@ describe('EventLogService.commitAppEvent', () => {
 
   it('allows visibility STRONGER than the ceiling (module-private under public)', async () => {
     const room = await activeRoom();
-    await db.prisma.$transaction((tx) =>
+    await outbox.run((tx) =>
       eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'module-private', null),
     );
     const log = await readRoomLog(db.prisma, room.id);
@@ -248,8 +253,8 @@ describe('EventLogService.commitAppEvent', () => {
 
   it('rejects an actor without membership (ACTOR_NOT_MEMBER)', async () => {
     const room = await activeRoom();
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P2),
       )
       .catch((e: unknown) => e);
@@ -258,7 +263,7 @@ describe('EventLogService.commitAppEvent', () => {
 
   it('null actor (server emission): no membership gate, commits', async () => {
     const room = await activeRoom();
-    await db.prisma.$transaction((tx) =>
+    await outbox.run((tx) =>
       eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
     );
     const log = await readRoomLog(db.prisma, room.id);
@@ -270,6 +275,7 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
   let db: TestDb;
   let rooms: RoomService;
   let limitedLog: EventLogService;
+  let outbox: EventOutbox;
 
   beforeAll(async () => {
     db = await startTestDb();
@@ -277,10 +283,12 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    limitedLog = new EventLogService(registry, new EventEmitLimiter(3), TEST_CONFIG);
+    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    limitedLog = new EventLogService(registry, new EventEmitLimiter(3), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
       limitedLog,
+      outbox,
       registry,
       new MembershipService(
         db.prisma,
@@ -312,7 +320,7 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
   it('4th attempt in the window is rejected; other actor and null actor unaffected', async () => {
     const room = await activeRoomWithP1P2();
     const emit = (actor: string | null) =>
-      db.prisma.$transaction((tx) =>
+      outbox.run((tx) =>
         limitedLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', actor),
       );
 
@@ -333,15 +341,15 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
     const room = await activeRoomWithP1P2();
     // 3 попытки с невалидным payload (отказ по схеме — после шага лимитера)
     for (let i = 0; i < 3; i++) {
-      const e = await db.prisma
-        .$transaction((tx) =>
+      const e = await outbox
+        .run((tx) =>
           limitedLog.commitAppEvent(tx, room.id, 'note.posted', { blob: 1 }, 'public', P1),
         )
         .catch((e: unknown) => e);
       expect(e).toBeInstanceOf(EventPayloadInvalidError);
     }
-    const err = await db.prisma
-      .$transaction((tx) =>
+    const err = await outbox
+      .run((tx) =>
         limitedLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
       )
       .catch((e: unknown) => e);
@@ -353,6 +361,7 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
   let db: TestDb;
   let rooms: RoomService;
   let eventLog: EventLogService;
+  let outbox: EventOutbox;
 
   beforeAll(async () => {
     db = await startTestDb();
@@ -360,10 +369,12 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG);
+    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
       eventLog,
+      outbox,
       registry,
       new MembershipService(
         db.prisma,
@@ -398,7 +409,7 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
 
     const committed = await Promise.all(
       Array.from({ length: N }, (_, i) =>
-        db.prisma.$transaction((tx) =>
+        outbox.run((tx) =>
           eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: i }, 'public', P1),
         ),
       ),
@@ -427,11 +438,11 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
     for (let round = 0; round < ROUNDS; round++) {
       const bigFirst = round % 2 === 0;
       const bigEmit = () =>
-        db.prisma.$transaction((tx) =>
+        outbox.run((tx) =>
           eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', P1),
         );
       const smallEmit = () =>
-        db.prisma.$transaction((tx) =>
+        outbox.run((tx) =>
           eventLog.commitAppEvent(tx, room.id, 'note.posted', small, 'public', P2),
         );
       // Чередуем порядок СТАРТА (создания промисов): bigFirst либо smallFirst.
@@ -480,8 +491,8 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
     await acquired;
 
     // Эмит: status-гейт пройдёт по ACTIVE, дальше — блокировка на advisory lock.
-    const emit = db.prisma
-      .$transaction((tx) =>
+    const emit = outbox
+      .run((tx) =>
         eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
       )
       .catch((e: unknown) => e);
