@@ -4,6 +4,7 @@ import {
   CORE_EVENTS,
   ContractError,
   coreEventType,
+  isWithinCeiling,
   type CoreEventName,
   type Visibility,
 } from '@mymozhem/sdk';
@@ -11,6 +12,15 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { EventEmitLimiter } from './event-emit-limiter';
+import {
+  ActorNotMemberError,
+  EventEmitRateLimitedError,
+  EventPayloadInvalidError,
+  EventPayloadTooLargeError,
+  EventTypeUnknownError,
+  EventVisibilityExceededError,
+  RoomNotActiveError,
+} from './realtime.errors';
 
 // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
 // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
@@ -53,7 +63,85 @@ export class EventLogService {
     );
   }
 
-  // commitAppEvent добавляется Task 5 — шов дизайна §2.
+  // Commit-цепочка app-событий (design §2): ВСЕ проверки до advisory lock —
+  // payload-нейтральность гонки за seq контрактуальна (REQ-RT-007). Порядок шагов:
+  // status-гейт → rate-limit → размер → реестр → схема → видимость → membership →
+  // appendLocked. Дешёвые отказы раньше; запечатанная комната не жжёт лимит (шаг 1
+  // до шага 2). actorId = null — серверная эмиссия приложения: membership-гейт и
+  // per-actor лимит не применяются (design §0).
+  async commitAppEvent(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    name: string,
+    payload: unknown,
+    visibility: Visibility,
+    actorId: string | null = null,
+  ): Promise<LogEvent> {
+    // 1. Status-гейт (REQ-RT-016): только ACTIVE с пином; DRAFT/терминальные/
+    // удалённые/несуществующие — один код. Пин не-null в ACTIVE по гейту активации
+    // (REQ-RT-004); проверка — fail-closed на случай рассогласования.
+    const room = await tx.room.findUnique({ where: { id: roomId } });
+    if (
+      !room ||
+      room.deletedAt !== null ||
+      room.status !== 'ACTIVE' ||
+      room.appId === null ||
+      room.manifestVersion === null
+    ) {
+      throw new RoomNotActiveError(`Room ${roomId} is not ACTIVE (sealed, draft or not found)`);
+    }
+    const appId = room.appId;
+    const manifestVersion = room.manifestVersion;
+    // 2. Per-actor rate-limit (REQ-RT-014): считаются попытки, не только успехи.
+    if (actorId !== null && !this.emitLimiter.tryAcquire(`${roomId}:${actorId}`)) {
+      throw new EventEmitRateLimitedError(
+        `Event emission rate limit exceeded for actor ${actorId} in room ${roomId}`,
+      );
+    }
+    // 3. Размер (REQ-RT-012) — до реестра: дешевле и не требует manifest lookup.
+    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
+      throw new EventPayloadTooLargeError(
+        `payload of ${appId}.${name} exceeds MAX_EVENT_PAYLOAD_BYTES (${this.config.MAX_EVENT_PAYLOAD_BYTES})`,
+      );
+    }
+    // 4. Реестр (REQ-CTR-008): тип обязан существовать в пиннутом манифесте.
+    const definition = this.appRegistry.getEventDefinition(appId, manifestVersion, name);
+    if (!definition) {
+      throw new EventTypeUnknownError(`No event type ${name} in manifest ${appId}@${manifestVersion}`);
+    }
+    // 5. Схема владельца типа (REQ-CTR-008) — verdict-only, без коэрсии (REQ-CORE-007).
+    const validate = this.appRegistry.eventValidatorFor(appId, manifestVersion, name, definition.schema);
+    if (!validate(payload)) {
+      throw new EventPayloadInvalidError(
+        `payload of ${appId}.${name} does not match its registered schema: ${this.appRegistry.describeEventErrors(validate)}`,
+      );
+    }
+    // 6. Потолок видимости (REQ-CTR-009): слабее декларированного — отказ, строже — можно.
+    if (!isWithinCeiling(visibility, definition.visibility)) {
+      throw new EventVisibilityExceededError(
+        `visibility ${visibility} exceeds declared ceiling ${definition.visibility} for ${appId}.${name}`,
+      );
+    }
+    // 7. Membership-гейт (design §0): актор — член комнаты.
+    if (actorId !== null) {
+      const member = await tx.membership.findUnique({
+        where: { roomId_identityId: { roomId, identityId: actorId } },
+      });
+      if (!member) {
+        throw new ActorNotMemberError(`Identity ${actorId} is not a member of room ${roomId}`);
+      }
+    }
+    // 8. Append: schemaVersion = пиннутый manifestVersion — версия схемы app-события.
+    return this.appendLocked(
+      tx,
+      roomId,
+      `${appId}.${name}`,
+      payload,
+      actorId,
+      visibility,
+      manifestVersion,
+    );
+  }
 
   private async appendLocked(
     tx: Prisma.TransactionClient,
