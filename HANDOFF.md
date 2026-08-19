@@ -1,11 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-08-06 (срез **realtime read/handshake** исполнен 9/9, финальное ревью clean после fix-волны, слит в `main` мерджем `f0e5e88`; **следующий срез НЕ выбран — решение владельца**; **push — решение владельца**)
-**Branch:** `main` (на 8 коммитов впереди `origin/main`: 5 docs-коммитов прошлой сессии + merge `f0e5e88` + LOC-снапшот `be707cd` + handoff этой сессии; untracked `AGENTS.md` — не сессионный, не трогать, вопрос владельцу открыт).
+**Date:** 2026-08-19 (следующий срез ВЫБРАН владельцем: **исключение (membership removal)** — дизайн и план утверждены и закоммичены; исполнение — subagent-driven в новой сессии; **push — решение владельца**)
+**Branch:** `main` (на 3 коммита впереди `origin/main`: дизайн `0acec10` + план `401aadd` + AGENTS.md `d657750`; push прежних 8 коммитов выполнен этой сессией: `0ae4608..c5ed358`).
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, **realtime read/handshake (полный duplex)** — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime (late-join replay, видимость по каналам realtime/replay, потолок reconnect/replay) подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
-
-**Что построил срез (realtime read/handshake, контракт SDK 1.1.0 → 1.2.0):** полный duplex-транспорт ядра — handshake по access JWT (per-identity потолок reconnect REQ-RT-015 в объёме v1.3, отказы SESSION_INVALID/RATE_LIMITED), subscribe с replay видимой проекции (события + appSettings; `projectedEventSchema` — единственная наружная форма, без seq/visibility/cursor, REQ-RT-011a), live-доставка через **EventOutbox на AsyncLocalStorage** (fail-closed: commit вне `outbox.run` бросает; откат недоставим структурно) + in-process RealtimeBus (одна реплика, REQ-OPS-005), publish app-событий в `commitAppEvent` (actorId только из claims, REQ-RT-009; core-неймспейс закрыт; дефолт visibility = потолок типа), `ProjectionService` — единственная точка построения видимости (REQ-CORE-005/008), таблица маппинга core→contract кодов (compile-time exhaustive; `EVENT_EMIT_RATE_LIMITED → EVENT_RATE_LIMITED`, новый код `ACTOR_NOT_MEMBER`), `SubscriptionRegistry` + hook `revokeRoomAccess` (REQ-SEC-003; вызывающего ждёт срез исключения), Socket.io изолирован в `packages/core/src/realtime` (REQ-RT-006). Гейты на мердже: build/lint/typecheck/test/test:int/e2e 24/boundary-check/guardrails — зелёные.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex) — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -13,18 +11,22 @@
 2. Этот файл целиком.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/2026-08-05-realtime-read-handshake-implementation-plan/progress.md` — леджер последнего среза (санкционированные отклонения, deferred-миноры, adjudication); леджеры прежних срезов рядом. Не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит.
-6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
+5. `.superpowers/sdd/2026-08-05-realtime-read-handshake-implementation-plan/progress.md` — леджер последнего исполненного среза (санкционированные отклонения, deferred-миноры, adjudication); леджеры прежних срезов рядом. Не в git (`.superpowers/` игнорируется) — существуют только на этой машине; `git clean -fdx` уничтожит.
+6. `docs/sessions/2026-08-18-membership-exclusion-design.md` + `2026-08-18-membership-exclusion-implementation-plan.md` — **вход для исполнения следующего среза** (исключение; утверждены владельцем).
+7. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
 Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 3d7de83:HANDOFF.md`.
 
 ## Следующее действие
 
-**Выбор следующего среза — решение владельца** (как зафиксировано прошлой сессией):
-- **OAuth-срез** — `POST /rooms` + Google-флоу (REQ-ID-015/009); REGISTERED-ветка `TokenService` без roomId-scope; швы дизайна транспорта §10 на месте. См. также follow-up ниже про `sessionExpiry()` guest-cap.
-- **Срез исключения** — membership + вызов `RealtimeGateway.revokeRoomAccess` (hook готов и e2e-проверен) — закроет критерий ф.1 «немедленный отзыв подписки» целиком; там же мягкое удаление membership (сейчас `findActiveMembership` гасит только на soft-delete комнаты — зафиксировано в его комментарии) и закрытие minor M-3 (stale registry window, см. риски).
+**Исполнение среза исключения — subagent-driven, в новой сессии** (решение владельца 2026-08-18):
+- Дизайн: `docs/sessions/2026-08-18-membership-exclusion-design.md` (§0 — решения владельца, не переоткрывать; §10 — риски и принятые trade-offs).
+- План: `docs/sessions/2026-08-18-membership-exclusion-implementation-plan.md` — 9 задач TDD: (1) SDK 1.3.0 + коды + DTO; (2) миграция `membership_exclusion`; (3) joinIp + findActiveMembership; (4) `exclude` + hook; (5) rejoin-блок; (6) M-3; (7) endpoint exclude; (8) e2e критерия ф.1; (9) гейты.
+- **Санкционированное уточнение к дизайну §2:** `Membership.joinIp` — nullable (зафиксировано в шапке плана; NOT NULL ломал бы `createOrganizerMembership` без IP-контекста).
+- Режим: subagent-driven как realtime-срез (батчи по 3 задачи, двухстадийное ревью между задачами, леджер в `.superpowers/sdd/`).
+- После мерджа: LOC-снапшот по методике `docs/stats/loc-snapshots.md`.
 
-После мерджа следующего среза: LOC-снапшот по методике `docs/stats/loc-snapshots.md`.
+**Срез после исключения** — OAuth (`POST /rooms` + Google-флоу, REQ-ID-015/009; follow-up про `TokenService.sessionExpiry()` guest-cap — в списке ниже) либо иной выбор владельца.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -98,46 +100,44 @@
 
 ## Осталось недоделанным
 
-- **Выбор следующего среза** (OAuth vs исключение) — решение владельца (см. «Следующее действие»).
-- **Push `main`** (8 коммитов впереди origin после handoff-коммита) — решение владельца.
+- **Исполнение среза исключения** — см. «Следующее действие» (дизайн+план утверждены, исполнение subagent-driven в новой сессии).
+- **Push `main`** (3 коммита впереди origin + handoff-коммит этой правки) — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
-- **Судьба untracked `AGENTS.md`** в корне — вопрос владельцу открыт.
+- **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован этой сессией, CLAUDE.md не тронут (та же правка — решение владельца).
 
-## Session 2026-08-06 (исполнение realtime read/handshake)
+## Session 2026-08-18–19 (выбор и проектирование среза исключения)
 
 ### Что сделано
 
-- **Срез исполнен целиком: 9/9 задач subagent-driven, батчами по 3** (решение владельца прошлой сессии), на ветке `feat/realtime-read-handshake`, слит мерджем `--no-ff` `f0e5e88`. Ветка удалена.
-- **По задачам:** (1) конфиг `RECONNECT_RATE_LIMIT_PER_MIN`; (2) SDK 1.2.0 wire-конверты + `ACTOR_NOT_MEMBER` (+необходимая правка exhaustive-спека кодов); (3) таблица маппинга; (4) ProjectionService; (5) EventOutbox+RealtimeBus+RoomService на runner (широчайшая: 13 файлов); (6) SubscriptionRegistry+findActiveMembership+токен; (7) RealtimeGateway+IoAdapter; (8) e2e socket.io-client 9 тестов на проводе; (9) гейты зелёные.
-- **Финальное ревью (fable): WITH FIXES → clean.** I-1 (порядок subscribe lossy против дизайна §4) и M-1 (replay-видимость только unit-покрыта) исправлены fix-волной `3483503`, scoped re-review подтвердил.
-- **2 e2e-вскрытых core-бага** исправлены в срезе (`2d4799a`): raw-enum staged-событий (ронял всю live-доставку), отдельный порт socket.io (затрагивал prod).
-- Все ревью задач — clean с первого прохода; 6 санкционированных владельцем отклонений (список выше). Гейты на мердже и на слитом результате — зелёные.
+- **Push 8 коммитов прошлой сессии в origin** (`0ae4608..c5ed358`) — по решению владельца.
+- **Выбран следующий срез: исключение** (не OAuth) — решение владельца.
+- Полный цикл superpowers: brainstorm (контекст: амендмент v1.3 — в MVP исключает только ORGANIZER; device-cookie-инфраструктуры нет; `Membership` без `deletedAt`) → дизайн утверждён по секциям → план (9 задач TDD) с self-review.
+- **AGENTS.md закрыт:** это зеркало CLAUDE.md для Codex; синхронизированы указатели (точка входа → `HANDOFF.md`, turbo-развилка решена, кандидаты на упрощение закрыты амендментом v1.3) и закоммичен (`d657750`).
+
+### Решения владельца этой сессии (полный rationale — дизайн §0)
+
+1. Rejoin-блок по IP без device-cookie (REQ-ID-006 ч.3 частично; cookie-признак аддитивно позже).
+2. Отзыв refresh-сессий только у GUEST (REGISTERED сохраняет — его режут membership-гейты).
+3. События исключения в логе нет (таблица `Exclusion` — достаточный аудит для MVP).
+4. Повторное исключение — типизированный no-op; ORGANIZER неисключаем; исключение в терминальном статусе разрешено.
+5. Принуждение вызова `revokeRoomAccess` — пост-коммит hook `onAccessRevoked` в MembershipService (паттерн RealtimeBus), НЕ оркестрация в контроллере и НЕ forwardRef-цикл.
+6. Endpoint `POST /rooms/:roomId/members/:identityId/exclude` с `{reason?}` (задел под REQ-ID-018 ф.4).
+7. `joinIp` nullable (санкция на уточнение дизайна §2).
+8. Исполнение — subagent-driven в новой сессии.
 
 ### Коммиты этой сессии
 
-- `7957449` feat(core): конфиг RECONNECT_RATE_LIMIT_PER_MIN
-- `23cfa4d` feat(sdk): realtime wire-конверты + ACTOR_NOT_MEMBER, контракт 1.2.0
-- `df47465` feat(core): таблица маппинга core→contract кодов
-- `bf1f432` feat(core): ProjectionService
-- `45083ee` feat(core): EventOutbox + RealtimeBus; RoomService.transition на runner
-- `3f27ea6` feat(core): SubscriptionRegistry + findActiveMembership + токен лимитера
-- `b6cd3b5` feat(core): RealtimeGateway + ConfigurableIoAdapter
-- `2d4799a` fix(core): containment handleSubscribe, httpServer в io-adapter, нормализация visibility
-- `1c28137` test(server): realtime e2e (+ boundary anchor)
-- `3483503` fix(core): subscribe join до чтения лога + e2e replay-видимости
-- `f0e5e88` merge(core): realtime read/handshake slice
-- `be707cd` docs(stats): LOC snapshot (main @ f0e5e88)
+- `0acec10` docs(design): срез исключения
+- `401aadd` docs(plan): план реализации среза исключения (9 задач)
+- `d657750` docs: AGENTS.md (зеркало CLAUDE.md для Codex, синхронизирован)
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
 - Docker Desktop запущен (int/e2e поднимают контейнеры Postgres); `lt-pg` на 5432 нетронут.
-- Леджер среза: `.superpowers/sdd/2026-08-05-realtime-read-handshake-implementation-plan/progress.md` + briefs/reports/review-пакеты рядом (только на этой машине).
-- Untracked `AGENTS.md` — вопрос владельцу открыт.
-- Внешних side-effects нет (push не делался, деплоя нет).
+- Леджеры `.superpowers/sdd/` прежних срезов на месте (только на этой машине).
+- Side-effects: push в origin (выше); иных внешних эффектов нет.
 
 ### Осталось недоделанным
 
-- Выбор следующего среза (OAuth vs исключение) — решение владельца.
-- Push `main` — решение владельца.
-- Юрист — гейт 1 открыт, действие вне агента.
+- См. одноимённый раздел выше (исполнение среза, push, юрист, CLAUDE.md-указатель).
