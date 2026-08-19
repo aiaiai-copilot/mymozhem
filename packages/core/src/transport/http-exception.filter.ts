@@ -10,6 +10,13 @@ const STATUS_BY_WIRE_CODE = {
   ROOM_JOIN_DENIED: 403,
   RATE_LIMITED: 429,
   ROOM_PARTICIPANT_LIMIT_REACHED: 409,
+  // Срез исключения (REQ-ID-006, design-таблица маппинга): добавлено в Task 4 —
+  // расширение MEMBERSHIP_ERROR_CODES без этих статусов ломает compile-time
+  // exhaustive-маппинг ниже (гейт Task 4); спек-кейсы фильтра — Task 7.
+  ACTOR_NOT_MEMBER: 403,
+  ACTOR_NOT_ORGANIZER: 403,
+  TARGET_NOT_MEMBER: 404,
+  TARGET_NOT_EXCLUDABLE: 409,
   REQUEST_INVALID: 400,
   SESSION_INVALID: 401,
   INTERNAL_ERROR: 500,

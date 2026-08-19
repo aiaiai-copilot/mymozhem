@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Identity, Membership, Prisma } from '@prisma/client';
 import { displayNameSchema } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
@@ -7,15 +7,23 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { JoinRateLimiter } from './join-rate-limiter';
 import {
+  ActorNotMemberError,
+  ActorNotOrganizerError,
   JoinRateLimitedError,
   RoomJoinDeniedError,
   RoomParticipantLimitReachedError,
+  TargetNotExcludableError,
+  TargetNotMemberError,
 } from './membership.errors';
 
 export interface JoinResult {
   membership: Membership;
   identity: Identity;
 }
+
+// void | Promise<void>: sync-обработчики (RealtimeGateway.revokeRoomAccess) остаются
+// совместимыми; async-обработчик тоже легален — его rejection изолируется в exclude.
+export type AccessRevokedHandler = (identityId: string, roomId: string) => void | Promise<void>;
 
 @Injectable()
 export class MembershipService {
@@ -25,6 +33,17 @@ export class MembershipService {
     private readonly joinRateLimiter: JoinRateLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
+
+  private readonly logger = new Logger(MembershipService.name);
+  // Реестр обработчиков отзыва доступа (REQ-SEC-003): realtime-модуль подписывает
+  // RealtimeGateway.revokeRoomAccess при инициализации (паттерн RealtimeBus.subscribe).
+  // In-memory легален при одной реплике (REQ-OPS-005); состояние — поле экземпляра
+  // (REQ-CORE-004). Любой вызывающий exclude получает разрыв подписок структурно.
+  private readonly accessRevokedHandlers: AccessRevokedHandler[] = [];
+
+  onAccessRevoked(handler: AccessRevokedHandler): void {
+    this.accessRevokedHandlers.push(handler);
+  }
 
   // Called by RoomService.create inside its transaction: the organizer becomes the
   // room's first member (design §1). A violation of the partial unique index
@@ -49,6 +68,74 @@ export class MembershipService {
     });
     if (!membership || membership.deletedAt !== null || membership.room.deletedAt !== null) return null;
     return membership;
+  }
+
+  // Исключение участника организатором (REQ-ID-006 ч.3): soft-delete membership,
+  // запись Exclusion (rejoin-блок по IP), отзыв guest-сессий; пост-коммит —
+  // немедленный разрыв подписок через hook (REQ-SEC-003). Порядок гейтов значим
+  // (дизайн §3). Повтор — типизированный no-op (дизайн §0.4).
+  async exclude(params: {
+    roomId: string;
+    targetIdentityId: string;
+    actorId: string;
+    reason?: string;
+  }): Promise<{ excluded: boolean }> {
+    const actor = await this.findActiveMembership(params.roomId, params.actorId);
+    if (!actor) {
+      throw new ActorNotMemberError(`actor ${params.actorId} is not a member of room ${params.roomId}`);
+    }
+    if (actor.role !== 'ORGANIZER') {
+      throw new ActorNotOrganizerError(`actor ${params.actorId} is not ORGANIZER of room ${params.roomId}`);
+    }
+    const target = await this.prisma.membership.findUnique({
+      where: { roomId_identityId: { roomId: params.roomId, identityId: params.targetIdentityId } },
+      include: { identity: true },
+    });
+    if (!target) {
+      throw new TargetNotMemberError(`target ${params.targetIdentityId} is not a member of room ${params.roomId}`);
+    }
+    if (target.deletedAt !== null) return { excluded: false };
+    if (target.role === 'ORGANIZER') {
+      throw new TargetNotExcludableError(`ORGANIZER of room ${params.roomId} cannot be excluded`);
+    }
+    // Инвариант: не-ORGANIZER membership всегда имеет joinIp (пишется в join).
+    if (target.joinIp === null) {
+      throw new Error(`invariant violated: non-organizer membership ${target.id} without joinIp`);
+    }
+    const joinIp = target.joinIp;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.membership.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+      await tx.exclusion.create({
+        data: {
+          roomId: params.roomId,
+          identityId: params.targetIdentityId,
+          ip: joinIp,
+          excludedBy: params.actorId,
+          reason: params.reason ?? null,
+        },
+      });
+      // Отзыв сессий — только гостю (дизайн §0.2): гостевая identity однокомнатная.
+      if (target.identity.kind === 'GUEST') {
+        await tx.session.updateMany({
+          where: { identityId: params.targetIdentityId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+    });
+    // Пост-коммит: изоляция per-handler (прецедент fanOut) — ни sync-бросок, ни
+    // async-rejection слушателя не валят запрос после коммита (await в try ловит оба;
+    // unhandled rejection — а на современном Node это падение процесса — невозможен);
+    // сигнал — в серверном логе.
+    for (const handler of this.accessRevokedHandlers) {
+      try {
+        await handler(params.targetIdentityId, params.roomId);
+      } catch (err) {
+        this.logger.error(
+          `access-revoked handler failed for ${params.targetIdentityId} in ${params.roomId}: ${(err as Error).message}`,
+        );
+      }
+    }
+    return { excluded: true };
   }
 
   // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
