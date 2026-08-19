@@ -81,4 +81,16 @@ describe('Membership schema', () => {
       /[Uu]nique constraint|duplicate key/,
     );
   });
+
+  it('Exclusion: unique(roomId, identityId) и index(roomId, ip) существуют (REQ-ID-006)', async () => {
+    const rows = await db.prisma.$queryRaw<{ indexname: string; indexdef: string }[]>`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'membership' AND tablename = 'Exclusion'
+    `;
+    const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
+    expect(byName.get('Exclusion_roomId_identityId_key')).toMatch(/^CREATE UNIQUE INDEX/);
+    // NB: Postgres не квотит lowercase-идентификаторы в indexdef — колонка
+    // фигурирует как ip, не "ip" (проверено на pg17: USING btree ("roomId", ip)).
+    expect(byName.get('Exclusion_roomId_ip_idx')).toContain('"roomId", ip');
+  });
 });
