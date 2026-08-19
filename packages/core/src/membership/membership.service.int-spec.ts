@@ -78,6 +78,24 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     expect(result.membership.role).toBe('PARTICIPANT');
   });
 
+  it('stores joinIp on the membership row (REQ-ID-006 rejoin-блок)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+    const row = await db.prisma.membership.findUnique({ where: { id: result.membership.id } });
+    expect(row?.joinIp).toBe(IP);
+  });
+
+  it('findActiveMembership returns null for a soft-deleted membership (REQ-SEC-003)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+    // Soft-delete напрямую клиентом: публичный путь (exclude) — Task 4.
+    await db.prisma.membership.update({
+      where: { id: result.membership.id },
+      data: { deletedAt: new Date() },
+    });
+    await expect(makeMembership().findActiveMembership(room.id, result.identity.id)).resolves.toBeNull();
+  });
+
   it('joins an ACTIVE room (late-join, ADR-005)', async () => {
     const room = await roomService.create(ORG);
     await db.prisma.room.update({ where: { id: room.id }, data: { status: 'ACTIVE' } });

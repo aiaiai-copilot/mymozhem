@@ -39,16 +39,15 @@ export class MembershipService {
     });
   }
 
-  // Read-path realtime-среза (REQ-SEC-003): живое членство в живой комнате.
-  // Мягкое удаление комнаты гасит членство для чтения; мягкого удаления самой
-  // membership в схеме пока нет — появится со срезом исключения (там же hook
-  // SubscriptionRegistry.revokeRoomAccess получит вызывающего).
+  // Read-path (REQ-SEC-003): живое членство в живой комнате. Мягкое удаление
+  // комнаты И мягкое удаление самой membership (исключение, срез исключения)
+  // гасят членство для чтения — проверка непрерывна, не единовременна.
   async findActiveMembership(roomId: string, identityId: string): Promise<Membership | null> {
     const membership = await this.prisma.membership.findUnique({
       where: { roomId_identityId: { roomId, identityId } },
       include: { room: true },
     });
-    if (!membership || membership.room.deletedAt !== null) return null;
+    if (!membership || membership.deletedAt !== null || membership.room.deletedAt !== null) return null;
     return membership;
   }
 
@@ -89,7 +88,7 @@ export class MembershipService {
     return this.prisma.$transaction(async (tx) => {
       const identity = await this.identity.createGuest(name, tx);
       const membership = await tx.membership.create({
-        data: { roomId: room.id, identityId: identity.id, role: 'PARTICIPANT' },
+        data: { roomId: room.id, identityId: identity.id, joinIp: params.ip, role: 'PARTICIPANT' },
       });
       return { membership, identity };
     });
