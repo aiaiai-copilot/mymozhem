@@ -14,6 +14,10 @@ export const CONTRACT_ERROR_CODES = [
   'ROOM_LOG_SEALED',
   'ROOM_SETTINGS_FROZEN',
   'ACTOR_NOT_MEMBER',
+  // Membership exclusion (срез исключения, REQ-ID-006): отказы endpoint'а exclude.
+  'ACTOR_NOT_ORGANIZER',
+  'TARGET_NOT_MEMBER',
+  'TARGET_NOT_EXCLUDABLE',
   // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
   'ROOM_JOIN_DENIED',
   'ROOM_PARTICIPANT_LIMIT_REACHED',
