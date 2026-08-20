@@ -163,6 +163,16 @@ export class MembershipService {
       throw new RoomJoinDeniedError(`room ${room.id} policy ${room.joinPolicy}`);
     }
 
+    // Rejoin-блок исключённых (REQ-ID-006 ч.3): свёрнут в тот же ROOM_JOIN_DENIED —
+    // факт исключения не раскрывается (REQ-ID-013). Обход сменой сети —
+    // задокументированный лимит нормы; device-cookie-признак — шов (дизайн §9).
+    const excluded = await this.prisma.exclusion.findFirst({
+      where: { roomId: room.id, ip: params.ip },
+    });
+    if (excluded) {
+      throw new RoomJoinDeniedError(`ip excluded from room ${room.id}`);
+    }
+
     // Гонка count-then-insert принята (design §1, развилка (б)): лимит анти-накруточный,
     // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
     const participantCount = await this.prisma.membership.count({

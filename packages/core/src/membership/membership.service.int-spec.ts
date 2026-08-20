@@ -404,4 +404,27 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
     expect(before).toEqual([[guest.identity.id, room.id]]);
     expect(after).toEqual([[guest.identity.id, room.id]]); // rejection соседа не помешал
   });
+
+  it('rejoin с IP исключённого → RoomJoinDeniedError, неотличим от «неверного кода» (REQ-ID-013)', async () => {
+    const { room, guest } = await roomWithGuest();
+    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: ORG });
+    await expect(
+      makeMembership2().join({ code: room.code, displayName: 'Снова', ip: IP }),
+    ).rejects.toBeInstanceOf(RoomJoinDeniedError);
+  });
+
+  it('rejoin с ДРУГОГО IP проходит — задокументированный обход REQ-ID-006', async () => {
+    const { room, guest } = await roomWithGuest();
+    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: ORG });
+    const rejoined = await makeMembership2().join({ code: room.code, displayName: 'Снова', ip: IP2 });
+    expect(rejoined.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('исключение в одной комнате не блокирует вход в другую', async () => {
+    const { room, guest } = await roomWithGuest();
+    const other = await roomService2.create(ORG);
+    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: ORG });
+    const joined = await makeMembership2().join({ code: other.code, displayName: 'Снова', ip: IP });
+    expect(joined.membership.roomId).toBe(other.id);
+  });
 });
