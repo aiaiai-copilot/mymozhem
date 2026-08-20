@@ -19,6 +19,7 @@ function fakeSocket(claims: AccessClaims = GUEST_CLAIMS) {
     handshake: { auth: { token: 'x' } },
     joined: [] as string[],
     left: [] as string[],
+    connected: true,
     disconnected: false as boolean | unknown,
     join(room: string) { this.joined.push(room); },
     leave(room: string) { this.left.push(room); },
@@ -30,7 +31,7 @@ type FakeSocket = ReturnType<typeof fakeSocket>;
 type Ack = (value: unknown) => void;
 
 function makeGateway(overrides: {
-  membership?: { findActiveMembership: jest.Mock };
+  membership?: { findActiveMembership: jest.Mock; onAccessRevoked?: jest.Mock };
   prisma?: { room: { findUnique: jest.Mock }; logEvent: { findMany: jest.Mock } };
   eventLog?: { commitAppEvent: jest.Mock };
   outbox?: { run: jest.Mock };
@@ -38,7 +39,10 @@ function makeGateway(overrides: {
   tokens?: { verifyAccessToken: jest.Mock };
   reconnectLimiter?: { tryAcquire: jest.Mock };
 }) {
-  const membership = overrides.membership ?? { findActiveMembership: jest.fn().mockResolvedValue({ role: 'PARTICIPANT' }) };
+  const membership = overrides.membership ?? {
+    findActiveMembership: jest.fn().mockResolvedValue({ role: 'PARTICIPANT' }),
+    onAccessRevoked: jest.fn(),
+  };
   const prisma = overrides.prisma ?? {
     room: { findUnique: jest.fn().mockResolvedValue({ appId: 'quiz', manifestVersion: 1, appSettings: null }) },
     logEvent: { findMany: jest.fn().mockResolvedValue([]) },
@@ -164,6 +168,20 @@ describe('RealtimeGateway.handleSubscribe', () => {
     const { ack: ack2, calls: calls2 } = ackOf();
     await gateway.handleSubscribe(other as never, { roomId: '99999999-9999-4999-8999-999999999999' }, ack2);
     expect(calls2).toEqual([{ code: 'REQUEST_INVALID' }]);
+  });
+
+  // M-3: disconnect внутри subscribe (между registry.add и ack) — слушатель disconnect
+  // уже сделал remove no-op'ом; без проверки connected запись мёртвого сокета протухала
+  // бы в реестре. Фикс: финальная проверка socket.connected до ack.
+  it('disconnect mid-subscribe leaves no registry entry and sends no ack (M-3)', async () => {
+    const registry = new SubscriptionRegistry();
+    const { gateway } = makeGateway({ registry });
+    const socket = fakeSocket();
+    socket.connected = false; // disconnect прилетел, пока subscribe читал лог
+    const { ack, calls } = ackOf();
+    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+    expect(registry.get(socket.id)).toBeUndefined();
+    expect(calls).toEqual([]);
   });
 });
 
@@ -326,5 +344,17 @@ describe('RealtimeGateway fan-out and revoke', () => {
     expect(s1.disconnected).toBe(true);
     expect(s2.disconnected).toBe(true);
     expect(registry.socketsOf(GUEST_CLAIMS.sub, ROOM)).toEqual([]);
+  });
+
+  it('afterInit подписывает revokeRoomAccess на hook membership (REQ-SEC-003)', () => {
+    const onAccessRevoked = jest.fn();
+    const { gateway } = makeGateway({ membership: { findActiveMembership: jest.fn(), onAccessRevoked } });
+    const use = jest.fn();
+    const on = jest.fn();
+    const server = { use, on, sockets: { sockets: new Map() } };
+    // bus.subscribe — фейк в makeGateway: { subscribe: jest.fn(), publish: jest.fn() }
+    gateway.afterInit(server as never);
+    expect(onAccessRevoked).toHaveBeenCalledTimes(1);
+    expect(onAccessRevoked.mock.calls[0][0]).toBeInstanceOf(Function);
   });
 });

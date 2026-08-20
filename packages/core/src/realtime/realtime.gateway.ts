@@ -77,6 +77,9 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       socket.on('disconnect', () => this.registry.remove(socket.id));
     });
     this.bus.subscribe((events) => this.fanOut(events));
+    // REQ-SEC-003: срез исключения вызывает MembershipService.exclude → пост-коммит
+    // hook → немедленный разрыв подписок (шов дизайна realtime §9 исполнен).
+    this.membership.onAccessRevoked((identityId, roomId) => this.revokeRoomAccess(identityId, roomId));
   }
 
   // Handshake (design §4): отказы аутентификации — один SESSION_INVALID (причины не
@@ -163,6 +166,16 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
         events: this.projection.projectEvents(events, level),
         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
       };
+      // M-3: disconnect, прилетевший внутри subscribe (пока читался лог), уже прошёл
+      // слушателем как no-op (записи не было). Без этой проверки запись мёртвого
+      // сокета протухла бы в реестре. Disconnect ПОСЛЕ проверки обслужит штатный
+      // слушатель — запись уже существует.
+      if (!socket.connected) {
+        this.registry.remove(socket.id);
+        socket.leave(roomChannel(roomId));
+        socket.leave(organizerChannel(roomId));
+        return;
+      }
       ack({ ok: true, snapshot });
     } catch (err) {
       // Полуподписка недопустима: join теперь ДО чтения лога (design §4), поэтому
