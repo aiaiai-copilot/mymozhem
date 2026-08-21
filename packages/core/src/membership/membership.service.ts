@@ -175,8 +175,10 @@ export class MembershipService {
 
     // Гонка count-then-insert принята (design §1, развилка (б)): лимит анти-накруточный,
     // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
+    // Считаются только живые membership (deletedAt: null) — исключённый участник
+    // не занимает слот лимита навсегда (REQ-SEC-003, ruling контроллера).
     const participantCount = await this.prisma.membership.count({
-      where: { roomId: room.id, role: 'PARTICIPANT' },
+      where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
     });
     if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
       throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);

@@ -251,12 +251,12 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
   let db2: TestDb;
   let roomService2: RoomService;
 
-  const makeMembership2 = () =>
+  const makeMembership2 = (overrides: { participantLimit?: number } = {}) =>
     new MembershipService(
       db2.prisma,
       new IdentityService(db2.prisma),
       new JoinRateLimiter(1000),
-      TEST_CONFIG,
+      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
     );
 
   beforeAll(async () => {
@@ -418,6 +418,21 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
     await makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: ORG });
     const rejoined = await makeMembership2().join({ code: room.code, displayName: 'Снова', ip: IP2 });
     expect(rejoined.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('исключённый участник не ест лимит комнаты: новый гость входит на его место', async () => {
+    // participantCount считает только живые membership (REQ-SEC-003, ruling контроллера):
+    // soft-deleted строка исключённого не должна навсегда занимать слот лимита.
+    const { room, guest } = await roomWithGuest();
+    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: ORG });
+
+    const result = await makeMembership2({ participantLimit: 1 }).join({
+      code: room.code,
+      displayName: 'Новый',
+      ip: IP2,
+    });
+
+    expect(result.membership.role).toBe('PARTICIPANT');
   });
 
   it('исключение в одной комнате не блокирует вход в другую', async () => {

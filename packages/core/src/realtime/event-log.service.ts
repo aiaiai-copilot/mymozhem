@@ -159,12 +159,13 @@ export class EventLogService {
         `visibility ${visibility} exceeds declared ceiling ${definition.visibility} for ${appId}.${name}`,
       );
     }
-    // 7. Membership-гейт (design §0): актор — член комнаты.
+    // 7. Membership-гейт (design §0): актор — член комнаты. Soft-delete membership
+    // (исключение, REQ-SEC-003) гасит членство и здесь — проверка непрерывна.
     if (actorId !== null) {
       const member = await tx.membership.findUnique({
         where: { roomId_identityId: { roomId, identityId: actorId } },
       });
-      if (!member) {
+      if (!member || member.deletedAt !== null) {
         throw new ActorNotMemberError(`Identity ${actorId} is not a member of room ${roomId}`);
       }
     }
