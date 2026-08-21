@@ -26,6 +26,12 @@ import { AppModule } from '../src/app.module';
 jest.setTimeout(120_000);
 
 const ORG = '00000000-0000-0000-0000-000000000001';
+// Второй организатор с z.uuid()-совместимым id (v4-nibble): ORG как path-param
+// не прошёл бы контроллерный z.uuid().parse — кейс «цель — ORGANIZER» требует
+// валидного uuid в path (срез исключения).
+const ORG2 = '00000000-0000-4000-8000-000000000002';
+// Не-член с валидным v4-uuid (target path-param кейсов exclude).
+const STRANGER = '00000000-0000-4000-8000-000000000099';
 
 // Тип ответа inject — через публичную сигнатуру app (fastify не является прямой
 // зависимостью apps/server, pnpm его не резолвит из этого пакета).
@@ -73,6 +79,20 @@ const join = (
 const refresh = (app: NestFastifyApplication, cookie?: string) =>
   app.inject({ method: 'POST', url: '/auth/refresh', headers: cookie ? { cookie } : {} });
 
+const exclude = (
+  app: NestFastifyApplication,
+  roomId: string,
+  identityId: string,
+  token?: string,
+  payload: Record<string, unknown> = {},
+) =>
+  app.inject({
+    method: 'POST',
+    url: `/rooms/${roomId}/members/${identityId}/exclude`,
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+    payload,
+  });
+
 // Кука между запросами передаётся вручную: res.cookies → заголовок cookie.
 function refreshCookieOf(res: InjectResponse): string {
   const cookie = res.cookies.find((c) => c.name === 'mm_refresh');
@@ -94,6 +114,7 @@ describe('Transport HTTP (e2e)', () => {
     // Access-токены верифицируем тем же секретом, которым подписывают boot'нутые app'ы.
     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
     const outbox = new EventOutbox(db.prisma, new RealtimeBus());
     roomService = new RoomService(
@@ -326,6 +347,101 @@ describe('Transport HTTP (e2e)', () => {
       );
       expect(ok.statusCode).toBe(201);
       expect(ok.headers['access-control-allow-origin']).toBe('https://ok.example');
+    });
+  });
+
+  describe('exclude endpoint (REQ-ID-006)', () => {
+    let app: NestFastifyApplication;
+
+    beforeAll(async () => {
+      app = await createApp();
+    });
+
+    afterAll(async () => {
+      await app.close();
+    });
+
+    // organizerToken — guest-claims (kind GUEST + roomId), роль ORGANIZER берётся
+    // из membership: scope-проверка контроллера пропускает, сервис гейтит по роли.
+    async function organizerToken(roomId: string, organizer: string = ORG): Promise<string> {
+      const issued = await tokens.issueGuestTokens(organizer, roomId);
+      return issued.accessToken;
+    }
+
+    // Комната + вошедший по HTTP гость; возвращает id гостя и токен организатора.
+    async function roomWithGuest() {
+      const room = await roomService.create(ORG);
+      const joinRes = await join(app, { code: room.code, displayName: 'Гость' });
+      expect(joinRes.statusCode).toBe(201);
+      const { accessToken } = tokenResponseSchema.parse(joinRes.json());
+      const guestId = tokens.verifyAccessToken(accessToken).sub;
+      return { room, guestId, guestToken: accessToken };
+    }
+
+    it('без Bearer → 401 SESSION_INVALID', async () => {
+      const room = await roomService.create(ORG);
+      const res = await exclude(app, room.id, STRANGER);
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
+    });
+
+    it('гостевой токен чужой комнаты → 403 ACTOR_NOT_MEMBER (scope REQ-ID-016)', async () => {
+      const { guestToken } = await roomWithGuest();
+      const other = await roomService.create(ORG);
+      const res = await exclude(app, other.id, STRANGER, guestToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ code: 'ACTOR_NOT_MEMBER' });
+    });
+
+    it('актор-участник (не ORGANIZER) → 403 ACTOR_NOT_ORGANIZER', async () => {
+      const { room, guestId, guestToken } = await roomWithGuest();
+      const res = await exclude(app, room.id, guestId, guestToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ code: 'ACTOR_NOT_ORGANIZER' });
+    });
+
+    it('цель никогда не была членом → 404 TARGET_NOT_MEMBER', async () => {
+      const room = await roomService.create(ORG);
+      const res = await exclude(app, room.id, STRANGER, await organizerToken(room.id));
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ code: 'TARGET_NOT_MEMBER' });
+    });
+
+    it('цель — ORGANIZER → 409 TARGET_NOT_EXCLUDABLE', async () => {
+      // ORG2 — v4-совместимый uuid: path-param проходит z.uuid().parse контроллера.
+      const room = await roomService.create(ORG2);
+      const res = await exclude(app, room.id, ORG2, await organizerToken(room.id, ORG2));
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ code: 'TARGET_NOT_EXCLUDABLE' });
+    });
+
+    it('happy path → 200 { excluded: true }; повтор → 200 { excluded: false }', async () => {
+      const { room, guestId } = await roomWithGuest();
+      const orgToken = await organizerToken(room.id);
+      const first = await exclude(app, room.id, guestId, orgToken, { reason: 'флуд' });
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toEqual({ excluded: true });
+      // Повтор — типизированный no-op, не ошибка (дизайн §0.4).
+      const second = await exclude(app, room.id, guestId, orgToken);
+      expect(second.statusCode).toBe(200);
+      expect(second.json()).toEqual({ excluded: false });
+    });
+
+    it('невалидный uuid в path → 400 REQUEST_INVALID', async () => {
+      const room = await roomService.create(ORG);
+      const res = await exclude(app, 'not-a-uuid', STRANGER, await organizerToken(room.id));
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ code: 'REQUEST_INVALID' });
+    });
+
+    it('лишний ключ в body → 400 REQUEST_INVALID (strictObject)', async () => {
+      const { room, guestId } = await roomWithGuest();
+      const res = await exclude(app, room.id, guestId, await organizerToken(room.id), {
+        reason: 'ok',
+        extra: true,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ code: 'REQUEST_INVALID' });
     });
   });
 });

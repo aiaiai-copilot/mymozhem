@@ -8,12 +8,13 @@ import { AuthModule } from '../auth/auth.module';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { JoinController } from './join.controller';
 import { AuthController } from './auth.controller';
+import { ExcludeController } from './exclude.controller';
 import { HttpExceptionFilter } from './http-exception.filter';
 import { REFRESH_RATE_LIMITER } from './auth.tokens';
 
 @Module({
   imports: [ConfigModule, MembershipModule, AuthModule],
-  controllers: [JoinController, AuthController],
+  controllers: [JoinController, AuthController, ExcludeController],
   providers: [
     // Единственная точка маппинга ошибка → HTTP для всего приложения (design §5).
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
