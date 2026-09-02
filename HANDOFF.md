@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Date:** 2026-09-02 (срез исключения **исполнен 9/9 и слит в `main`** — мердж `--no-ff` `c2e60da`; все гейты зелёные на слитом результате; **push — решение владельца**)
-**Branch:** `main` (16 коммитов впереди `origin/main`, не запушен; рабочее дерево чистое). Ветка `feat/membership-exclusion` удалена после мерджа.
+**Date:** 2026-09-02 (срез исключения **исполнен 9/9 и слит в `main`** — мердж `--no-ff` `c2e60da`; все гейты зелёные на слитом результате; `main` **запушен** в origin; **следующий срез выбран: OAuth** — brainstorm в новой сессии, решение владельца 2026-09-02)
+**Branch:** `main` (синхронизирован с `origin/main`, рабочее дерево чистое). Ветка `feat/membership-exclusion` удалена после мерджа.
 
 **Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP) — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime и по исключению (ф.1 «немедленный отзыв подписки») подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -19,9 +19,7 @@
 
 ## Следующее действие
 
-**Срез исключения закрыт (9/9, мердж `c2e60da`, гейты зелёные). Следующий срез — выбор владельца**: OAuth (`POST /rooms` + Google-флоу, REQ-ID-015/009; follow-up про `TokenService.sessionExpiry()` guest-cap — в списке ниже) либо иной.
-
-Перед/вместе со стартом нового среза: `git push` `main` (16 коммитов впереди `origin/main`) — решение владельца.
+**Срез OAuth — brainstorm в новой сессии** (решение владельца 2026-09-02). Объём по HANDOFF-предложению: `POST /rooms` + Google-флоу (REQ-ID-015/009); известный follow-up — `TokenService.sessionExpiry()` применяет guest-cap безусловно, REGISTERED-ротация не должна его наследовать (token.service.ts, design §10). Вход: superpowers:brainstorming (путь architectural — нового потока в репо нет), источник истины — `docs/spec/normative-package-v1.2.md` (REQ-ID-*) + amendment v1.3.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -98,8 +96,7 @@
 
 ## Осталось недоделанным
 
-- **Push** (`main` на 16+ коммитов впереди `origin/main`) — решение владельца.
-- **Выбор следующего среза** (OAuth либо иной) — решение владельца, см. «Следующее действие».
+- **Срез OAuth** — выбран владельцем, brainstorm в новой сессии (см. «Следующее действие»).
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
@@ -110,6 +107,7 @@
 - **Task 9 (гейты):** полный конвейер `build → lint → typecheck → test → test:int → server e2e → boundary-check → guardrails` зелёный на ветке `feat/membership-exclusion` (Tasks 1–8 были закоммичены прежними сессиями).
 - **Мердж в `main` `--no-ff`** (`c2e60da`) по выбору владельца (локальный мердж, не PR); повторный прогон всех гейтов на слитом результате — зелёный. Ветка `feat/membership-exclusion` удалена.
 - **LOC-снапшот** по методике `docs/stats/loc-snapshots.md` (`c9fbaa8`): 9 731 строки кода (+797), core 6 772 / sdk 1 831 / server 1 067; тесты/прод 1.39; миграций 8 (первая схемная за три среза — `Membership.deletedAt/joinIp` + `Exclusion`).
+- **Push `main` в origin** выполнен (решение владельца): `c5ed358..82a3e1e`. Следующий срез выбран — **OAuth**, brainstorm в новой сессии.
 
 ### Коммиты этой сессии
 
@@ -125,4 +123,4 @@
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (push, выбор следующего среза, юрист, CLAUDE.md-указатель).
+- См. одноимённый раздел выше (OAuth brainstorm — новая сессия, юрист, CLAUDE.md-указатель).
