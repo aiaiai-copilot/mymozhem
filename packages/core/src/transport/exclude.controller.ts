@@ -3,7 +3,8 @@ import { excludeRequestSchema, type ExcludeResponse } from '@mymozhem/sdk';
 import { z } from 'zod';
 import { MembershipService } from '../membership/membership.service';
 import { ActorNotMemberError } from '../membership/membership.errors';
-import { TokenService, type AccessClaims } from '../auth/token.service';
+import { TokenService } from '../auth/token.service';
+import { authenticate } from './authenticate';
 import type { RequestLike } from './http.types';
 
 // actorId НЕ принимается из payload/path — актор определяется только access JWT
@@ -24,7 +25,7 @@ export class ExcludeController {
     @Body() body: unknown,
     @Req() req: RequestLike,
   ): Promise<ExcludeResponse> {
-    const claims = this.authenticate(req);
+    const claims = authenticate(req, this.tokens);
     const parsedRoomId = z.uuid().parse(roomId);
     const { reason } = excludeRequestSchema.parse(body ?? {});
     // REQ-ID-016: гостевой scope зашит в токен — GUEST действует только в своей
@@ -38,13 +39,5 @@ export class ExcludeController {
       actorId: claims.sub,
       reason,
     });
-  }
-
-  // Первый Bearer-аутентифицированный REST-путь: паттерн «извлечь → verifyAccessToken».
-  // Невалидный/отсутствующий токен — AuthError SESSION_INVALID (фильтр → 401).
-  private authenticate(req: RequestLike): AccessClaims {
-    const header = req.headers.authorization;
-    const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
-    return this.tokens.verifyAccessToken(token);
   }
 }

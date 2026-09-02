@@ -16,9 +16,12 @@ export interface ReplyLike {
     options: {
       httpOnly: boolean;
       secure: boolean;
-      sameSite: 'strict';
+      sameSite: 'strict' | 'lax'; // lax — oauth state/pkce/redirect (возврат с Google, design §3)
       path: string;
       maxAge: number;
     },
   ): unknown;
+  // OAuth-флоу: одноразовые куки гасятся при любом исходе; 302 на Google и на цель.
+  clearCookie(name: string, options: { path: string }): unknown;
+  redirect(statusCode: number, url: string): unknown;
 }

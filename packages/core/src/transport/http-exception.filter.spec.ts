@@ -11,6 +11,8 @@ import {
   TargetNotExcludableError,
   TargetNotMemberError,
 } from '../membership/membership.errors';
+import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
+import { RoomOrganizerNotRegisteredError, RoomTransitionError } from '../room/room.errors';
 import { HttpExceptionFilter } from './http-exception.filter';
 
 type ReplyMock = { status: jest.Mock; send: jest.Mock };
@@ -51,6 +53,19 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
     ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
+    // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7): core-код 1:1 в wire,
+    // статус из таблицы маппинга.
+    ['oauth not configured', new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'x'), 503, 'OAUTH_NOT_CONFIGURED'],
+    ['oauth redirect invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'x'), 400, 'OAUTH_REDIRECT_INVALID'],
+    ['oauth state invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'x'), 401, 'OAUTH_STATE_INVALID'],
+    ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
+    ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
+    ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
+    ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
+    // POST /rooms (REQ-ID-005): покрытие RoomError частичное (design §11) — по HTTP
+    // достижим только ROOM_ORGANIZER_NOT_REGISTERED; прочие коды → INTERNAL_ERROR.
+    ['room organizer not registered', new RoomOrganizerNotRegisteredError('x'), 403, 'ROOM_ORGANIZER_NOT_REGISTERED'],
+    ['room transition (прочий RoomError)', new RoomTransitionError('x'), 500, 'INTERNAL_ERROR'],
     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],
   ];
@@ -107,6 +122,15 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
       expect(errorSpy).not.toHaveBeenCalled();
       // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
+    });
+
+    it('logs 4xx OAuthError message at warn level (та же норма, что AuthError; message — фиксированные строки + sub)', () => {
+      const err = new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
+      const { filter, reply } = makeFilter();
+      filter.catch(err, makeHost(reply));
+      expect(warnSpy).toHaveBeenCalledWith('state mismatch or code missing');
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'OAUTH_STATE_INVALID' });
     });
 
     it('does not log non-auth 4xx at all', () => {
