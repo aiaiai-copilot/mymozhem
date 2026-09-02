@@ -49,6 +49,7 @@ model Room {
   updatedAt       DateTime       @updatedAt
   logEvents       LogEvent[]
   memberships     Membership[]
+  exclusions      Exclusion[]
 
   @@schema("room")
 }
@@ -77,6 +78,8 @@ model Identity {
   logEvents   LogEvent[]
   memberships Membership[]
   sessions    Session[]
+  exclusions  Exclusion[]  @relation("ExclusionTarget")
+  exclusionsMade Exclusion[] @relation("ExclusionActor")
 
   @@schema("identity")
 }
@@ -147,7 +150,33 @@ model Membership {
   identityId String    @db.Uuid
   role       MemberRole
   joinedAt   DateTime  @default(now())
+  deletedAt  DateTime?
+  // IP на входе (REQ-ID-006 rejoin-блок). Nullable: ORGANIZER-membership создаётся
+  // без IP-контекста (RoomService.create); организатор неисключаем, его joinIp
+  // никогда не попадает в Exclusion (дизайн исключения §0.4).
+  joinIp     String?
 
   @@unique([roomId, identityId])
+  @@schema("membership")
+}
+
+// Exclusion — запись исключения участника (REQ-ID-006 ч.3) и одновременно
+// аудит-запись (excludedBy + reason — задел под REQ-ID-018, ф.4). Очистка —
+// регламентный job REQ-ID-010 (TTL-срез). device-cookie-признак появится
+// аддитивно с cookie-инфраструктурой (дизайн исключения §0.1).
+model Exclusion {
+  id         String   @id @default(uuid()) @db.Uuid
+  room       Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  roomId     String   @db.Uuid
+  identity   Identity @relation("ExclusionTarget", fields: [identityId], references: [id], onDelete: Restrict)
+  identityId String   @db.Uuid
+  ip         String
+  excludedByIdentity Identity @relation("ExclusionActor", fields: [excludedBy], references: [id], onDelete: Restrict)
+  excludedBy String   @db.Uuid
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@unique([roomId, identityId])
+  @@index([roomId, ip])
   @@schema("membership")
 }

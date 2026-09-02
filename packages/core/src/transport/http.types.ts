@@ -5,6 +5,8 @@
 export interface RequestLike {
   readonly ip: string;
   readonly cookies: Record<string, string | undefined>;
+  // Bearer-аутентификация REST (срез исключения): первый REST-потребитель Authorization.
+  readonly headers: Record<string, string | string[] | undefined>;
 }
 
 export interface ReplyLike {

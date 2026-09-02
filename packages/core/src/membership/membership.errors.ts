@@ -4,6 +4,10 @@ export const MEMBERSHIP_ERROR_CODES = {
   ROOM_JOIN_DENIED: 'ROOM_JOIN_DENIED',
   JOIN_RATE_LIMITED: 'JOIN_RATE_LIMITED',
   ROOM_PARTICIPANT_LIMIT_REACHED: 'ROOM_PARTICIPANT_LIMIT_REACHED',
+  ACTOR_NOT_MEMBER: 'ACTOR_NOT_MEMBER',
+  ACTOR_NOT_ORGANIZER: 'ACTOR_NOT_ORGANIZER',
+  TARGET_NOT_MEMBER: 'TARGET_NOT_MEMBER',
+  TARGET_NOT_EXCLUDABLE: 'TARGET_NOT_EXCLUDABLE',
 } as const;
 
 export type MembershipErrorCode =
@@ -42,5 +46,32 @@ export class JoinRateLimitedError extends MembershipError {
 export class RoomParticipantLimitReachedError extends MembershipError {
   constructor(message: string) {
     super(MEMBERSHIP_ERROR_CODES.ROOM_PARTICIPANT_LIMIT_REACHED, message);
+  }
+}
+
+// Срез исключения (REQ-ID-006). Имена кодов совпадают с wire-кодами SDK —
+// HttpExceptionFilter отдаёт MembershipError.code наружу как есть (REQ-SEC-006:
+// message остаётся серверным).
+export class ActorNotMemberError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.ACTOR_NOT_MEMBER, message);
+  }
+}
+
+export class ActorNotOrganizerError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.ACTOR_NOT_ORGANIZER, message);
+  }
+}
+
+export class TargetNotMemberError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.TARGET_NOT_MEMBER, message);
+  }
+}
+
+export class TargetNotExcludableError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.TARGET_NOT_EXCLUDABLE, message);
   }
 }

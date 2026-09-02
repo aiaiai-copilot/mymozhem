@@ -22,6 +22,11 @@ export * from './membership/membership.module';
 export * from './realtime/event-log.service';
 export * from './realtime/event-emit-limiter';
 export * from './realtime/realtime.errors';
+// Срез исключения: membership.errors тоже экспортирует ActorNotMemberError
+// (MembershipError-подкласс, design 2026-08-18 §«Гейт актора») — star-export двух
+// модулей даёт TS2308. Явный re-export снимает неоднозначность в пользу realtime-
+// версии (status quo barrel); membership-версия потребляется по прямому пути модуля.
+export { ActorNotMemberError } from './realtime/realtime.errors';
 export * from './realtime/realtime.module';
 export * from './realtime/realtime-bus';
 export * from './realtime/event-outbox';

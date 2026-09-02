@@ -3,9 +3,13 @@ import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 import { AuthError } from '../auth/auth.errors';
 import {
+  ActorNotMemberError,
+  ActorNotOrganizerError,
   JoinRateLimitedError,
   RoomJoinDeniedError,
   RoomParticipantLimitReachedError,
+  TargetNotExcludableError,
+  TargetNotMemberError,
 } from '../membership/membership.errors';
 import { HttpExceptionFilter } from './http-exception.filter';
 
@@ -40,6 +44,12 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
     ['rate limited', new JoinRateLimitedError('x'), 429, 'RATE_LIMITED'],
     ['room full', new RoomParticipantLimitReachedError('x'), 409, 'ROOM_PARTICIPANT_LIMIT_REACHED'],
+    // Срез исключения (REQ-ID-006): статусы добавлены в Task 4 (exhaustive-гейт),
+    // кейсы здесь — регрессия маппинга.
+    ['actor not member', new ActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
+    ['actor not organizer', new ActorNotOrganizerError('x'), 403, 'ACTOR_NOT_ORGANIZER'],
+    ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
+    ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],

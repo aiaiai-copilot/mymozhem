@@ -261,6 +261,28 @@ describe('EventLogService.commitAppEvent', () => {
     expect(err).toBeInstanceOf(ActorNotMemberError);
   });
 
+  it('rejects an emit from a soft-deleted member (ACTOR_NOT_MEMBER, REQ-SEC-003)', async () => {
+    // Исключённый (soft-deleted) участник не должен проходить транзакционный
+    // membership-гейт — проверка непрерывна, не единовременна (REQ-SEC-003).
+    const room = await activeRoom();
+    await joinParticipant(room.id, P1);
+    await db.prisma.membership.update({
+      where: { roomId_identityId: { roomId: room.id, identityId: P1 } },
+      data: { deletedAt: new Date() },
+    });
+
+    const err = await outbox
+      .run((tx) =>
+        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
+      )
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ActorNotMemberError);
+    expect((err as ActorNotMemberError).code).toBe('ACTOR_NOT_MEMBER');
+    // seq 1 — core.room.activated; событие исключённого в лог не попало.
+    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
+  });
+
   it('null actor (server emission): no membership gate, commits', async () => {
     const room = await activeRoom();
     await outbox.run((tx) =>

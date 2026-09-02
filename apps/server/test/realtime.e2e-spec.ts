@@ -357,4 +357,67 @@ describe('Realtime (e2e)', () => {
     // Повторный publish невозможен: подписки нет (сокет отключён сервером).
     expect(socket.connected).toBe(false);
   });
+
+  it('исключение организатором: разрыв подписки, ACTOR_NOT_MEMBER на ресubscribe, refresh 401, rejoin 403 (критерий ф.1, REQ-SEC-003)', async () => {
+    // join по HTTP с сохранением refresh-куки (activeRoomWithGuest её отбрасывает —
+    // здесь путь развёрнут вручную ради куки). configure обязателен: activate без
+    // пина отклоняется RoomNotConfiguredError (REQ-RT-004).
+    const room = await roomService.create(ORG);
+    await roomService.configure(room.id, {
+      appId: 'test-app',
+      manifestVersion: 1,
+      settings: { label: 'live', orgNote: 'o', answers: { r1: 2 } },
+    });
+    await roomService.activate(room.id, ORG);
+    const joinRes = await app.inject({
+      method: 'POST',
+      url: '/rooms/join',
+      payload: { code: room.code, displayName: 'Гостя' },
+    });
+    expect(joinRes.statusCode).toBe(201);
+    const { accessToken } = tokenResponseSchema.parse(joinRes.json());
+    const refreshCookie = joinRes.cookies.find((c) => c.name === 'mm_refresh');
+    expect(refreshCookie).toBeDefined();
+    const participantId = tokens.verifyAccessToken(accessToken).sub;
+
+    const socket = await connect(port, accessToken);
+    await emitAck(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+    const disconnected = new Promise<void>((resolve) => socket.on('disconnect', () => resolve()));
+
+    const orgToken = await organizerToken(room.id);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/rooms/${room.id}/members/${participantId}/exclude`,
+      headers: { authorization: `Bearer ${orgToken}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ excluded: true });
+    await disconnected; // немедленный разрыв подписки (REQ-SEC-003)
+    expect(socket.connected).toBe(false);
+
+    // Старый access ещё валиден (≤15 мин), но членство мертво: subscribe → ACTOR_NOT_MEMBER.
+    const socket2 = await connect(port, accessToken);
+    const ack = await emitAck(socket2, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+    expect(ack).toEqual({ code: 'ACTOR_NOT_MEMBER' });
+    socket2.close();
+
+    // Refresh-сессия отозвана: перевыпуск access невозможен.
+    const refreshRes = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      cookies: { mm_refresh: refreshCookie!.value },
+    });
+    expect(refreshRes.statusCode).toBe(401);
+    expect(refreshRes.json()).toEqual({ code: 'SESSION_INVALID' });
+
+    // Rejoin с того же IP (app.inject → 127.0.0.1, как и первый join) → единообразный отказ.
+    const rejoin = await app.inject({
+      method: 'POST',
+      url: '/rooms/join',
+      payload: { code: room.code, displayName: 'Снова' },
+    });
+    expect(rejoin.statusCode).toBe(403);
+    expect(rejoin.json()).toEqual({ code: 'ROOM_JOIN_DENIED' });
+  });
 });
