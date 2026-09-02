@@ -18,8 +18,11 @@ export const configSchema = z.object({
   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
-  // REQ-ID-016: гостевой refresh ≤ guest_ttl (инвариант — superRefine ниже).
-  REFRESH_TOKEN_TTL: z.coerce.number().int().min(60).default(86_400),
+  // §4: refresh_token_ttl — 30 сут, 1 сут … 90 сут (секунды). Гостевой cap
+  // (≤ guest_ttl, REQ-ID-016) применяется в точках выдачи (TokenService.sessionExpiry,
+  // setRefreshCookie), не здесь: инвариант REQ-ID-016 — про гостевой refresh,
+  // не про глобальный параметр (design 2026-09-02 §5/§8).
+  REFRESH_TOKEN_TTL: z.coerce.number().int().min(86_400).max(7_776_000).default(2_592_000),
   // REQ-SEC-007 (§4 login_rate_limit): refresh-эндпоинт, 10/мин на IP.
   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
   // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
@@ -45,20 +48,48 @@ export const configSchema = z.object({
         .map((o) => o.trim())
         .filter(Boolean),
     ),
+  // REQ-ID-015/009: Google OAuth — опциональная секция, all-or-none (superRefine ниже).
+  // Без неё приложение бутится, эндпоинты /auth/google* отдают OAUTH_NOT_CONFIGURED.
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+  OAUTH_REDIRECT_URI: z.url().optional(),
+  OAUTH_REDIRECT_ALLOWLIST: z
+    .string()
+    .default('')
+    .transform((s) =>
+      s
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean),
+    )
+    .pipe(z.array(z.url())),
+  // TTL state/PKCE/redirect кук OAuth-флоу (секунды).
+  OAUTH_STATE_TTL: z.coerce.number().int().min(60).max(1800).default(600),
+  // REQ-SEC-007 (§4 login_rate_limit): /auth/google и /auth/google/callback, 10/мин на IP.
+  OAUTH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
 })
   .superRefine((cfg, ctx) => {
-    if (cfg.REFRESH_TOKEN_TTL > cfg.GUEST_TTL) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['REFRESH_TOKEN_TTL'],
-        message: 'REFRESH_TOKEN_TTL must be <= GUEST_TTL (REQ-ID-016)',
-      });
-    }
     if (cfg.NODE_ENV === 'production' && cfg.CORS_ORIGINS.includes('*')) {
       ctx.addIssue({
         code: 'custom',
         path: ['CORS_ORIGINS'],
         message: 'CORS wildcard is forbidden in production (REQ-SEC-008)',
+      });
+    }
+    const googleSet = [cfg.GOOGLE_CLIENT_ID, cfg.GOOGLE_CLIENT_SECRET, cfg.OAUTH_REDIRECT_URI];
+    const googlePresent = googleSet.filter((v) => v !== undefined).length;
+    if (googlePresent > 0 && googlePresent < 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GOOGLE_CLIENT_ID'],
+        message: 'Google OAuth is all-or-none: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI (REQ-ID-015)',
+      });
+    }
+    if (googlePresent === 3 && cfg.OAUTH_REDIRECT_ALLOWLIST.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['OAUTH_REDIRECT_ALLOWLIST'],
+        message: 'OAUTH_REDIRECT_ALLOWLIST must be non-empty when Google OAuth is configured (REQ-ID-009)',
       });
     }
   });
