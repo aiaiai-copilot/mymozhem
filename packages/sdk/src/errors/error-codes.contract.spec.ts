@@ -18,6 +18,7 @@ describe('contract errors', () => {
       'EVENT_RATE_LIMITED',
       'ROOM_LOG_SEALED',
       'ROOM_SETTINGS_FROZEN',
+      'ROOM_ORGANIZER_NOT_REGISTERED',
       'ACTOR_NOT_MEMBER',
       'ACTOR_NOT_ORGANIZER',
       'TARGET_NOT_MEMBER',
@@ -27,6 +28,13 @@ describe('contract errors', () => {
       'RATE_LIMITED',
       'REQUEST_INVALID',
       'SESSION_INVALID',
+      'OAUTH_NOT_CONFIGURED',
+      'OAUTH_REDIRECT_INVALID',
+      'OAUTH_STATE_INVALID',
+      'OAUTH_ACCESS_DENIED',
+      'OAUTH_EXCHANGE_FAILED',
+      'OAUTH_EMAIL_UNVERIFIED',
+      'OAUTH_EMAIL_CONFLICT',
       'INTERNAL_ERROR',
     ]);
   });
