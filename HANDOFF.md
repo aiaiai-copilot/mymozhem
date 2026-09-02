@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-08-19 (срез исключения **в исполнении** — subagent-driven, **4/9 задач слиты в ветку** (SDK 1.3.0, миграция, joinIp+soft-delete-read, exclude+hook); все ревью чистые; исполнение продолжается в новой сессии с Task 5 — решение владельца; **push — решение владельца**)
-**Branch:** `feat/membership-exclusion` (4 коммита впереди `main`, не запушена; сам `main` на 3 коммита впереди `origin/main`: дизайн `0acec10` + план `401aadd` + AGENTS.md `d657750`).
+**Date:** 2026-09-02 (срез исключения **исполнен 9/9 и слит в `main`** — мердж `--no-ff` `c2e60da`; все гейты зелёные на слитом результате; **push — решение владельца**)
+**Branch:** `main` (16 коммитов впереди `origin/main`, не запушен; рабочее дерево чистое). Ветка `feat/membership-exclusion` удалена после мерджа.
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex) — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP) — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime и по исключению (ф.1 «немедленный отзыв подписки») подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -11,30 +11,21 @@
 2. Этот файл целиком.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/2026-08-18-membership-exclusion-implementation-plan/progress.md` — **леджер текущего исполнения** (4/9 закрыто, rulings, deferred-миноры, brief'ы задач 1–6 уже извлечены рядом). Не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит. Леджеры прежних срезов рядом, в т.ч. realtime `.superpowers/sdd/2026-08-05-realtime-read-handshake-implementation-plan/progress.md`.
-6. `docs/sessions/2026-08-18-membership-exclusion-design.md` + `2026-08-18-membership-exclusion-implementation-plan.md` — **вход для продолжения исполнения** (исключение; утверждены владельцем).
+5. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджера среза исключения на машине нет — его история: план + `git log` (диапазон `89d887f..c2e60da`).
+6. `docs/sessions/2026-08-18-membership-exclusion-{design,implementation-plan}.md` — исполненные дизайн+план среза исключения (9/9, работа в коммитах; читать при разборе истории, §0 дизайна — решения владельца).
 7. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 3d7de83:HANDOFF.md`.
+Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 4cab30c:HANDOFF.md`.
 
 ## Следующее действие
 
-**Продолжить исполнение среза исключения с Task 5 — subagent-driven, в новой сессии** (решение владельца 2026-08-19). Состояние: Tasks 1–4 закрыты (коммиты `89d887f..e2bd6d0` на `feat/membership-exclusion`), все ревью чистые; батч 2 продолжается задачами 5 (rejoin-блок) и 6 (M-3 + подписка hook), затем батч 3 (7 endpoint, 8 e2e, 9 гейты). Порядок входа: леджер `.superpowers/sdd/2026-08-18-membership-exclusion-implementation-plan/progress.md` → план → диспатч Task 5.
+**Срез исключения закрыт (9/9, мердж `c2e60da`, гейты зелёные). Следующий срез — выбор владельца**: OAuth (`POST /rooms` + Google-флоу, REQ-ID-015/009; follow-up про `TokenService.sessionExpiry()` guest-cap — в списке ниже) либо иной.
 
-**Что новая сессия обязана знать до диспатча (rulings этой сессии, полный текст — в леджере):**
-- **Task 7 скорректирован:** 4 статуса фильтра (403/403/404/409) уже добавлены в Task 4 (exhaustive-типизация `STATUS_BY_WIRE_CODE` ломала компиляцию иначе). Step 1 Task 7 (спек фильтра) — регрессионно-зелёный, не TDD-red; TDD-red остаётся только на e2e HTTP (Step 2). Остальной объём Task 7 не тронут.
-- **Barrel core:** `ActorNotMemberError` в `@mymozhem/core` — realtime-версия (явный re-export в `index.ts`, TS2308 от одноимённых классов); membership-версия потребляется прямым путём модуля. Barrel-потребителей класса нет.
-- **Hook `onAccessRevoked`:** тип `void | Promise<void>`, fan-out sequential-await, изоляция sync- throws и async-rejections (фикс ревью); `RealtimeGateway.revokeRoomAccess` — sync `void`, совместим.
-- **Модели диспатча этой сессии:** haiku — транскрипционные задачи (1, 3); sonnet — 2, 4 и далее (5 можно haiku — код verbatim; 6–8 sonnet); ревьюеры sonnet, re-review haiku.
-- **Env:** порт 55432 занят чужим `lt-pg-sdd` (не трогать); Prisma 7 CLI — только из корня репо (`pnpm exec prisma …`), `pnpm --filter … exec prisma` падает.
-- Дизайн: `docs/sessions/2026-08-18-membership-exclusion-design.md` (§0 — решения владельца, не переоткрывать). План: `docs/sessions/2026-08-18-membership-exclusion-implementation-plan.md`. `joinIp` nullable — санкционировано.
-- После мерджа: LOC-снапшот по методике `docs/stats/loc-snapshots.md`.
-
-**Срез после исключения** — OAuth (`POST /rooms` + Google-флоу, REQ-ID-015/009; follow-up про `TokenService.sessionExpiry()` guest-cap — в списке ниже) либо иной выбор владельца.
+Перед/вместе со стартом нового среза: `git push` `main` (16 коммитов впереди `origin/main`) — решение владельца.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
-- **Deferred-миноры финального ревью (ride, триаж «не гейтят»):** M-2 — мёртвая инжекция `config` в RealtimeGateway (убрать при следующем касании); M-3 — stale registry entry при disconnect внутри subscribe (bounded, self-healing; закрыть в срезе исключения, где когерентность реестра load-bearing); M-4 — cross-socket timing в live-visibility e2e (микроскопическое окно флейка; маркер на organizer-сокете сделает детерминированным); M-5 — `asLogEvent` fallback fail-open (`?? row.visibility`) — fail-closed throw при следующем расширении enum EventVisibility.
+- **Deferred-миноры финального ревью (ride, триаж «не гейтят»):** M-2 — мёртвая инжекция `config` в RealtimeGateway (убрать при следующем касании); M-4 — cross-socket timing в live-visibility e2e (микроскопическое окно флейка; маркер на organizer-сокете сделает детерминированным); M-5 — `asLogEvent` fallback fail-open (`?? row.visibility`) — fail-closed throw при следующем расширении enum EventVisibility. (M-3 — stale registry entry — **закрыт срезом исключения**, `74035f9`.)
 - Риски прошлых срезов (refresh-ротация strict, access-токены ≤15 мин после терминации, `/health/ready` 503) неизменны — `git show 3d7de83:HANDOFF.md`.
 
 **Санкционированные владельцем отклонения от плана этого среза** (все прошли ревью, зафиксированы в леджере):
@@ -52,14 +43,14 @@
 - Субагент может умереть на API-квоте (403 billing cycle) — повторный диспатч прошёл без изменений; леджер + report-файлы делают это безболезненным.
 
 **Швы realtime-среза для будущих планов:**
-- Срез исключения ОБЯЗАН вызвать `RealtimeGateway.revokeRoomAccess(identityId, roomId)` (шов дизайна §9); реестр подписок и `socketsOf` готовы.
+- Шов дизайна §9 **закрыт**: срез исключения вызывает `RealtimeGateway.revokeRoomAccess(identityId, roomId)` через hook `onAccessRevoked`; реестр подписок и `socketsOf` потреблены.
 - MODERATOR сейчас → уровень `public` (amendment v1.3); если права вырастут — пересмотреть маппинг уровня в `handleSubscribe`.
 - Курсор replay (REQ-RT-011б) и метаданные seq — фаза 4; наружная форма события курсор структурно исключает (strictObject), эволюция — аддитивная через minor-версию контракта.
-- Per-event re-check членства в live-доставке не делается (решение §0) — при появлении исключения подписка рвётся через hook, не через фильтрацию.
+- Per-event re-check членства в live-доставке не делается (решение §0) — при исключении подписка рвётся через hook (реализовано), не через фильтрацию.
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
 - **Чистка invalid-uuid литералов** в старых int-спеках (см. опыт выше) + fail-closed в `asLogEvent` (M-5) + удаление мёртвой инжекции config (M-2) — пакет косметики realtime.
-- **Для среза исключения:** M-3 (stale registry window), мягкое удаление membership, права эмита по ролям (SPECTATOR) — app-семантика, фаза 2.
+- **Права эмита по ролям (SPECTATOR)** — app-семантика, фаза 2 (M-3 и мягкое удаление membership закрыты срезом исключения).
 - **Для следующего среза, трогающего configure/app-registry** (из финального ревью appSettings): guard `settings === undefined|null` → `AppSettingsInvalidError`; `ValidateFunction` из `ajv/dist/2020`; race-тест configure-vs-activate с quiz@2; контрактное допущение «settings — не-null JSON value».
 - **Для OAuth-среза:** `TokenService.sessionExpiry()` применяет guest-cap `min(REFRESH,GUEST_TTL)` безусловно — REGISTERED-ротация не должна его наследовать (token.service.ts, design §10).
 - **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
@@ -79,6 +70,9 @@
 - **Fan-out realtime:** publish в RealtimeBus — строго после коммита транзакции (`EventOutbox.run`); исключения слушателей изолированы в `fanOut` gateway (не отклоняют `run`); commit вне `outbox.run` бросает `EventOutboxMissingContextError` (fail-closed); вложенный `run` запрещён.
 - **Subscribe:** join каналов — ДО чтения лога (duplicate-acceptance, дизайн §4); гейты (schema/guest-scope/мульти-подписка/membership) — до join; catch-путь чистит запись реестра.
 - **Конвенция lockfile/CI:** один lockfile (REQ-DEV-002); CI порядок build → boundary-check.
+- **Membership exclusion (срез 2026-09-02):** исключение — soft-delete membership (`deletedAt`) + строка `Exclusion` (unique(roomId,identityId), index(roomId,ip), FK RESTRICT) + отзыв guest-сессий — одной транзакцией; повторный exclude — typed no-op (идемпотентность). `findActiveMembership` гасит soft-deleted; deletedAt-гейт стоит и в `commitAppEvent`, и в `participantCount` (дочистка read-paths, `06c1019`). Rejoin-блок — по `joinIp` через `Exclusion` в `join` (REQ-ID-006 ч.3). Организатор неисключаем, его `joinIp = null` (nullable — санкционированное отклонение от дизайна §2).
+- **Hook `onAccessRevoked` (MembershipService → RealtimeGateway):** тип `void | Promise<void>`, fan-out sequential-await, исключения слушателей изолированы (sync-throw и async-reject логируются, не роняют exclude). `RealtimeGateway.revokeRoomAccess` — sync `void`: разрыв подписки + leave каналов + отзыв сокета.
+- **Barrel core:** `ActorNotMemberError` экспортируется realtime-версией (явный re-export в `index.ts`, TS2308 от одноимённых классов); membership-версия потребляется прямым путём модуля. Barrel-потребителей класса нет.
 - **Prod-баррел core тянет testcontainers в require-time** (design §9 — осознанное расширение ради e2e). Безопасно, пока Dockerfile тащит полные `node_modules` в runtime-стейдж; упадёт при pruning devDependencies. Follow-up-кандидат: вынести testing в отдельный entry point (`@mymozhem/core/testing`); не давать workaround с dist-subpath-импортами (create-room.mjs) стать постоянным.
 - **`NODE_OPTIONS=--experimental-vm-modules` зашит в test-скрипт apps/server** — `@fastify/cookie@11` динамически импортирует ESM-only `cookie@2`, что ломает jest 29 CJS. Изолирован в test-скрипте. Триггеры пересмотра: jest 30 или `@fastify/cookie` на `require(ESM)` (Node 24).
 - **Refresh-кука `Secure` при `NODE_ENV=production`** — compose-смоук по plain HTTP не сможет round-trip куки cookie-jar клиентом; ассертить `Set-Cookie`-заголовок.
@@ -104,37 +98,31 @@
 
 ## Осталось недоделанным
 
-- **Исполнение среза исключения, Tasks 5–9** — см. «Следующее действие» (4/9 в ветке, ревью чистые).
-- **Push** (`main` на 3 коммита впереди origin + ветка среза после мерджа) — решение владельца.
+- **Push** (`main` на 16+ коммитов впереди `origin/main`) — решение владельца.
+- **Выбор следующего среза** (OAuth либо иной) — решение владельца, см. «Следующее действие».
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
-## Session 2026-08-19 (исполнение среза исключения — 4/9, перенос в новую сессию)
+## Session 2026-09-02 (срез исключения — закрытие: Task 9, мердж, LOC-снапшот)
 
 ### Что сделано
 
-- Исполнение среза subagent-driven (конвенция realtime-среза: fresh implementer + task review на задачу, батчи по 3, леджер в `.superpowers/sdd/`). Pre-flight scan плана чистый (таблица — в леджере).
-- **Task 1** (`5b20811`): SDK — коды ACTOR_NOT_ORGANIZER/TARGET_NOT_MEMBER/TARGET_NOT_EXCLUDABLE, excludeRequest/Response (strictObject), фикстуры, контракт 1.3.0. Ревью чистое.
-- **Task 2** (`992637d`): миграция `20260819154552_membership_exclusion` — `Membership.deletedAt/joinIp` (nullable, санкция) + таблица `Exclusion` (unique(roomId,identityId), index(roomId,ip), FK RESTRICT). Отклонение в тесте индексов санкционировано и усилено (`toContain('"roomId", ip')` — PG не квотит lowercase в indexdef). Ревью чистое.
-- **Task 3** (`d8cc10d`): join пишет joinIp; findActiveMembership гасит soft-deleted membership. Ревью чистое.
-- **Task 4** (`e2bd6d0`): `MembershipService.exclude` (порядок гейтов по дизайну §3, одна tx: soft-delete+Exclusion+отзыв guest-сессий, повтор — typed no-op) + hook `onAccessRevoked`. Fix round 1 по ревью: async-изоляция hook (`void | Promise<void>`, await-in-try + спек). Два санкционированных отклонения: статусы фильтра переехали из Task 7 сюда (exhaustive-типизация); barrel-разрешение TS2308 в пользу realtime `ActorNotMemberError`. Ревью чистое после фикса.
-- По просьбе владельца исполнение переносится в новую сессию на точке «Task 4 закрыт».
+- **Task 9 (гейты):** полный конвейер `build → lint → typecheck → test → test:int → server e2e → boundary-check → guardrails` зелёный на ветке `feat/membership-exclusion` (Tasks 1–8 были закоммичены прежними сессиями).
+- **Мердж в `main` `--no-ff`** (`c2e60da`) по выбору владельца (локальный мердж, не PR); повторный прогон всех гейтов на слитом результате — зелёный. Ветка `feat/membership-exclusion` удалена.
+- **LOC-снапшот** по методике `docs/stats/loc-snapshots.md` (`c9fbaa8`): 9 731 строки кода (+797), core 6 772 / sdk 1 831 / server 1 067; тесты/прод 1.39; миграций 8 (первая схемная за три среза — `Membership.deletedAt/joinIp` + `Exclusion`).
 
-### Коммиты этой сессии (ветка `feat/membership-exclusion`, не запушена)
+### Коммиты этой сессии
 
-- `5b20811` feat(sdk): exclusion DTO + коды, контракт 1.3.0
-- `992637d` feat(core): миграция membership_exclusion
-- `d8cc10d` feat(core): joinIp + findActiveMembership гасит soft-delete
-- `e2bd6d0` feat(core): MembershipService.exclude + hook отзыва доступа
+- `c2e60da` Merge branch 'feat/membership-exclusion' — срез исключения участников (REQ-SEC-003, REQ-ID-006 ч.3, REQ-ID-011/013, REQ-SEC-006)
+- `c9fbaa8` docs(stats): LOC-снапшот после мерджа membership-exclusion
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
-- Леджер `.superpowers/sdd/2026-08-18-membership-exclusion-implementation-plan/progress.md` — rulings, deferred-миноры, env-notes; brief'ы задач 1–6 и отчёты 1–4 рядом. Только на этой машине.
-- Docker Desktop запущен; `lt-pg` (5432) и `lt-pg-sdd` (55432) не тронуты; authoring-контейнер миграции остановлен.
-- Prisma-клиент регенерирован с полями среза (node_modules, воспроизводимо `pnpm exec prisma generate` из корня).
-- Side-effects на внешние системы: нет (ветка не пушилась).
+- Docker Desktop запущен (нужен для int/e2e); чужие контейнеры `lt-pg` (5432) и `lt-pg-sdd` (55432) не тронуты.
+- Леджера исполнения среза исключения в `.superpowers/sdd/` нет (только срезы до realtime) — история исполнения: план `docs/sessions/2026-08-18-membership-exclusion-implementation-plan.md` + `git log 89d887f..c2e60da`.
+- Side-effects на внешние системы: нет (push не выполнялся).
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (Tasks 5–9, push, юрист, CLAUDE.md-указатель).
+- См. одноимённый раздел выше (push, выбор следующего среза, юрист, CLAUDE.md-указатель).
