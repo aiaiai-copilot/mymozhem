@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Date:** 2026-09-02 (OAuth-срез: **brainstorm + дизайн + план готовы и закоммичены** — `a669fed` design, `8afec8d` plan, оба по итогам сессии с решениями владельца; **следующее действие — исполнение плана в новой сессии**, правило «срез = новая сессия» подтверждено владельцем 2026-09-02)
-**Branch:** `main` (3 коммита впереди `origin/main` — design+plan OAuth + handoff; рабочее дерево чистое). Push — решение владельца.
+**Date:** 2026-09-02 (OAuth-срез: **исполнение идёт — батч 1/3 закрыт** (T1 SDK 1.4.0, T2 конфиг, T3 миграция — все review clean); владелец разбил исполнение на 3 батча × отдельная сессия; **следующее действие — батч 2 (T4 TokenService, T5 provisioning, T6 OAuth-модуль) в новой сессии, в том же worktree**)
+**Branch:** `feat/oauth-registered-rooms` (worktree `.claude/worktrees/oauth-slice`; 3 коммита впереди `main` + handoff-коммит этой правки; рабочее дерево чистое; не влито, push — решение владельца). `main` при этом несёт design+plan OAuth (`a669fed`, `8afec8d`) и стоит на `44db424`.
 
 **Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP) — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime и по исключению (ф.1 «немедленный отзыв подписки») подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -11,16 +11,16 @@
 2. Этот файл целиком.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджера среза исключения на машине нет — его история: план + `git log` (диапазон `89d887f..c2e60da`).
+5. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). **Леджер OAuth-среза живёт в worktree:** `.claude/worktrees/oauth-slice/.superpowers/sdd/2026-09-02-oauth-implementation-plan/progress.md` — там батчи, deferred-миноры, briefs task-1..9, reports, review-пакеты. Леджера среза исключения на машине нет — его история: план + `git log` (диапазон `89d887f..c2e60da`).
 6. `docs/sessions/2026-08-18-membership-exclusion-{design,implementation-plan}.md` — исполненные дизайн+план среза исключения (9/9, работа в коммитах; читать при разборе истории, §0 дизайна — решения владельца).
-7. **`docs/sessions/2026-09-02-oauth-{design,implementation-plan}.md` — вход следующего среза.** Дизайн §0 — решения владельца (не переоткрывать); план — 9 тасков с TDD-шагами и self-review.
+7. **`docs/sessions/2026-09-02-oauth-{design,implementation-plan}.md` — вход текущего среза (исполняется).** Дизайн §0 — решения владельца (не переоткрывать); план — 9 тасков; прогресс — в леджере worktree (п.5).
 8. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
 Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 4cab30c:HANDOFF.md`.
 
 ## Следующее действие
 
-**Исполнение OAuth-плана** (решение владельца 2026-09-02 — срез OAuth выбран; brainstorm/дизайн/план закрыты в сессии 2026-09-02; правило «новая фаза среза — новая сессия» подтверждено). Вход: `docs/sessions/2026-09-02-oauth-implementation-plan.md` — 9 тасков: SDK 1.4.0 → конфиг (Google-секция + пересмотр REFRESH_TOKEN_TTL) → миграция `IdentityProvider` → TokenService kind-aware → provisioning → oauth-модуль → transport → e2e → гейты. Дизайн §0 — решения владельца, не переоткрывать: объём-база (без logout/kind-флипа), provider-данные отдельной таблицей, email fail-closed без автолинка, state double-submit+PKCE, креды опциональны, подход A (handrolled с портом провайдера). Форма исполнения (subagent-driven / inline) — выбор владельца при старте; леджер — `.superpowers/sdd/`.
+**OAuth-срез, батч 2/3 (T4 TokenService kind-aware TTL → T5 IdentityService.findOrCreateByProvider → T6 OAuth-модуль) — в новой сессии** (решение владельца 2026-09-02: исполнение разбито на 3 батча, каждый — отдельная сессия; батч 1 T1-T3 закрыт review clean). Старт: открыть worktree `.claude/worktrees/oauth-slice` (ветка `feat/oauth-registered-rooms`), прочитать леджер `.superpowers/sdd/2026-09-02-oauth-implementation-plan/progress.md` внутри worktree — там состояние, briefs и reports; продолжить subagent-driven-development с Task 4 (BASE = HEAD ветки). Форма исполнения — subagent-driven (выбрана владельцем при старте батча 1). Батч 3 (T7 transport, T8 e2e, T9 гейты + final whole-branch review + merge) — следующая за ним сессия.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -63,7 +63,7 @@
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`, `20260730101037_auth_sessions`, `20260819154552_membership_exclusion`. Любое изменение — только новой миграцией.
+- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`, `20260730101037_auth_sessions`, `20260819154552_membership_exclusion`, `20260902191322_oauth_identity_provider`. Любое изменение — только новой миграцией.
 - **Socket.io граница:** серверный `socket.io` импортируется только из `packages/core/src/realtime` (REQ-RT-006, правило dependency-cruiser с якорем на пакет `socket.io/`); `socket.io-client` — только `apps/server/test` (devDep). Правило круизит и dist (CI build→boundary-check) — в pathNot есть dist-исключение, осознанное.
 - **Fan-out realtime:** publish в RealtimeBus — строго после коммита транзакции (`EventOutbox.run`); исключения слушателей изолированы в `fanOut` gateway (не отклоняют `run`); commit вне `outbox.run` бросает `EventOutboxMissingContextError` (fail-closed); вложенный `run` запрещён.
 - **Subscribe:** join каналов — ДО чтения лога (duplicate-acceptance, дизайн §4); гейты (schema/guest-scope/мульти-подписка/membership) — до join; catch-путь чистит запись реестра.
@@ -96,29 +96,33 @@
 
 ## Осталось недоделанным
 
-- **Исполнение OAuth-среза** — дизайн+план закоммичены (`a669fed`, `8afec8d`), исполнение — новая сессия (см. «Следующее действие»).
+- **Исполнение OAuth-среза — батчи 2 и 3** (батч 1/3 закрыт: T1-T3, review clean) — новые сессии, см. «Следующее действие».
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
-## Session 2026-09-02 (OAuth-срез: brainstorm → дизайн → план)
+## Session 2026-09-02 (OAuth-срез: исполнение, батч 1/3 — T1-T3)
 
 ### Что сделано
 
-- **Brainstorm (путь architectural)** по правилу «решено vs открыто»: форма флоу решена спекой (REQ-ID-009 — redirect-флоу с allowlist), открытые развилки закрыты владельцем — 7 решений в §0 дизайна: объём-база (Google login + `POST /rooms` + фикс sessionExpiry; без logout, без kind-флипа, без UI), provider-данные отдельной таблицей `identity."IdentityProvider"`, email fail-closed без автолинка, state double-submit cookie + PKCE, Google-креды опциональны (typed-отказ эндпоинтов), подход A (handrolled OAuth-модуль с портом `OAuthProviderClient`), §4+ делегированы агенту.
-- **Дизайн** `docs/sessions/2026-09-02-oauth-design.md` (`a669fed`) — 11 секций: флоу (3 httpOnly-куки `SameSite=Lax`, access только через существующий `/auth/refresh`), модель+provisioning (гонка → re-login; инвариант «change both or neither» расширяется до **трёх мест** — partial index, `RoomService.create`, email-конфликт-проверка), фикс guest-cap целиком (`sessionExpiry(kind)` + `IssuedTokens.kind` + `setRefreshCookie(kind)` + **снятие конфиг-инварианта** `REFRESH ≤ GUEST_TTL` — та же конфляция), 8 новых wire-кодов, тесты с `FakeOAuthProviderClient`.
-- **План** `docs/sessions/2026-09-02-oauth-implementation-plan.md` (`8afec8d`) — 9 тасков, TDD, контракт 1.3.0 → 1.4.0; self-review пройден автором, 4 дефекта починены inline.
+- **Subagent-driven-development** по плану `8afec8d` в worktree `.claude/worktrees/oauth-slice` (ветка `feat/oauth-registered-rooms` от `main @ 44db424`). Baseline зелёный; pre-flight скан плана чистый (14 пар producer→consumer, таблица — в леджере).
+- **T1 SDK 1.4.0** (`035eae4`): 8 wire-кодов (ROOM_ORGANIZER_NOT_REGISTERED + 7 OAUTH_*), createRoomRequest/Response, oauth start/callback query-схемы, `CONTRACT_VERSION = '1.4.0'`. Review clean.
+- **T2 конфиг** (`67def04`): опциональная Google-секция all-or-none (superRefine), `OAUTH_REDIRECT_ALLOWLIST` non-empty при сконфигурированном Google, `OAUTH_STATE_TTL` (60…1800, def 600), `OAUTH_RATE_LIMIT` (def 10); `REFRESH_TOKEN_TTL` 86 400…7 776 000, def 2 592 000, superRefine `REFRESH ≤ GUEST_TTL` **снят** (cap — в точках выдачи, design §5); TEST_CONFIG обновлён. Review clean.
+- **T3 миграция** (`233c40b`): `identity."IdentityProvider"` (unique(provider,subject), index(identityId), FK→Identity RESTRICT), SQL сгенерирован без ручных правок; int-спек наличия (REQ-DEV-006) 1/1. Review clean.
+- Владелец разбил исполнение на **3 батча × отдельная сессия**: батч 1 (T1-T3) — эта сессия; батч 2 (T4-T6) и батч 3 (T7-T9 + final review + merge) — новые сессии.
 
 ### Коммиты этой сессии
 
-- `a669fed` docs(design): OAuth-срез — Google login + POST /rooms + REGISTERED-токены (REQ-ID-015/009, REQ-SEC-007 ч., REQ-ID-005 HTTP)
-- `8afec8d` docs(plan): OAuth-срез — план реализации 9 тасков
+- `035eae4` feat(sdk): контракт 1.4.0 — OAuth wire-коды, createRoom DTO, oauth query-схемы (REQ-ID-015/009)
+- `67def04` feat(core): конфиг — опциональная Google-секция all-or-none, REFRESH_TOKEN_TTL к §4 пакета (REQ-OPS-003, REQ-ID-009)
+- `233c40b` feat(core): миграция oauth_identity_provider — таблица IdentityProvider (REQ-ID-015)
 - (+ handoff-коммит этой правки)
 
 ### Локальное состояние (не в git)
 
-- Docker Desktop не требовался (код не трогали); чужие контейнеры `lt-pg` (5432) и `lt-pg-sdd` (55432) не тронуты.
-- Side-effects на внешние системы: нет (push не выполнялся — 2 коммита впереди origin).
+- **Worktree** `.claude/worktrees/oauth-slice` — НЕ удалять: в нём леджер `.superpowers/sdd/2026-09-02-oauth-implementation-plan/` (батчи, deferred-миноры, briefs T1-T9, reports, review-пакеты) и вся незавершённая работа среза.
+- Docker: authoring-контейнер `mm-migrate-oauth` (порт 55434) создан и удалён в T3; чужие `lt-pg`/`lt-pg-sdd` не тронуты.
+- Side-effects на внешние системы: нет (push не выполнялся; ветка только локально).
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (исполнение OAuth-плана — новая сессия; юрист; CLAUDE.md-указатель).
+- Батч 2 (T4-T6) и батч 3 (T7-T9) — новые сессии (см. «Следующее действие»). Deferred-миноры T1-T3 — в леджере worktree, триаж на final whole-branch review (батч 3).
