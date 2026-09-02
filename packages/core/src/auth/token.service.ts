@@ -17,6 +17,7 @@ export interface IssuedTokens {
   accessToken: string;
   expiresIn: number;
   refreshToken: string;
+  kind: 'GUEST' | 'REGISTERED';
 }
 
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -28,21 +29,35 @@ export class TokenService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
-  // Единственная выдача в этом срезе — гостевая (REQ-ID-016): roomId зашит в claims.
+  // Гостевая выдача (REQ-ID-016): roomId зашит в claims, TTL ограничен guest-cap.
   async issueGuestTokens(identityId: string, roomId: string): Promise<IssuedTokens> {
+    return this.issue(identityId, 'GUEST', roomId);
+  }
+
+  // REGISTERED-выдача (OAuth-срез, REQ-ID-015/016): без roomId-scope, TTL без guest-cap.
+  async issueRegisteredTokens(identityId: string): Promise<IssuedTokens> {
+    return this.issue(identityId, 'REGISTERED');
+  }
+
+  private async issue(
+    identityId: string,
+    kind: 'GUEST' | 'REGISTERED',
+    roomId?: string,
+  ): Promise<IssuedTokens> {
     const refreshToken = randomBytes(32).toString('base64url');
     const session = await this.prisma.session.create({
       data: {
         identityId,
         refreshTokenHash: sha256(refreshToken),
         familyId: randomUUID(),
-        expiresAt: this.sessionExpiry(),
+        expiresAt: this.sessionExpiry(kind),
       },
     });
     return {
-      accessToken: this.signAccess({ sub: identityId, sid: session.id, kind: 'GUEST', roomId }),
+      accessToken: this.signAccess({ sub: identityId, sid: session.id, kind, roomId }),
       expiresIn: this.config.ACCESS_TOKEN_TTL,
       refreshToken,
+      kind,
     };
   }
 
@@ -128,7 +143,7 @@ export class TokenService {
             identityId: session.identityId,
             refreshTokenHash: sha256(newRefreshToken),
             familyId: session.familyId,
-            expiresAt: this.sessionExpiry(),
+            expiresAt: this.sessionExpiry(identity.kind),
           },
         });
       });
@@ -141,11 +156,17 @@ export class TokenService {
       accessToken: this.signAccess({ sub: identity.id, sid: newSessionId, kind: identity.kind, roomId }),
       expiresIn: this.config.ACCESS_TOKEN_TTL,
       refreshToken: newRefreshToken,
+      kind: identity.kind,
     };
   }
 
-  protected sessionExpiry(): Date {
-    return new Date(Date.now() + Math.min(this.config.REFRESH_TOKEN_TTL, this.config.GUEST_TTL) * 1000);
+  // Одна норма в двух местах (design §5): GUEST → min(REFRESH, GUEST_TTL),
+  // REGISTERED → REFRESH_TOKEN_TTL. Парное место — maxAge в setRefreshCookie; менять вместе.
+  protected sessionExpiry(kind: 'GUEST' | 'REGISTERED'): Date {
+    const ttl = kind === 'GUEST'
+      ? Math.min(this.config.REFRESH_TOKEN_TTL, this.config.GUEST_TTL)
+      : this.config.REFRESH_TOKEN_TTL;
+    return new Date(Date.now() + ttl * 1000);
   }
 
   protected signAccess(claims: AccessClaims): string {

@@ -147,4 +147,32 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
     const winner = (ok[0] as PromiseFulfilledResult<{ refreshToken: string }>).value;
     await expect(tokens.rotate(winner.refreshToken)).resolves.toBeDefined();
   });
+
+  // REGISTERED-ветка (OAuth-срез, REQ-ID-015/016): ротация без комнаты и без guest-cap;
+  // reuse-detection (REQ-ID-007) работает и для зарегистрированных сессий.
+  it('rotates a REGISTERED session: no guest cap, no roomId; reuse revokes family (REQ-ID-007/016)', async () => {
+    const identity = await seedIdentity(db.prisma, { kind: 'REGISTERED' });
+    const first = await tokens.issueRegisteredTokens(identity.id);
+    expect(first.kind).toBe('REGISTERED');
+
+    const second = await tokens.rotate(first.refreshToken);
+    expect(second.kind).toBe('REGISTERED');
+    const claims = tokens.verifyAccessToken(second.accessToken);
+    expect(claims.kind).toBe('REGISTERED');
+    expect(claims.roomId).toBeUndefined();
+
+    // Гостевой cap не наследуется: expiresAt > now + GUEST_TTL.
+    const session = await db.prisma.session.findFirstOrThrow({
+      where: { identityId: identity.id, revokedAt: null, replacedById: null },
+    });
+    expect(session.expiresAt.getTime()).toBeGreaterThan(Date.now() + TEST_CONFIG.GUEST_TTL * 1000);
+
+    // Повторное предъявление старого токена — reuse → семейство гасится (SESSION_INVALID).
+    const err = await tokens.rotate(first.refreshToken).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect((err as AuthError).code).toBe(AUTH_ERROR_CODES.SESSION_INVALID);
+    await expect(tokens.rotate(second.refreshToken)).rejects.toThrow(AuthError);
+    const alive = await db.prisma.session.count({ where: { revokedAt: null } });
+    expect(alive).toBe(0);
+  });
 });

@@ -36,7 +36,7 @@ export class AuthController {
       throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'no refresh cookie');
     }
     const issued = await this.tokens.rotate(refreshToken);
-    setRefreshCookie(reply, issued.refreshToken, this.config);
+    setRefreshCookie(reply, issued.refreshToken, this.config, issued.kind);
     return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
   }
 }
