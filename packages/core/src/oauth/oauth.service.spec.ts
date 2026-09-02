@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import type { AppConfig } from '../config/config.schema';
 import { TEST_CONFIG } from '../testing/test-config';
 import { IdentityError, IDENTITY_ERROR_CODES } from '../identity/identity.errors';
@@ -189,13 +190,39 @@ describe('OAuthService.complete (REQ-ID-015/009)', () => {
     );
   });
 
-  it('wraps a provider failure as OAUTH_EXCHANGE_FAILED', async () => {
+  it('wraps a provider failure as OAUTH_EXCHANGE_FAILED (message includes the cause)', async () => {
     const { service, providerFake } = makeService();
     providerFake.exchangeCode.mockRejectedValue(new Error('google 500'));
-    await expectOAuthError(
-      service.complete({ code: 'c', state: 'S', cookies: happyCookies }),
-      OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED,
-    );
+
+    let caught: unknown;
+    try {
+      await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(OAuthError);
+    expect((caught as OAuthError).code).toBe(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED);
+    expect((caught as OAuthError).message).toContain('code exchange failed: google 500');
+  });
+
+  it('wraps a provider ZodError as OAUTH_EXCHANGE_FAILED without dumped issues/PII (REQ-SEC-004)', async () => {
+    const { service, providerFake } = makeService();
+    const parsed = z.email().safeParse('not-an-email');
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    providerFake.exchangeCode.mockRejectedValue(parsed.error);
+
+    let caught: unknown;
+    try {
+      await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(OAuthError);
+    const oauthErr = caught as OAuthError;
+    expect(oauthErr.code).toBe(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED);
+    expect(oauthErr.message).toContain('provider response invalid');
+    expect(oauthErr.message).not.toContain('not-an-email');
   });
 
   it('translates IdentityError(EMAIL_CONFLICT) to OAUTH_EMAIL_CONFLICT', async () => {

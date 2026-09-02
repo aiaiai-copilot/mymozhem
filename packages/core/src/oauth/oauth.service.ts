@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { Identity } from '@prisma/client';
+import { ZodError } from 'zod';
 import { IdentityService } from '../identity/identity.service';
 import { IdentityError, IDENTITY_ERROR_CODES } from '../identity/identity.errors';
 import { TokenService, type IssuedTokens } from '../auth/token.service';
@@ -85,7 +86,11 @@ export class OAuthService {
     try {
       profile = await this.provider.exchangeCode(input.code, verifier);
     } catch (err) {
-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, `code exchange failed: ${(err as Error).message}`);
+      // ZodError.message в zod v4 — JSON-дамп issues с полученными значениями
+      // (email/name провайдера — PII, REQ-SEC-004); в message не отдаём (final review 2026-09-03).
+      const detail =
+        err instanceof ZodError ? 'provider response invalid' : `code exchange failed: ${(err as Error).message}`;
+      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, detail);
     }
     if (profile.emailVerified !== true) {
       throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, `email not verified (sub ${profile.subject})`);
