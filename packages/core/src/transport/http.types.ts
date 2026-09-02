@@ -23,5 +23,7 @@ export interface ReplyLike {
   ): unknown;
   // OAuth-флоу: одноразовые куки гасятся при любом исходе; 302 на Google и на цель.
   clearCookie(name: string, options: { path: string }): unknown;
-  redirect(statusCode: number, url: string): unknown;
+  // Fastify v5: redirect(url, code?) — URL первым (порядок v4 (code, url) перевёрнут,
+  // wire-e2e поймал: v4-порядок даёт FST_ERR_BAD_STATUS_CODE → 500).
+  redirect(url: string, statusCode?: number): unknown;
 }

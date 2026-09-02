@@ -30,7 +30,8 @@ export class OAuthController {
     const { redirect } = oauthStartQuerySchema.parse(query ?? {});
     const result = this.oauth.start(redirect);
     for (const cookie of result.cookies) this.setOAuthCookie(reply, cookie.name, cookie.value);
-    void reply.redirect(302, result.authorizeUrl);
+    // Fastify v5: redirect(url, code) — URL первым аргументом.
+    void reply.redirect(result.authorizeUrl, 302);
   }
 
   @Get('google/callback')
@@ -52,7 +53,7 @@ export class OAuthController {
       });
       setRefreshCookie(reply, result.tokens.refreshToken, this.config, result.tokens.kind);
       this.clearOAuthCookies(reply);
-      void reply.redirect(302, result.redirectTarget);
+      void reply.redirect(result.redirectTarget, 302);
     } catch (err) {
       // Одноразовость state: куки гасятся при любом исходе (design §3).
       this.clearOAuthCookies(reply);
