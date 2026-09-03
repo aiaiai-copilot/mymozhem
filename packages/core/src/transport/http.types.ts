@@ -16,9 +16,14 @@ export interface ReplyLike {
     options: {
       httpOnly: boolean;
       secure: boolean;
-      sameSite: 'strict';
+      sameSite: 'strict' | 'lax'; // lax — oauth state/pkce/redirect (возврат с Google, design §3)
       path: string;
       maxAge: number;
     },
   ): unknown;
+  // OAuth-флоу: одноразовые куки гасятся при любом исходе; 302 на Google и на цель.
+  clearCookie(name: string, options: { path: string }): unknown;
+  // Fastify v5: redirect(url, code?) — URL первым (порядок v4 (code, url) перевёрнут,
+  // wire-e2e поймал: v4-порядок даёт FST_ERR_BAD_STATUS_CODE → 500).
+  redirect(url: string, statusCode?: number): unknown;
 }

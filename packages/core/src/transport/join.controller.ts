@@ -27,7 +27,7 @@ export class JoinController {
     const { code, displayName } = joinRequestSchema.parse(body);
     const { identity, membership } = await this.membership.join({ code, displayName, ip: req.ip });
     const issued = await this.tokens.issueGuestTokens(identity.id, membership.roomId);
-    setRefreshCookie(reply, issued.refreshToken, this.config);
+    setRefreshCookie(reply, issued.refreshToken, this.config, issued.kind);
     return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
   }
 }

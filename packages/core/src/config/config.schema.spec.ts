@@ -63,10 +63,51 @@ describe('loadConfig', () => {
     );
   });
 
-  it('rejects REFRESH_TOKEN_TTL > GUEST_TTL (REQ-ID-016)', () => {
+  it('accepts REFRESH_TOKEN_TTL > GUEST_TTL (guest cap применяется при выдаче, не в конфиге; design §5)', () => {
+    const cfg = loadConfig({ ...base, GUEST_TTL: '86400', REFRESH_TOKEN_TTL: '2592000' } as NodeJS.ProcessEnv);
+    expect(cfg.REFRESH_TOKEN_TTL).toBe(2_592_000);
+  });
+
+  it('rejects REFRESH_TOKEN_TTL below 1 day / above 90 days (§4)', () => {
+    expect(() => loadConfig({ ...base, REFRESH_TOKEN_TTL: '3600' } as NodeJS.ProcessEnv)).toThrow(/REFRESH_TOKEN_TTL/);
+    expect(() => loadConfig({ ...base, REFRESH_TOKEN_TTL: '8000000' } as NodeJS.ProcessEnv)).toThrow(/REFRESH_TOKEN_TTL/);
+  });
+
+  it('accepts absent Google section (optional, design §8)', () => {
+    const cfg = loadConfig(base as NodeJS.ProcessEnv);
+    expect(cfg.GOOGLE_CLIENT_ID).toBeUndefined();
+    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual([]);
+    expect(cfg.OAUTH_STATE_TTL).toBe(600);
+    expect(cfg.OAUTH_RATE_LIMIT).toBe(10);
+  });
+
+  it('rejects partial Google section (all-or-none, REQ-OPS-003)', () => {
+    expect(() => loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id' } as NodeJS.ProcessEnv)).toThrow(/GOOGLE/);
     expect(() =>
-      loadConfig({ ...base, GUEST_TTL: '3600', REFRESH_TOKEN_TTL: '7200' } as NodeJS.ProcessEnv),
-    ).toThrow(/REFRESH_TOKEN_TTL/);
+      loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 's' } as NodeJS.ProcessEnv),
+    ).toThrow(/GOOGLE/);
+  });
+
+  it('requires non-empty OAUTH_REDIRECT_ALLOWLIST when Google is configured (REQ-ID-009)', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        GOOGLE_CLIENT_ID: 'id',
+        GOOGLE_CLIENT_SECRET: 's',
+        OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/OAUTH_REDIRECT_ALLOWLIST/);
+  });
+
+  it('parses full Google section and allowlist transform', () => {
+    const cfg = loadConfig({
+      ...base,
+      GOOGLE_CLIENT_ID: 'id',
+      GOOGLE_CLIENT_SECRET: 's',
+      OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+      OAUTH_REDIRECT_ALLOWLIST: 'http://localhost:3000/app, http://localhost:3000/other',
+    } as NodeJS.ProcessEnv);
+    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual(['http://localhost:3000/app', 'http://localhost:3000/other']);
   });
 
   it('rejects CORS wildcard in production (REQ-SEC-008)', () => {
@@ -79,7 +120,7 @@ describe('loadConfig', () => {
     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
     expect(cfg.ACCESS_TOKEN_TTL).toBe(900);
     expect(cfg.GUEST_TTL).toBe(86400);
-    expect(cfg.REFRESH_TOKEN_TTL).toBe(86400);
+    expect(cfg.REFRESH_TOKEN_TTL).toBe(2_592_000);
     expect(cfg.REFRESH_RATE_LIMIT).toBe(10);
     expect(cfg.TRUST_PROXY).toBe(false);
     expect(cfg.CORS_ORIGINS).toEqual([]);
