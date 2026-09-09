@@ -1063,13 +1063,13 @@ export function buildQuizManifest(): AppManifest {
     manifestVersion: QUIZ_MANIFEST_VERSION,
     appSettings: quizSettingsSchema,
     events: {
-      questionOpened: { schema: questionOpenedPayload, visibility: 'public', clientInitiated: true },
-      answerSubmitted: { schema: answerSubmittedPayload, visibility: 'module-private', clientInitiated: true },
-      questionClosed: { schema: questionClosedPayload, visibility: 'public', clientInitiated: true },
-      finishGame: { schema: finishGamePayload, visibility: 'public', clientInitiated: true },
-      answerAccepted: { schema: answerAcceptedPayload, visibility: 'public', clientInitiated: false },
-      questionRevealed: { schema: questionRevealedPayload, visibility: 'public', clientInitiated: false },
-      gameFinished: { schema: gameFinishedPayload, visibility: 'public', clientInitiated: false },
+      'question.opened': { schema: questionOpenedPayload, visibility: 'public', clientInitiated: true },
+      'answer.submitted': { schema: answerSubmittedPayload, visibility: 'module-private', clientInitiated: true },
+      'question.closed': { schema: questionClosedPayload, visibility: 'public', clientInitiated: true },
+      'game.finish': { schema: finishGamePayload, visibility: 'public', clientInitiated: true },
+      'answer.accepted': { schema: answerAcceptedPayload, visibility: 'public', clientInitiated: false },
+      'question.revealed': { schema: questionRevealedPayload, visibility: 'public', clientInitiated: false },
+      'game.finished': { schema: gameFinishedPayload, visibility: 'public', clientInitiated: false },
     },
   });
 }
@@ -1082,7 +1082,7 @@ export function buildQuizManifest(): AppManifest {
 `quiz-manifest.contract.spec.ts`:
 1. `buildQuizManifest()` проходит `appManifestSchema` и содержит все 7 типов с ожидаемыми `visibility`/`clientInitiated` (табличный assert).
 2. Зарегистрированная JSON Schema appSettings (через Ajv2020, как ядро: `new Ajv2020({ allErrors: true, strict: false })`) — валидный снапshot настроек проходит; невалидные (пустой questions, minAnswerIntervalMs < 0, лишний ключ, options из одного элемента) отклоняются.
-3. JSON Schema событий: валидный/невалидный payload каждого типа (например `answerSubmitted` без `optionIndex` отклоняется, с строковым `questionIndex` отклоняется).
+3. JSON Schema событий: валидный/невалидный payload каждого типа (например `answer.submitted` без `optionIndex` отклоняется, с строковым `questionIndex` отклоняется).
 4. Видимость `correctAnswers`: `readPropertyVisibility(manifest.appSettings, 'correctAnswers') === 'module-private'` (fail-safe без аннотации), `questions/minAnswerIntervalMs/scoring === 'public'`.
 
 - [ ] **Step 2: Run — RED**
@@ -1122,7 +1122,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 export interface QuizState {
   readonly currentQuestion: number | null;
   readonly accepting: boolean;
-  readonly openedAt: string | null; // ISO из recordedAt questionOpened — серверное время
+  readonly openedAt: string | null; // ISO из recordedAt question.opened — серверное время
   readonly answers: Readonly<Record<string, { optionIndex: number; seq: number }>>; // текущий вопрос, key=actorId
   readonly totals: Readonly<Record<string, number>>;
   readonly finished: boolean;
@@ -1132,19 +1132,19 @@ export function reduceQuiz(state: QuizState, event: AppLogEvent): QuizState;
 ```
 
 Семантика reduce (чистая, immutable-обновления):
-- `questionOpened` → `{ currentQuestion: p.questionIndex, accepting: true, openedAt: event.recordedAt, answers: {} }`
-- `answerSubmitted` → `answers[event.actorId] = { optionIndex: p.optionIndex, seq: event.seq }` (actorId не-null по контракту команды)
-- `questionClosed` → `accepting: false`
-- `questionRevealed` → totals += awarded points
-- `gameFinished` → `finished: true`
-- `finishGame`, `answerAccepted` → без изменений состояния
+- `question.opened` → `{ currentQuestion: p.questionIndex, accepting: true, openedAt: event.recordedAt, answers: {} }`
+- `answer.submitted` → `answers[event.actorId] = { optionIndex: p.optionIndex, seq: event.seq }` (actorId не-null по контракту команды)
+- `question.closed` → `accepting: false`
+- `question.revealed` → totals += awarded points
+- `game.finished` → `finished: true`
+- `game.finish`, `answer.accepted` → без изменений состояния
 - неизвестный shortName → state без изменений (защитная ветка: реестр гарантирует типы, но редьюсер не падает)
 
 **REQ:** ADR-005 (проекция из лога), REQ-CORE-004.
 
 - [ ] **Step 1: Failing unit tests**
 
-`quiz-state.spec.ts`: начальное состояние; открытие вопроса (answers сбрасываются, openedAt из события); запись ответов двух игроков с seq; повторное открытие другого вопроса сбрасывает ответы; начисление очков через `questionRevealed` (суммирование по двум раундам); финиш; неизвестный тип — no-op; иммутабельность (входной state не мутирован — `expect(Object.isFrozen(...))` не требуется, достаточно `expect(state).not.toBe(next)` + глубокое равенство исходного).
+`quiz-state.spec.ts`: начальное состояние; открытие вопроса (answers сбрасываются, openedAt из события); запись ответов двух игроков с seq; повторное открытие другого вопроса сбрасывает ответы; начисление очков через `question.revealed` (суммирование по двум раундам); финиш; неизвестный тип — no-op; иммутабельность (входной state не мутирован — `expect(Object.isFrozen(...))` не требуется, достаточно `expect(state).not.toBe(next)` + глубокое равенство исходного).
 
 - [ ] **Step 2: Run — RED** / **Step 3: Implement** / **Step 4: GREEN**
 
@@ -1182,25 +1182,25 @@ export function createQuizApp(): { manifest: AppManifest; runtime: AppRuntimeMod
 Логика `handlePublish(ctx, shortName, payload)` (payload уже проверен схемой диспетчером — каст через `as` к выведенному типу допустим и локален):
 
 - Общее: `settings = quizSettingsSchema.parse(ctx.settings)` (валидировано при configure/activate — повторный parse здесь защитный и дешёвый).
-- `questionOpened` (ORGANIZER только — иначе `AppRejection('PUBLISH_FORBIDDEN')`; аналогично `questionClosed`, `finishGame`):
+- `question.opened` (ORGANIZER только — иначе `AppRejection('PUBLISH_FORBIDDEN')`; аналогично `question.closed`, `game.finish`):
   - `ctx.state.finished` → `ROUND_NOT_OPEN` («игра завершена»); `state.accepting` → `ROUND_NOT_OPEN` («прежний вопрос не закрыт»); `questionIndex >= settings.questions.length` → `QUESTION_UNKNOWN`.
-  - commits: `[{ shortName: 'questionOpened', payload, visibility: 'public', actor: 'publisher' }]`.
-- `answerSubmitted`:
+  - commits: `[{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }]`.
+- `answer.submitted`:
   - `ctx.actorRole !== 'PARTICIPANT'` → `PUBLISH_FORBIDDEN` (организатор не играет; SPECTATOR отсечён ядром раньше — защитная ветка).
   - `!state.accepting || state.currentQuestion === null` → `ROUND_NOT_OPEN`.
   - `payload.questionIndex !== state.currentQuestion` → `QUESTION_UNKNOWN`.
   - `payload.optionIndex >= settings.questions[state.currentQuestion].options.length` → `OPTION_UNKNOWN`.
   - `state.answers[ctx.actorId] !== undefined` → `ALREADY_ANSWERED`.
   - REQ-RT-013: `minAnswerIntervalMs > 0 && state.openedAt !== null && Date.parse(ctx.now) - Date.parse(state.openedAt) < settings.minAnswerIntervalMs` → `ANSWER_TOO_FAST`.
-  - commits: `[answerSubmitted (module-private, publisher), answerAccepted { questionIndex, actorId } (public, server)]`.
-- `questionClosed`:
+  - commits: `[answer.submitted (module-private, publisher), answer.accepted { questionIndex, actorId } (public, server)]`.
+- `question.closed`:
   - `!state.accepting || payload.questionIndex !== state.currentQuestion` → `ROUND_NOT_OPEN`.
   - Скоринг: правильные ответы (`optionIndex === settings.correctAnswers[qi]`; отсутствующий `correctAnswers[qi]` → правильных нет) ранжируются по `seq`; k-й (0-based) получает `max(base − k·step, 0)`. `totals` — из state + awarded.
-  - commits: `[questionClosed (public, publisher), questionRevealed { questionIndex, awarded, totals, ...(correctAnswers[qi] !== undefined ? { correctIndex: correctAnswers[qi] } : {}) } (public, server)]` — `correctIndex` опущен, когда ответ не сконфигурирован (схема — Task 9, поле optional).
-- `finishGame`:
+  - commits: `[question.closed (public, publisher), question.revealed { questionIndex, awarded, totals, ...(correctAnswers[qi] !== undefined ? { correctIndex: correctAnswers[qi] } : {}) } (public, server)]` — `correctIndex` опущен, когда ответ не сконфигурирован (схема — Task 9, поле optional).
+- `game.finish`:
   - `state.finished` → `ROUND_NOT_OPEN`; (открытый вопрос можно не закрывать — закрытие валится в standings как есть; осознанное упрощение MVP).
   - standings: `Object.entries(state.totals)` по убыванию total, place = 1-based с разделением мест при равенстве (плотный ранг: 1,2,2,3).
-  - commits: `[finishGame (public, publisher), gameFinished { standings } (public, server)]`.
+  - commits: `[game.finish (public, publisher), game.finished { standings } (public, server)]`.
 
 **REQ:** REQ-RT-013 (анти-бот), REQ-RT-009 (actorId из ctx), REQ-ID-011 (ролевые гейты), REQ-CTR-009 (visibility явно, в пределах ceiling).
 
@@ -1213,7 +1213,7 @@ const ctx = (over: Partial<AppHostContext<QuizState>>): AppHostContext<QuizState
 });
 ```
 
-Тесты (таблица): каждая ветка отказа выше (код ошибки); счастливые пути (точный состав commits включая actor/visibility); анти-бот границы (`interval-1` → отказ, `interval` → принят, `0` → контроль выключен); скоринг (3 правильных по seq → 1000/900/800 при base 1000 step 100; неправильный — 0 и сгорает: повторный `answerSubmitted` → ALREADY_ANSWERED); dense-rank standings; двойной finishGame → отказ; открытие второго вопроса при открытом первом → отказ.
+Тесты (таблица): каждая ветка отказа выше (код ошибки); счастливые пути (точный состав commits включая actor/visibility); анти-бот границы (`interval-1` → отказ, `interval` → принят, `0` → контроль выключен); скоринг (3 правильных по seq → 1000/900/800 при base 1000 step 100; неправильный — 0 и сгорает: повторный `answer.submitted` → ALREADY_ANSWERED); dense-rank standings; двойной game.finish → отказ; открытие второго вопроса при открытом первом → отказ.
 
 - [ ] **Step 2: Run — RED**
 
@@ -1333,14 +1333,14 @@ async function joinGuest(roomCode: string, name: string, role?: 'spectator'): Pr
 
 Сценарии:
 
-1. **Полная игра** (приёмочный сценарий): настройки `QUIZ_SETTINGS`, 2 гостя (P1, P2) + организатор на ws, все подписаны. Организатор `questionOpened(0)` → оба отвечают: P1 верно (optionIndex 1), P2 неверно (0) → live `answerAccepted` у всех (public, без optionIndex) → `questionClosed(0)` → live `questionRevealed` с `correctIndex: 1` и `awarded: [{ P1, 1000 }]` → `questionOpened(1)` → оба отвечают верно, P2 первым (упорядочить через await ack P2 до publish P1) → close → `questionRevealed`: awarded=[{P2,1000},{P1,900}] → `finishGame` → `gameFinished` standings: P1 total 1900 place 1, P2 total 1000 place 2. Гость, не отвечавший ни разу (P3), присутствует в standings с total 0 только если отвечал хоть раз — нет: standings строятся из totals редьюсера, P3 в них не попадает (зафиксировать это поведение в assert). Порядок live-событий у клиента совпадает с порядком в логе (`readRoomLog`).
-2. **Чит-тест** (критерий выхода): в сценарии 1 до `questionRevealed` — ни один кадр/ack/snapshot, полученный участником, не содержит значение correctIndex (проверка сериализацией: `JSON.stringify(frame)` не содержит `"correctIndex"`; snapshot.appSettings не содержит `correctAnswers`). Повторный `subscribe` (replay) после первого раунда: в snapshot есть `questionRevealed` раунда 0 (раскрыт легально), нет `answerSubmitted` (module-private) и нет `correctAnswers`. Организаторский snapshot тоже без `correctAnswers` (module-private не отдаётся никому).
+1. **Полная игра** (приёмочный сценарий): настройки `QUIZ_SETTINGS`, 2 гостя (P1, P2) + организатор на ws, все подписаны. Организатор `question.opened(0)` → оба отвечают: P1 верно (optionIndex 1), P2 неверно (0) → live `answer.accepted` у всех (public, без optionIndex) → `question.closed(0)` → live `question.revealed` с `correctIndex: 1` и `awarded: [{ P1, 1000 }]` → `question.opened(1)` → оба отвечают верно, P2 первым (упорядочить через await ack P2 до publish P1) → close → `question.revealed`: awarded=[{P2,1000},{P1,900}] → `game.finish` → `game.finished` standings: P1 total 1900 place 1, P2 total 1000 place 2. Гость, не отвечавший ни разу (P3), присутствует в standings с total 0 только если отвечал хоть раз — нет: standings строятся из totals редьюсера, P3 в них не попадает (зафиксировать это поведение в assert). Порядок live-событий у клиента совпадает с порядком в логе (`readRoomLog`).
+2. **Чит-тест** (критерий выхода): в сценарии 1 до `question.revealed` — ни один кадр/ack/snapshot, полученный участником, не содержит значение correctIndex (проверка сериализацией: `JSON.stringify(frame)` не содержит `"correctIndex"`; snapshot.appSettings не содержит `correctAnswers`). Повторный `subscribe` (replay) после первого раунда: в snapshot есть `question.revealed` раунда 0 (раскрыт легально), нет `answer.submitted` (module-private) и нет `correctAnswers`. Организаторский snapshot тоже без `correctAnswers` (module-private не отдаётся никому).
 3. **Late-join участника** в ACTIVE в середине раунда: snapshot содержит текущий открытый вопрос (public), участник отвечает успешно.
-4. **Late-join зрителя**: join `role: 'spectator'` → subscribe ok, snapshot public; publish `answerSubmitted` → ack `{ code: 'PUBLISH_FORBIDDEN' }`; в логе ничего не прибавилось.
-5. **Анти-бот (REQ-RT-013)**: комната с `minAnswerIntervalMs: 60_000` → ответ сразу после открытия → `{ code: 'ANSWER_TOO_FAST' }`, в логе нет answerSubmitted. Комната с `0` → ответ принят.
-6. **Конкурентный double-answer одного участника**: два параллельных publish → ровно один `ok`, другой `ALREADY_ANSWERED`; `readRoomLog` — ровно один `quiz.answerSubmitted` от этого actorId.
-7. **Ролевые гейты**: участник publish `questionOpened` → `PUBLISH_FORBIDDEN`; участник `finishGame` → `PUBLISH_FORBIDDEN`.
-8. **Пересоздание проекции**: после раунда 0 `app.get(AppRuntimeService).invalidateProjection(roomId)` → следующий `answerSubmitted` обрабатывается (replay восстановил состояние), очки в `questionRevealed` сходятся с ожиданием (включают раунд 0).
+4. **Late-join зрителя**: join `role: 'spectator'` → subscribe ok, snapshot public; publish `answer.submitted` → ack `{ code: 'PUBLISH_FORBIDDEN' }`; в логе ничего не прибавилось.
+5. **Анти-бот (REQ-RT-013)**: комната с `minAnswerIntervalMs: 60_000` → ответ сразу после открытия → `{ code: 'ANSWER_TOO_FAST' }`, в логе нет answer.submitted. Комната с `0` → ответ принят.
+6. **Конкурентный double-answer одного участника**: два параллельных publish → ровно один `ok`, другой `ALREADY_ANSWERED`; `readRoomLog` — ровно один `quiz.answer.submitted` от этого actorId.
+7. **Ролевые гейты**: участник publish `question.opened` → `PUBLISH_FORBIDDEN`; участник `game.finish` → `PUBLISH_FORBIDDEN`.
+8. **Пересоздание проекции**: после раунда 0 `app.get(AppRuntimeService).invalidateProjection(roomId)` → следующий `answer.submitted` обрабатывается (replay восстановил состояние), очки в `question.revealed` сходятся с ожиданием (включают раунд 0).
 9. **Запечатанная комната**: `RoomService.transition` в COMPLETED (как в существующих тестах) → publish → отказ (`ROOM_LOG_SEALED`).
 
 - [ ] **Step 1: Failing e2e (скелет сценария 1)**
