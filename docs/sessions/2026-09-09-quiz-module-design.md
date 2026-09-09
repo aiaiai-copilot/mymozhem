@@ -61,17 +61,16 @@
 
 ```jsonc
 {
-  "questions": [{
-    "text": "…",                      // public
-    "options": ["…", "…"],            // public
-    "correctIndex": 2                 // module-private — НЕ проецируется никому до reveal
-  }],
+  "questions": [{ "text": "…", "options": ["…", "…"] }],  // public (x-visibility)
+  "correctAnswers": [2, 0, …],        // БЕЗ аннотации → module-private (fail-safe); i-й элемент — correctIndex i-го вопроса
   "minAnswerIntervalMs": 800,         // public; arbitration_min_answer_interval, REQ-RT-013; 0 = окно
   "scoring": { "base": 1000, "step": 100 }  // public; скоростная шкала
 }
 ```
 
-Отсутствие аннотации = module-private (fail-safe встроен в фазу 1). Даже organizer-проекция не отдаёт `correctIndex` до закрытия вопроса: раскрытие — отдельным событием `questionRevealed`.
+Отсутствие аннотации = module-private (fail-safe встроен в фазу 1). Даже organizer-проекция не отдаёт `correctAnswers` до закрытия вопроса: раскрытие — отдельным событием `questionRevealed`.
+
+*Почему два ключа, а не `correctIndex` внутри объекта вопроса:* проекция видимости ядра (`appSettingsVisibilityMap`, фаза 1) работает по верхнему уровню `properties`; смешанная видимость внутри одного свойства невыразима без расширения ядра. Раскладка на два ключа даёт ту же защиту существующим механизмом. Цена — инвариант `correctAnswers.length === questions.length` невыразим в JSON Schema без `.refine` (запрещён conversion guard'ом defineApp); модуль трактует отсутствующий `correctAnswers[i]` как «у вопроса нет правильного ответа» (все ответы неверные), конфиг-ошибка не открывает утечку.
 
 **События** (короткие имена, ядро префиксует `quiz.`):
 
