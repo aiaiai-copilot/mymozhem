@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Date:** 2026-09-03 (OAuth-срез **закрыт и слит в `main`** — `ab973f4`: 9/9 тасков review clean, final whole-branch review «Ready to merge — Yes», +ZodError PII-гард из финального ревью; гейты зелёные на merged main; **следующее действие — выбор следующего среза владельцем**; push — решение владельца)
-**Branch:** `main` (8 коммитов впереди `origin/main`: design+plan OAuth, 9 коммитов среза + мердж `ab973f4` + handoff/stats этой правки; рабочее дерево чистое). Push — решение владельца.
+**Date:** 2026-09-09 (**фаза 1 закрыта по сверке критериев** — `docs/sessions/2026-09-09-phase-1-exit-audit.md`: 10/11 критериев подтверждены артефактами, kind-флип снят amendment v1.3, пробел REQ-ID-012 разрешён **amendment v1.4** (перенос админ-контура в ф.4, решение владельца), буквальный DB-down тест REQ-DEV-008 добавлен; конвейер зелёный; **следующее — фаза 2 (Quiz), новый срез в новой сессии, решение владельца**; push — решение владельца)
+**Branch:** `main` (10 коммитов впереди `origin/main`: OAuth-срез + мердж + handoff 2026-09-03, сверка ф.1 + DB-down тест/амendment v1.4 этой сессии; рабочее дерево чистое). Push — решение владельца.
 
-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP), **OAuth-срез (Google login + POST /rooms + REGISTERED-токены без guest-cap, контракт 1.4.0)** — реализованы и слиты в `main`. Критерии выхода ф.1 по realtime, по исключению и по OAuth (полный флоу redirect→callback→refresh→POST /rooms) подтверждены e2e на проводе. Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фазы 1 — ЗАКРЫТА.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP), **OAuth-срез (Google login + POST /rooms + REGISTERED-токены без guest-cap, контракт 1.4.0)** — реализованы и слиты в `main`; 2026-09-09 сверкой критериев подтверждено закрытие фазы целиком (включая запечатывание лога REQ-RT-016 — оно вошло в event-commit срез). Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -11,16 +11,18 @@
 2. Этот файл целиком.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджеров срезов исключения и OAuth на машине нет — их история: планы + `git log` (исключение `89d887f..c2e60da`, OAuth `44db424..ab973f4`).
-6. `docs/sessions/2026-08-18-membership-exclusion-{design,implementation-plan}.md` — исполненные дизайн+план среза исключения (9/9, работа в коммитах; читать при разборе истории, §0 дизайна — решения владельца).
-7. `docs/sessions/2026-09-02-oauth-{design,implementation-plan}.md` — исполненные дизайн+план OAuth-среза (9/9 + final review + ZodError-фикс, работа в коммитах; §0 дизайна — решения владельца).
-8. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
+5. `docs/spec/amendment-v1.4-admin-contour.md` — **утверждённый перенос REQ-ID-012 (админ-контур) в ф.4** (решение владельца 2026-09-09, по итогам сверки ф.1).
+6. `docs/sessions/2026-09-09-phase-1-exit-audit.md` — **сверка критериев выхода ф.1** (вердикт: фаза 1 закрыта; таблица критерий → артефакт).
+7. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджеров срезов исключения и OAuth на машине нет — их история: планы + `git log` (исключение `89d887f..c2e60da`, OAuth `44db424..ab973f4`).
+8. `docs/sessions/2026-08-18-membership-exclusion-{design,implementation-plan}.md` — исполненные дизайн+план среза исключения (9/9, работа в коммитах; читать при разборе истории, §0 дизайна — решения владельца).
+9. `docs/sessions/2026-09-02-oauth-{design,implementation-plan}.md` — исполненные дизайн+план OAuth-среза (9/9 + final review + ZodError-фикс, работа в коммитах; §0 дизайна — решения владельца).
+10. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
 Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 4cab30c:HANDOFF.md`.
 
 ## Следующее действие
 
-**Выбор следующего среза — решение владельца** (правило «новый срез = новая сессия», подтверждено 2026-09-02; внутри среза владелец разрешил исполнение всех батчей в одной сессии). OAuth-срез закрыт полностью: 9/9 тасков, final whole-branch review «Ready to merge — Yes», мердж `ab973f4`, гейты зелёные на merged main, LOC-снапшот обновлён. Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (e2e — на fake-провайдере; design §10; действие владельца). Push на origin — решение владельца.
+**Фаза 1 закрыта (сверка 2026-09-09). Следующий срез — фаза 2 (Quiz, первый app-модуль); старт — новой сессией, решение владельца** (правило «новый срез = новая сессия», подтверждено 2026-09-02; внутри среза владелец разрешил исполнение всех батчей в одной сессии). Выбранный было срез «запечатывание лога (REQ-RT-016)» оказался уже закрытым event-commit срезом — вместо него выполнена сверка критериев ф.1. Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (e2e — на fake-провайдере; design §10; действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже (юрист до первого события с посторонними/призами).
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -91,9 +93,10 @@
 - **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
 - **Prisma 7.8 adapter-pg: форма ошибок raw-запросов.** Падающий `$queryRaw` оборачивается в `PrismaClientKnownRequestError` с кодом `P2010`; SQLSTATE внутри message и `meta.driverAdapterError.cause.originalCode`. Матчить `code === 'P2010'` + подстроки (прецедент `isRoomCodeCollision`). Также: `$queryRaw` возвращает сырое DB-значение enum (`'public'`), а не Prisma-имя (`'PUBLIC'`) — для staged-событий нормализует `asLogEvent` (realtime-срез); при `RETURNING *` из raw INSERT — re-read через клиент (прецедент `insertRoom`) или явная нормализация.
 - **Инвариант «change both or neither» (теперь ТРИ места, с OAuth-среза):** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в частичном индексе `"Identity_registered_email_key"`, guarded INSERT в `RoomService.create` и пречеке конфликта в `IdentityService.findOrCreateByProvider`. Менять только вместе. (Комментарий в `room.service.ts:82-83` всё ещё говорит «два места» — известный дрейф, поправить при следующем касании.)
-- **Хост-порты 5432 и 55432 заняты чужими контейнерами** (`lt-pg` и `lt-pg-sdd`, не проектные, не трогать). Authoring-контейнер миграций (`mm-migrate`, эфемерный) публиковать на свободный порт (в срезе исключения — 55433).
+- **Хост-порты 5432 и 55432:** контейнеры `lt-pg`/`lt-pg-sdd` (не проектные) были удалены 2026-09-03 рестартом OrbStack и не восстановлены — на 2026-09-09 порты свободны, перед публикацией authoring-контейнера всё равно проверять `docker ps`.
+- **Testcontainers v12 + OrbStack — две ловушки restart'а контейнера** (вскрыты DB-down тестом 2026-09-09): (1) у Started-контейнера нет `start()`, а `StoppedTestContainer` — только метаданные: stop/start идут через `getContainerRuntimeClient()` (`client.container.stop/start(getById(id))`); (2) **OrbStack переназначает случайный host-порт при restart** — старый пул мёртв навсегда, клиент пересоздаётся на фактический порт из `inspect`. Оба приёма зашиты в харнесс (`stopContainer`/`startContainer`, последний возвращает новый `PrismaService`).
 - **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория. Prisma 7 CLI вообще работает только из корня репо (`prisma.config.ts` там): форма `pnpm --filter @mymozhem/core exec prisma …` падает — использовать `pnpm exec prisma …` из корня.
-- **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Мутирует глобальный `process.env.DATABASE_URL` без восстановления (безопасно только при `maxWorkers: 1`); требует cwd = корень репозитория.
+- **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Мутирует глобальный `process.env.DATABASE_URL` без восстановления (безопасно только при `maxWorkers: 1`); требует cwd = корень репозитория. С 2026-09-09 несёт `stopContainer`/`startContainer` для тестов недоступности БД (REQ-DEV-008, `db-down.int-spec.ts`).
 - **`ReplyLike` — адаптер fastify 5:** сигнатуры сверять с fastify 5 (`redirect(url, code?)`, code дефолт 302). OAuth-куки (`mm_oauth_*`) — `SameSite=Lax` осознанно (возврат с Google — top-level GET), path `/auth`, TTL `OAUTH_STATE_TTL`; refresh-кука остаётся `Strict`. Гостевой cap refresh — ТОЛЬКО в точках выдачи (`TokenService.sessionExpiry` ⇄ `setRefreshCookie` — «одна норма в двух местах», менять вместе); конфиг-инварианта `REFRESH ≤ GUEST_TTL` больше нет.
 - **Прогон интеграционной ланы поднимают контейнеры Postgres** (~8 с локально на файл). Docker Desktop должен быть запущен.
 - **Jest CLI:** форма `pnpm --filter @mymozhem/core test:int -- -t "..."` миспарсится — рабочая форма без `--`. Фильтр всегда проверять на >0 матчей.
@@ -112,30 +115,28 @@
 
 ## Осталось недоделанным
 
-- **Следующий срез не выбран** — решение владельца (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
+- **Фаза 2 (Quiz) не начата** — старт новым срезом в новой сессии, решение владельца (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
-## Session 2026-09-02 → 2026-09-03 (OAuth-срез: исполнение 9/9 → final review → merge)
+## Session 2026-09-09 (сверка критериев ф.1 → фаза 1 закрыта; amendment v1.4; DB-down тест)
 
 ### Что сделано
 
-- **Все 9 тасков плана `8afec8d`** методом subagent-driven-development (implementer → ревью spec+quality → ledger, всё review clean): T1 SDK 1.4.0 (`035eae4`), T2 конфиг Google-секция all-or-none + REFRESH_TOKEN_TTL к §4 (`67def04`), T3 миграция `identity."IdentityProvider"` (`233c40b`), T4 TokenService kind-aware без guest-cap (`2b9f321`), T5 provisioning `findOrCreateByProvider` (`8960301`), T6 OAuth-модуль порт/сервис/GoogleOAuthClient (`24e4e3b`), T7 transport `GET /auth/google[/callback]` + `POST /rooms` + ветки фильтра (`ad3f940`), T8 e2e 16 тестов на проводе с FakeOAuthProviderClient (`b37bbc9`+`b056081`), T9 гейты (без правок).
-- **Final whole-branch review (fable): «Ready to merge — Yes»**, Critical 0; триаж всех deferred-миноров — follow-up (список в «Отложенные follow-up»). По его рекомендации взят один фикс до мерджа: **ZodError-гард** против PII в логе (`4bb08e1`, scoped re-review clean).
-- **Мердж в `main` — `ab973f4`** (48 файлов, +2025/−68); merged main зелёный по полному конвейеру (после `prisma generate` — см. опыт); LOC-снапшот `docs/stats/loc-snapshots.md` обновлён (11 678 строк, тесты/прод 1.47).
-- 5 санкционированных отклонений — блок выше; ключевое: e2e поймал реальный баг T7 (`ReplyLike.redirect` кодировал сигнатуру fastify v4 под fastify 5 — все /auth/google* отдавали 500 на проводе).
+- **Выбранный владельцем срез «запечатывание лога (REQ-RT-016)» при верификации оказался уже закрытым** event-commit срезом 2026-08-04 (status-гейт + TOCTOU re-check в `appendLocked`, int-тесты `event-commit.int-spec.ts:155/495`, e2e `realtime.e2e-spec.ts:247` ROOM_LOG_SEALED). Срез не строился — вместо изобретения работы выполнена сверка.
+- **Сверка критериев выхода ф.1** — `docs/sessions/2026-09-09-phase-1-exit-audit.md` (`ec647d1`): каждый критерий §5 пакета (с поправками amendment v1.3 §2) подтверждён артефактом (файл:строка). 10/11 закрыты, критерий kind-флипа снят amendment v1.3.
+- **Два пробела разрешены решениями владельца:** (1) REQ-ID-012 (админ-контур) — не был ни реализован, ни документально отложен → **amendment v1.4** (`docs/spec/amendment-v1.4-admin-contour.md`): перенос в ф.4 по фильтру задела, текст и MUST нормы не тронуты; (2) буквальный DB-down тест REQ-DEV-008 → **`db-down.int-spec.ts`** (2 теста: commit и join при реально остановленном Postgres отклоняются, частичной записи нет — верификация по той же БД после поднятия). Харнесс расширен `stopContainer`/`startContainer`.
+- **Гейты зелёные:** build → lint → typecheck → boundary-check → guardrails → test:int (15 сьютов, 144 теста) → test. Вердикт: **фаза 1 закрыта**; следующее — фаза 2 (Quiz), новый срез в новой сессии, решение владельца.
 
 ### Коммиты этой сессии
 
-- `035eae4` SDK 1.4.0 · `67def04` конфиг · `233c40b` миграция · `2b9f321` TokenService · `8960301` provisioning · `24e4e3b` OAuth-модуль · `ad3f940` transport · `b37bbc9` fix redirect fastify v5 · `b056081` e2e · `4bb08e1` ZodError PII-гард · `ab973f4` merge · (+ handoff/stats этой правки)
+- `ec647d1` docs(audit): сверка критериев выхода фазы 1 · `0b5e599` test(core): DB-down тест REQ-DEV-008 + амендмент v1.4 (REQ-ID-012 → ф.4) · (+ handoff этой правки)
 
 ### Локальное состояние (не в git)
 
-- **⚠️ Контейнеры `lt-pg` и `lt-pg-sdd` УДАЛЕНЫ.** В конце сессии OrbStack-демон завис (e2e-лане каскадно таймаутилась при зелёном коде); владелец санкционировал `orbctl restart docker` — демон поднялся (29.4.0), но контейнеры оказались `--rm`-эфемерными и не пережили рестарт (образы/конфиги мне неизвестны — восстановление на владельце, если они были нужны).
-- Docker-демон на этой машине — **OrbStack** (не Docker Desktop, вопреки формулировкам выше по файлу); authoring-контейнер `mm-migrate-oauth` удалён ещё в T3.
-- Worktree `.claude/worktrees/oauth-slice` и ветка `feat/oauth-registered-rooms` **удалены** после зелёного мерджа (леджер среза ушёл с worktree; история — `git log 44db424..ab973f4` + эта запись).
-- Side-effects на внешние системы: нет (push не выполнялся — 8+ коммитов впереди `origin/main`, решение владельца).
+- Docker-демон — **OrbStack**; работает стабильно (в отличие от зависания 2026-09-03). Запущенных контейнеров нет; `lt-pg`/`lt-pg-sdd` не восстановлены (порты 5432/55432 свободны); остановленный `pay-per-service-db-1` — не проектный, не трогать. Временный probe-контейнер `mm-pg-restart-probe`/`mm-pg-port-probe` создан и удалён в ходе диагностики.
+- Side-effects на внешние системы: нет (push не выполнялся — 10+ коммитов впереди `origin/main`, решение владельца).
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (следующий срез — выбор владельца; manual smoke OAuth с реальными Google-кредами; юрист; CLAUDE.md-указатель).
+- См. одноимённый раздел выше (фаза 2 — новый срез; manual smoke OAuth; юрист; CLAUDE.md-указатель).
