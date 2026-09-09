@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { createQuizApp } from '@mymozhem/app-quiz';
 import {
   AppRegistryModule,
   AppRuntimeModule,
@@ -11,12 +12,14 @@ import {
   TransportModule,
 } from '@mymozhem/core';
 
+const quiz = createQuizApp();
+
 @Module({
   imports: [
     PrismaModule,
     HealthModule,
-    AppRegistryModule.register([]),
-    AppRuntimeModule.register([]), // пусто до Task 12 (quiz-модуль)
+    AppRegistryModule.register([quiz.manifest]),
+    AppRuntimeModule.register([quiz.runtime]),
     RoomModule,
     IdentityModule,
     MembershipModule,

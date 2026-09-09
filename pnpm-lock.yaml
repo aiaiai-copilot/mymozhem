@@ -44,6 +44,9 @@ importers:
       '@fastify/helmet':
         specifier: ^13.1.0
         version: 13.1.0
+      '@mymozhem/app-quiz':
+        specifier: workspace:*
+        version: link:../../packages/app-quiz
       '@mymozhem/core':
         specifier: workspace:*
         version: link:../../packages/core
