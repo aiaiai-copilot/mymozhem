@@ -11,10 +11,8 @@ import {
   type ContractErrorPayload,
   type ProjectedEvent,
   type PublishOkAck,
-  type PublishRequest,
   type RoomSnapshot,
   type SubscribeOkAck,
-  type Visibility,
 } from '@mymozhem/sdk';
 import type { LogEvent } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -24,8 +22,7 @@ import { TokenService, type AccessClaims } from '../auth/token.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { AppRegistryService } from '../app-registry/app-registry.service';
-import { EventLogService } from './event-log.service';
-import { EventOutbox } from './event-outbox';
+import { AppRuntimeService } from '../app-runtime/app-runtime.service';
 import { ProjectionService, type OutwardLevel } from './projection.service';
 import { RealtimeBus } from './realtime-bus';
 import { RealtimeError } from './realtime.errors';
@@ -55,8 +52,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
     private readonly prisma: PrismaService,
     private readonly membership: MembershipService,
     private readonly appRegistry: AppRegistryService,
-    private readonly eventLog: EventLogService,
-    private readonly outbox: EventOutbox,
+    private readonly appRuntime: AppRuntimeService,
     private readonly projection: ProjectionService,
     private readonly registry: SubscriptionRegistry,
     private readonly bus: RealtimeBus,
@@ -206,40 +202,26 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
     try {
       // Владелец типа — из имени: core-пространство для клиента закрыто (lifecycle
       // эмитит только ядро); тип чужого app отсутствует в пиннутом манифесте —
-      // отсекает шаг 4 commit-цепочки (EVENT_UNKNOWN_TYPE).
+      // отсекает диспетчер (EVENT_UNKNOWN_TYPE).
       const owner = resolveTypeOwner(parsed.data.type);
       if (owner.kind === 'core') {
         ack({ code: 'EVENT_UNKNOWN_TYPE' });
         return;
       }
-      const visibility = await this.effectiveVisibility(sub.roomId, owner.appId, owner.shortName, parsed.data);
-      await this.outbox.run((tx) =>
-        this.eventLog.commitAppEvent(tx, sub.roomId, owner.shortName, parsed.data.payload, visibility, claimsOf(socket).sub),
-      );
+      // Командный хост (design 2026-09-09 §2): app-publish исполняется модулем до
+      // коммита. request.visibility здесь не читается — набор и видимость коммитов
+      // определяет модуль (AppCommit), потолок принуждается commit'ом (REQ-CTR-009).
+      await this.appRuntime.dispatch({
+        roomId: sub.roomId,
+        actorId: claimsOf(socket).sub,
+        appId: owner.appId,
+        shortName: owner.shortName,
+        payload: parsed.data.payload,
+      });
       ack({ ok: true });
     } catch (err) {
       ack({ code: this.wireCodeOf(err) });
     }
-  }
-
-  // §0.6: умолчание visibility — декларированный потолок типа. Неизвестному типу
-  // дефолт безразличен (commit откажет EVENT_UNKNOWN_TYPE) — fail-safe module-private.
-  private async effectiveVisibility(
-    roomId: string,
-    appId: string,
-    shortName: string,
-    request: PublishRequest,
-  ): Promise<Visibility> {
-    if (request.visibility !== undefined) return request.visibility;
-    const room = await this.prisma.room.findUnique({
-      where: { id: roomId },
-      select: { manifestVersion: true },
-    });
-    const definition =
-      room?.manifestVersion != null
-        ? this.appRegistry.getEventDefinition(appId, room.manifestVersion, shortName)
-        : undefined;
-    return definition?.visibility ?? 'module-private';
   }
 
   // Live-доставка: проекцию строит ProjectionService — ручной фильтрации полей

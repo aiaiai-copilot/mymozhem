@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import {
   AppRegistryModule,
+  AppRuntimeModule,
   HealthModule,
   IdentityModule,
   MembershipModule,
@@ -15,6 +16,7 @@ import {
     PrismaModule,
     HealthModule,
     AppRegistryModule.register([]),
+    AppRuntimeModule.register([]), // пусто до Task 12 (quiz-модуль)
     RoomModule,
     IdentityModule,
     MembershipModule,
