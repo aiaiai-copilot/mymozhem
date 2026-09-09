@@ -1,7 +1,8 @@
 # HANDOFF
 
-**Date:** 2026-09-09 (вторая сессия дня: **фаза 2 (Quiz) спроектирована и спланирована** — дизайн `docs/sessions/2026-09-09-quiz-module-design.md` (§0 — решения владельца), план `docs/sessions/2026-09-09-quiz-implementation-plan.md` (14 задач, TDD); **исполнение — subagent-driven в новой сессии**, решение владельца; push — решение владельца)
-**Branch:** `main` (19 коммитов впереди `origin/main`: OAuth-срез + сверка ф.1/amendment v1.4 + дизайн/план Quiz-среза этой сессии; рабочее дерево чистое). Push — решение владельца.
+**Date:** 2026-09-09 (третья сессия дня: **Quiz-срез, батч 1 из 5 исполнен** — Tasks 1–3 плана `docs/sessions/2026-09-09-quiz-implementation-plan.md` сделаны и прошли двухстадийное ревью; правило владельца: **батчи по 3 задачи, каждый батч — новая сессия**)
+**Branch:** `main` (21 коммит впереди `origin/main`: OAuth-срез + сверка ф.1/amendment v1.4 + дизайн/план Quiz-среза + ignore .worktrees; рабочее дерево чистое). Push — решение владельца.
+**Активный worktree среза:** `.worktrees/quiz` (ветка `quiz`, от a75346e) — 3 коммита батча 1: `7112534` (контракт 1.5.0 + 7 wire-кодов), `eafee47` (join-request role), `2d4c39c` (clientInitiated в манифесте). Леджер SDD: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git). **Следующая сессия: войти в worktree `.worktrees/quiz`, продолжить батч 2 = Tasks 4–6** по тому же леджеру.
 
 **Состояние фазы 1 — ЗАКРЫТА.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP), **OAuth-срез (Google login + POST /rooms + REGISTERED-токены без guest-cap, контракт 1.4.0)** — реализованы и слиты в `main`; 2026-09-09 сверкой критериев подтверждено закрытие фазы целиком (включая запечатывание лога REQ-RT-016 — оно вошло в event-commit срез). Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -24,7 +25,7 @@
 
 ## Следующее действие
 
-**Исполнить план Quiz-среза** — `docs/sessions/2026-09-09-quiz-implementation-plan.md` (14 задач, TDD, каждая с REQ для ревью; спека рядом — `2026-09-09-quiz-module-design.md`). Способ — **subagent-driven** (свежий сабагент на задачу + двухстадийное ревью), решение владельца 2026-09-09; старт — новой сессией (правило «новый срез = новая сессия»). Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (e2e — на fake-провайдере; design §10; действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже (юрист до первого события с посторонними/призами).
+**Исполнить план Quiz-среза батчами по 3 задачи, каждый батч — новая сессия** (правило владельца 2026-09-09) — план `docs/sessions/2026-09-09-quiz-implementation-plan.md`, спека `2026-09-09-quiz-module-design.md`, леджер `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md`. Батч 1 (Tasks 1–3, SDK: контракт 1.5.0, join-role, clientInitiated) — сделан, ревью чистые. **Следующий батч 2 = Tasks 4–6** (SDK рантайм-контракт → APP_MANIFESTS seam → app-runtime диспетчер). Работа только в worktree `.worktrees/quiz` (ветка `quiz`); мердж в main — после Task 14 (финальное ревью всего среза), не между батчами. Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -117,7 +118,7 @@
 
 ## Осталось недоделанным
 
-- **Quiz-срез (фаза 2) спроектирован и спланирован, но не исполнен** — исполнение subagent-driven в новой сессии (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
+- **Quiz-срез (фаза 2) исполняется батчами** — батч 1 (Tasks 1–3) сделан, батчи 2–5 (Tasks 4–14) впереди, каждый новой сессией (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
