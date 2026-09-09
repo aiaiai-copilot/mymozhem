@@ -32,3 +32,6 @@ coverage/
 .turbo/
 playwright-report/
 test-results/
+
+# Worktrees
+.worktrees/
