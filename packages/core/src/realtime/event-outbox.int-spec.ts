@@ -39,6 +39,7 @@ const TEST_APP: AppManifest = {
         additionalProperties: true,
       },
       visibility: 'public',
+      clientInitiated: true,
     },
   },
 };

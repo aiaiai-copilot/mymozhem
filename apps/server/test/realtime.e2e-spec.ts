@@ -53,14 +53,17 @@ const TEST_APP: AppManifest = {
     'note.posted': {
       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
       visibility: 'public',
+      clientInitiated: true,
     },
     'round.hinted': {
       schema: { type: 'object', properties: { hint: { type: 'string' } }, required: ['hint'] },
       visibility: 'organizer',
+      clientInitiated: true,
     },
     'secret.recorded': {
       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
       visibility: 'module-private',
+      clientInitiated: true,
     },
   },
 };

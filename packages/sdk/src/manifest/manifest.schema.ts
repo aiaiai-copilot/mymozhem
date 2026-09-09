@@ -26,10 +26,13 @@ export const contractRangeSchema = z
     message: 'contract range must be bounded above (it must not admit a contract major that does not exist yet)',
   });
 
-// Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2).
+// Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2). clientInitiated
+// (фаза 2): только типы с true открыты для клиентского publish; производные типы
+// (эмиссия модуля, actorId=null) клиенту закрыты — гейт в app-runtime диспетчере.
 export const manifestEventSchema = z.strictObject({
   schema: jsonSchemaObjectSchema,
   visibility: visibilitySchema,
+  clientInitiated: z.boolean(),
 });
 
 // The manifest (design §5). strictObject: an unknown field is refused rather than
