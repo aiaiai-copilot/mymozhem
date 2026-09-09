@@ -14,7 +14,7 @@ import {
   imports: [
     PrismaModule,
     HealthModule,
-    AppRegistryModule,
+    AppRegistryModule.register([]),
     RoomModule,
     IdentityModule,
     MembershipModule,

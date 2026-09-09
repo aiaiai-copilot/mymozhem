@@ -105,9 +105,9 @@ describe('event-commit read-path (REQ-CTR-008/009)', () => {
 });
 
 describe('AppRegistryModule', () => {
-  it('provides AppRegistryService with an empty registry by default', async () => {
+  it('provides AppRegistryService with an empty registry when composition root registers none', async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [AppRegistryModule],
+      imports: [AppRegistryModule.register([])],
     }).compile();
     const svc = moduleRef.get(AppRegistryService);
     const { appId, manifestVersion } = validManifests[0];
