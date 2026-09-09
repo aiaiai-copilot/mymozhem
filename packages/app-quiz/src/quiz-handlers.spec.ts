@@ -19,6 +19,7 @@ const ORG = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const P1 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 const P2 = 'a3a8d3e1-9e5b-4f1c-8a2b-3c4d5e6f7081';
 const P3 = 'b4b9e4f2-af6c-402d-9b3c-4d5e6f708192';
+const P4 = 'c5caf503-b07d-413e-ac4d-5e6f708192a3';
 
 const T0 = '2026-09-09T12:00:00.000Z';
 
@@ -294,7 +295,7 @@ describe('handleQuizPublish / game.finish', () => {
   it('computes dense-rank standings (1,2,2,3) sorted by total desc', async () => {
     const state: QuizState = {
       ...initialQuizState(),
-      totals: { [P1]: 100, [P2]: 50, [P3]: 50 },
+      totals: { [P1]: 100, [P2]: 50, [P3]: 50, [P4]: 30 },
     };
     const commits = (await finish({ state })) as AppCommit[];
     expect(commits).toEqual([
@@ -306,6 +307,7 @@ describe('handleQuizPublish / game.finish', () => {
             { actorId: P1, total: 100, place: 1 },
             { actorId: P2, total: 50, place: 2 },
             { actorId: P3, total: 50, place: 2 },
+            { actorId: P4, total: 30, place: 3 },
           ],
         },
         visibility: 'public',

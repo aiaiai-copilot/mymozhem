@@ -130,15 +130,16 @@ function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppCommit[] {
     throw new AppRejection('ROUND_NOT_OPEN', 'игра уже завершена');
   }
   // Плотный ранг (1,2,2,3): равные total делят место, следующее отличное
-  // значение получает предыдущее место + 1.
+  // значение получает непосредственно следующее место (не index + 1 — это был
+  // бы competition ranking 1,2,2,4).
   const sorted = Object.entries(ctx.state.totals)
     .map(([actorId, total]) => ({ actorId, total }))
     .sort(byTotalDescThenActor);
   let place = 0;
   let previousTotal: number | undefined;
-  const standings = sorted.map((entry, index) => {
+  const standings = sorted.map((entry) => {
     if (previousTotal === undefined || entry.total !== previousTotal) {
-      place = index + 1;
+      place += 1;
       previousTotal = entry.total;
     }
     return { ...entry, place };
