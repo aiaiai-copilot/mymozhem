@@ -1,8 +1,8 @@
 # HANDOFF
 
-**Date:** 2026-09-09 (четвёртая сессия дня: **Quiz-срез, батч 2 из 5 исполнен** — Tasks 4–6 плана `docs/sessions/2026-09-09-quiz-implementation-plan.md` сделаны и прошли двухстадийное ревью; правило владельца: **батчи по 3 задачи, каждый батч — новая сессия**)
-**Branch:** `main` (0 коммитов впереди `origin/main` — **push выполнен владельцем 2026-09-09**, вся фаза 1 + дизайн/план Quiz-среза + батч-1 handoff на origin; рабочее дерево чистое).
-**Активный worktree среза:** `.worktrees/quiz` (ветка `quiz`, от a75346e, НЕ на origin) — 6 коммитов: батч 1 (`7112534` контракт 1.5.0 + 7 wire-кодов, `eafee47` join-request role, `2d4c39c` clientInitiated) + батч 2 (`4f994ff` рантайм-контракт SDK: AppRuntimeModule/AppCommit/AppHostContext/AppLogEvent/AppRejection; `9a161e4` APP_MANIFESTS-seam — AppRegistryModule.register, global, fail-closed; `13d5d0e` app-runtime диспетчер: командный хост, replay-проекция, per-room сериализация, гейты SPECTATOR/clientInitiated/пин). Леджер SDD: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git). **Следующая сессия: войти в worktree `.worktrees/quiz`, продолжить батч 3 = Tasks 7–9** по тому же леджеру.
+**Date:** 2026-09-09 (пятая сессия дня: **Quiz-срез, батч 3 из 5 исполнен** — Tasks 7–9 плана `docs/sessions/2026-09-09-quiz-implementation-plan.md` сделаны и прошли двухстадийное ревью; правило владельца: **батчи по 3 задачи, каждый батч — новая сессия**)
+**Branch:** `main` (0 коммитов впереди `origin/main` — push выполнен владельцем 2026-09-09; рабочее дерево чистое).
+**Активный worktree среза:** `.worktrees/quiz` (ветка `quiz`, от a75346e, НЕ на origin) — 10 коммитов: батч 1 (`7112534` контракт 1.5.0 + 7 wire-кодов, `eafee47` join-request role, `2d4c39c` clientInitiated) + батч 2 (`4f994ff` рантайм-контракт SDK; `9a161e4` APP_MANIFESTS-seam; `13d5d0e` app-runtime диспетчер) + батч 3 (`e376385` gateway→диспетчер + passthrough e2e; `9036b96` join с ролью spectator; `a0002fa` **erratum нейминга: события квиза dotted-lowercase — `question.opened`…**; `5cf1df7` пакет app-quiz: манифест, appSettings, 7 типов). Леджер SDD: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git). **Следующая сессия: войти в worktree `.worktrees/quiz`, продолжить батч 4 = Tasks 10–12** (редьюсер/состояние квиза; handlers команд + скоринг + анти-бот; wiring квиза в composition root) по тому же леджеру.
 
 **Состояние фазы 1 — ЗАКРЫТА.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP), **OAuth-срез (Google login + POST /rooms + REGISTERED-токены без guest-cap, контракт 1.4.0)** — реализованы и слиты в `main`; 2026-09-09 сверкой критериев подтверждено закрытие фазы целиком (включая запечатывание лога REQ-RT-016 — оно вошло в event-commit срез). Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -25,7 +25,7 @@
 
 ## Следующее действие
 
-**Исполнить план Quiz-среза батчами по 3 задачи, каждый батч — новая сессия** (правило владельца 2026-09-09) — план `docs/sessions/2026-09-09-quiz-implementation-plan.md`, спека `2026-09-09-quiz-module-design.md`, леджер `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md`. Батч 1 (Tasks 1–3, SDK: контракт 1.5.0, join-role, clientInitiated) и батч 2 (Tasks 4–6: рантайм-контракт SDK, APP_MANIFESTS-seam, app-runtime диспетчер) — сделаны, ревью чистые. **Следующий батч 3 = Tasks 7–9** (core: gateway на диспетчер + passthrough в realtime e2e; membership join с ролью spectator; app-quiz пакет и манифест). Работа только в worktree `.worktrees/quiz` (ветка `quiz`); мердж в main — после Task 14 (финальное ревью всего среза), не между батчами. Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже.
+**Исполнить план Quiz-среза батчами по 3 задачи, каждый батч — новая сессия** (правило владельца 2026-09-09) — план `docs/sessions/2026-09-09-quiz-implementation-plan.md`, спека `2026-09-09-quiz-module-design.md`, леджер `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md`. Батчи 1–3 (Tasks 1–9) сделаны, ревью чистые. **Следующий батч 4 = Tasks 10–12** (app-quiz: состояние+редьюсер; handlers команд со скорингом и анти-ботом REQ-RT-013; wiring квиза в composition root — `AppRuntimeModule.register([quizModule])` и APP_MANIFESTS). **Внимание: после erratum `a0002fa` имена событий в плане/дизайне — dotted-lowercase (`question.opened`, `answer.submitted`, `question.closed`, `game.finish`, `answer.accepted`, `question.revealed`, `game.finished`); TS-идентификаторы `*Payload` остались camelCase.** Работа только в worktree `.worktrees/quiz` (ветка `quiz`); мердж в main — после Task 14 (финальное ревью всего среза), не между батчами. Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -118,35 +118,45 @@
 
 ## Осталось недоделанным
 
-- **Quiz-срез (фаза 2) исполняется батчами** — батчи 1–2 (Tasks 1–6) сделаны, батчи 3–5 (Tasks 7–14) впереди, каждый новой сессией (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
+- **Quiz-срез (фаза 2) исполняется батчами** — батчи 1–3 (Tasks 1–9) сделаны, батчи 4–5 (Tasks 10–14) впереди, каждый новой сессией (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
 
-## Session 2026-09-09 (четвёртая: Quiz-срез, батч 2 — Tasks 4–6)
+## Session 2026-09-09 (пятая: Quiz-срез, батч 3 — Tasks 7–9)
 
-*(Блоки сессий «вторая» (дизайн+план) и «третья» (батч 1) вырезаны — их работа в коммитах; восстановимо через `git show a80fe90:HANDOFF.md` и `git show bdc8e20:HANDOFF.md`.)*
+*(Блоки сессий «вторая»–«четвёртая» вырезаны — их работа в коммитах; восстановимо через `git show a80fe90:HANDOFF.md`, `git show bdc8e20:HANDOFF.md`, `git show 0ce12a8:HANDOFF.md`.)*
 
 ### Что сделано
 
-- **Task 4 (SDK, `4f994ff`):** рантайм-контракт app-модуля — `packages/sdk/src/app-runtime/`: `AppRuntimeModule<S>` (initialState/reduce/handlePublish), `appCommitSchema` (actor: publisher|server), `AppLogEvent`/`AppHostContext` (recordedAt/now — ISO-строки, REQ-CTR-002), `AppRejection extends ContractError`. Ревью чистое; отклонение: `core.round.opened` убран из invalid-shortName кейсов (валидный dotted shortName, reviewer подтвердил).
-- **Task 5 (core, `9a161e4`):** APP_MANIFESTS-seam — `AppRegistryModule.register(manifests)`, global dynamic; статические импорты убраны из Room/Realtime модулей (статический импорт теперь fail-closed ломает DI); `app.module.ts` → `register([])`. Существующие e2e на `overrideProvider(APP_MANIFESTS)` зелёные без изменений. Отклонение: `describe('AppRegistryModule')` в app-registry.service.spec.ts переведён на `register([])` — reviewer подтвердил сохранность покрытия.
-- **Task 6 (core, `13d5d0e`):** app-runtime командный хост — диспетчер publish→модуль→коммит (`AppRuntimeService.dispatch`), `RoomSerializer` (per-room FIFO, rejection-изоляция, self-cleanup), `AppProjectionCache` (in-memory, replay из лога при промахе), `AppRuntimeModule.register(modules)` global. Гейты в dispatchLocked: ACTIVE+пин → членство/SPECTATOR → модуль по пину (fail-closed MODULE_UNAVAILABLE) → clientInitiated → payload-схема до вызова модуля → модуль → валидация всех AppCommit до транзакции → одна outbox-транзакция → тёплый fold. Int-spec 12/12 (9 сценариев, 5 разбит на 5a–5d): commit-цепочка+bus, SPECTATOR, производный тип, MODULE_UNAVAILABLE, гейты отказов, отказ модуля до коммита, double-submit гонка, REQ-RT-007 (20 конкурентных, плотные seq от baseline — ruling), replay после invalidateProjection (`observedSums [0,1,3]`).
-- Все три задачи: subagent-driven (haiku/haiku/sonnet implementers, sonnet reviewers), оба RED по ожидаемой причине, полные прогоны зелёные (core unit 213/213, int 156/156, build/typecheck/lint/boundary).
+- **Task 7 (core, `e376385`):** `RealtimeGateway.handlePublish` переведён на `AppRuntimeService.dispatch` (командный хост); из конструктора убраны `EventLogService`/`EventOutbox`; `PublishRequest.visibility` для app-типов не читается (комментарий REQ-CTR-009); realtime e2e получил passthrough-модуль `TEST_APP_MODULE` (семантика фазы 1 явно), `app.module.ts` → `AppRuntimeModule.register([])` до Task 12. Ревью чистое.
+- **Task 8 (core, `9036b96`):** `MembershipService.join` принимает `role?: 'participant'|'spectator'` (REQ-ID-011), маппинг в `SPECTATOR`/`PARTICIPANT` — единственная точка; гард лимита участников обёрнут `role !== 'spectator'` (зритель входит в заполненную комнату, слота не занимает; count-запрос не тронут); join.controller прокидывает `role` из SDK-схемы. Ревью чистое.
+- **Task 9 (app-quiz, `5cf1df7`):** новый пакет `@mymozhem/app-quiz` — `quizSettingsSchema` (correctAnswers без аннотации → fail-safe module-private, REQ-CORE-008), payload-схемы 7 типов, `buildQuizManifest()` (visibility/clientInitiated по дизайн-таблице), контрактный тест через Ajv2020 над зарегистрированными JSON Schema (41/41, boundary зелёный). Ревью чистое.
+- Все три задачи: subagent-driven (sonnet/haiku/haiku implementers после ruling, sonnet reviewers), RED→GREEN задокументировано, полные прогоны зелёные.
 
-### Rulings и deferred minors батча (в леджере)
+### Ruling батча (необходимо знать следующим сессиям)
 
-- Plan-mandated minors (не гейтят): `CacheEntry.lastSeq` пишется, не читается (точка будущей эвикции, shape из плана); pin-mismatch переиспользует `EVENT_UNKNOWN_TYPE` (verbatim из плана); describe-лейбл спека Task 4 без REQ-CTR-005.
-- Новых rulings сверх pre-flight не потребовалось.
+- **Нейминг событий квиза: camelCase → dotted-lowercase** (коммит `a0002fa`). Дизайн-док назвал типы `questionOpened`…, но `shortEventNameSchema` (контракт фазы 1, `sdk/src/events/event-type.ts:27`) принимает только dotted-lowercase — упущение дизайна. Решение: переименовать события (`question.opened`, `answer.submitted`, `question.closed`, `game.finish`, `answer.accepted`, `question.revealed`, `game.finished`), схему контракта НЕ ослаблять (это был бы дрейф для всех приложений ради нейминга одного). План (Tasks 9–14) и дизайн-док обновлены, в дизайне §3 — erratum-плашка. TS-идентификаторы `*Payload` не тронуты. Если владелец против — откат до мерджа дёшев, события ещё не на проводе.
+
+### Санкционированные отклонения батча (прошли ревью, в леджере)
+
+1. **T7:** `AppRuntimeModule.register` получил `imports: [PrismaModule, MembershipModule, RealtimeModule]` — без них Nest DI не разрешает deps `AppRuntimeService`, bootstrap падает (Task 6 не вскрыл: его int-spec строит сервис вручную, минуя контейнер). Цикла нет, reviewer подтвердил минимальность. Удалённый unit-тест «defaults visibility to the type ceiling» — поведение переехало в модуль, покрыто e2e passthrough.
+2. **T8:** обёртка лимит-гарда (см. выше) — бриф говорил «лимит не менять», но его же тест требует входа зрителя в полную комнату; порядок остальных гейтов (exclusion по IP, rate-limit) сохранён, reviewer проверил.
 
 ### Коммиты этой сессии
 
-- На ветке `quiz` (worktree `.worktrees/quiz`): `4f994ff` · `9a161e4` · `13d5d0e` (см. выше). На `main` — только этот handoff.
+- На ветке `quiz` (worktree `.worktrees/quiz`): `e376385` · `9036b96` · `a0002fa` (docs-erratum) · `5cf1df7`. На `main` — только этот handoff.
 
 ### Локальное состояние (не в git)
 
-- Ничего не запущено; тест-контейнеры testcontainers остановлены по завершении прогонов. Side-effects на внешние системы: нет. **Владелец выполнил push между сессиями** — `origin/main` = `bdc8e20`; ветка `quiz` на origin НЕ пушилась.
-- Леджер SDD пополнен строками Task 4/5/6: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git, только на этой машине).
+- Ничего не запущено; тест-контейнеры testcontainers остановлены. Side-effects на внешние системы: нет. Push не выполнялся — решение владельца.
+- Леджер SDD пополнен строками Task 7/8/9 + ruling: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git, только на этой машине).
+
+### Deferred minors батча (триаж финальным ревью среза, не гейтят)
+
+- T7: устаревший комментарий над `createApp` в `realtime.e2e-spec.ts:90` («APP_RUNTIME_MODULES пуст» — уже нет).
+- T8: литеральный `'participant'|'spectator'` в сигнатуре `join` дублирует enum SDK (plan-mandated verbatim; кандидат `JoinRequest['role']`); неограниченный рост spectators — осознанно по дизайну, но в normative-package прямо не прописано (кандидат формулировки при ревизии спеки).
+- T9: `pnpm-lock.yaml` несёт побочную deprecated-аннотацию eslint (пере-резолюция pnpm, безвредно); `question.revealed` — нет негативного кейса `correctIndex` неверного типа (polish).
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (батч 3 = Tasks 7–9 новой сессией; manual smoke OAuth; юрист; CLAUDE.md-указатель).
+- См. одноимённый раздел выше (батч 4 = Tasks 10–12 новой сессией; manual smoke OAuth; юрист; CLAUDE.md-указатель).
