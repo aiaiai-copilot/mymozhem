@@ -142,7 +142,7 @@ export class MembershipService {
   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
   // в один ROOM_JOIN_DENIED (REQ-ID-013).
-  async join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult> {
+  async join(params: { code: string; displayName: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
     if (!this.joinRateLimiter.tryAcquire(params.ip)) {
       throw new JoinRateLimitedError('Join rate limit exceeded');
     }
@@ -177,17 +177,28 @@ export class MembershipService {
     // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
     // Считаются только живые membership (deletedAt: null) — исключённый участник
     // не занимает слот лимита навсегда (REQ-SEC-003, ruling контроллера).
-    const participantCount = await this.prisma.membership.count({
-      where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
-    });
-    if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
-      throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
+    // Лимит — только на участников (REQ-ID-011): зритель слота не занимает и вход
+    // в заполненную участниками комнату ему не закрыт (зритель не нагружает арбитраж).
+    if (params.role !== 'spectator') {
+      const participantCount = await this.prisma.membership.count({
+        where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
+      });
+      if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
+        throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
       const identity = await this.identity.createGuest(name, tx);
       const membership = await tx.membership.create({
-        data: { roomId: room.id, identityId: identity.id, joinIp: params.ip, role: 'PARTICIPANT' },
+        data: {
+          roomId: room.id,
+          identityId: identity.id,
+          joinIp: params.ip,
+          // REQ-ID-011: самоназначение зрителем (фаза 2). Только два wire-значения
+          // (SDK-схема), маппинг здесь — единственная точка.
+          role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
+        },
       });
       return { membership, identity };
     });
