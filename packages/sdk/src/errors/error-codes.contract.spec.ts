@@ -35,8 +35,27 @@ describe('contract errors', () => {
       'OAUTH_EXCHANGE_FAILED',
       'OAUTH_EMAIL_UNVERIFIED',
       'OAUTH_EMAIL_CONFLICT',
+      'MODULE_UNAVAILABLE',
+      'PUBLISH_FORBIDDEN',
+      'ANSWER_TOO_FAST',
+      'ROUND_NOT_OPEN',
+      'ALREADY_ANSWERED',
+      'QUESTION_UNKNOWN',
+      'OPTION_UNKNOWN',
       'INTERNAL_ERROR',
     ]);
+  });
+
+  it.each([
+    'MODULE_UNAVAILABLE',
+    'PUBLISH_FORBIDDEN',
+    'ANSWER_TOO_FAST',
+    'ROUND_NOT_OPEN',
+    'ALREADY_ANSWERED',
+    'QUESTION_UNKNOWN',
+    'OPTION_UNKNOWN',
+  ] as const)('accepts phase-2 code %s', (code) => {
+    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
   });
 
   it('rejects an unknown code', () => {
