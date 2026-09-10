@@ -40,6 +40,8 @@ const ctx = (over: Partial<AppHostContext<QuizState>>): AppHostContext<QuizState
   settings: SETTINGS,
   state: initialQuizState(),
   now: T0,
+  randomInt: () => 0,
+  drawPool: [],
   ...over,
 });
 

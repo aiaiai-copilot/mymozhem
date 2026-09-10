@@ -1,7 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { randomInt } from 'node:crypto';
 import {
   appCommitSchema,
+  appEffectSchema,
   ContractError,
+  normalizePublishResult,
   type AppHostContext,
   type AppLogEvent,
   type AppRuntimeModule,
@@ -113,10 +116,34 @@ export class AppRuntimeService {
       settings: room.appSettings,
       state,
       now: new Date().toISOString(),
+      // Хост-примитивы (design 2026-09-10 §2). drawPool наполняется только для
+      // модулей с capability 'rewards' — в Task 7; до него всегда пуст (ни один
+      // модуль с capability ещё не зарегистрирован).
+      randomInt: (boundExclusive: number) => randomInt(boundExclusive),
+      drawPool: [],
     };
     // 7. Вызов модуля. AppRejection (ContractError) уходит наверх как есть —
     //    до коммита ничего не пишется.
-    const commits = await mod.handlePublish(ctx, params.shortName, params.payload);
+    const result = await mod.handlePublish(ctx, params.shortName, params.payload);
+    const { commits, effects } = normalizePublishResult(result);
+    for (const effect of effects) {
+      const parsed = appEffectSchema.safeParse(effect);
+      if (!parsed.success) {
+        // Баг модуля, не клиента: эффект обязан соответствовать appEffectSchema.
+        throw new ContractError(
+          'EVENT_PAYLOAD_INVALID',
+          `malformed effect from ${mod.appId}@${mod.manifestVersion}: ${parsed.error.message}`,
+        );
+      }
+    }
+    if (effects.length > 0) {
+      // Исполнитель эффектов — Task 7 (AWARD_EFFECT_HANDLER + capability-гейт).
+      // До него любой эффект — типизированный отказ, коммитов не было (fail-closed).
+      throw new ContractError(
+        'CAPABILITY_UNAVAILABLE',
+        'award effects are not executable in this deployment',
+      );
+    }
     for (const commit of commits) {
       const parsed = appCommitSchema.safeParse(commit);
       if (!parsed.success) {

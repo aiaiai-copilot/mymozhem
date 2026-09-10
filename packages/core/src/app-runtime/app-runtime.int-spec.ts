@@ -1,4 +1,4 @@
-import type { AppManifest, AppRuntimeModule, AppHostContext, AppLogEvent, AppCommit } from '@mymozhem/sdk';
+import type { AppManifest, AppRuntimeModule, AppHostContext, AppLogEvent, AppCommit, AppPublishResult } from '@mymozhem/sdk';
 import { AppRejection, ContractError } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
@@ -127,6 +127,32 @@ class TestAppRuntime implements AppRuntimeModule<TestState> {
       return [{ shortName: 'secret.recorded', payload, visibility: 'module-private', actor: 'publisher' }];
     }
     return [];
+  }
+}
+
+// Модуль формы контракта 1.6.0: возвращает AppPublishResult (коммиты + эффекты).
+// До исполнителя эффектов (Task 7) любой эффект обязан давать fail-closed отказ.
+// Композиция над TestAppRuntime: override сужал бы возврат handlePublish.
+class EffectEmittingRuntime implements AppRuntimeModule<TestState> {
+  private readonly base = new TestAppRuntime();
+  readonly appId = this.base.appId;
+  readonly manifestVersion = this.base.manifestVersion;
+  readonly manifest = this.base.manifest;
+
+  constructor(private readonly effect: Record<string, unknown>) {}
+
+  initialState(): TestState {
+    return this.base.initialState();
+  }
+
+  reduce(state: TestState, event: AppLogEvent): TestState {
+    return this.base.reduce(state, event);
+  }
+
+  handlePublish(): AppPublishResult {
+    // `as unknown as`: тест malformed-эффекта намеренно подсовывает невалидный
+    // эффект мимо системы типов — рантайм-валидация диспетчера и проверяется.
+    return { commits: [], effects: [this.effect] as unknown as AppPublishResult['effects'] };
   }
 }
 
@@ -395,5 +421,44 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
     // Холодный промах: состояние пересоздано replay'ем лога — модуль увидел
     // сумму прежних n (1 + 2 = 3), а не initialState и не утечку тёплого кэша.
     expect(testModule.observedSums).toEqual([0, 1, 3]);
+  });
+
+  const runtimeWith = (modules: AppRuntimeModule<TestState>[]) =>
+    new AppRuntimeService(db.prisma, membership, registry, eventLog, outbox, new AppProjectionCache(), modules);
+
+  it('10. валидный эффект до появления исполнителя (Task 7) → CAPABILITY_UNAVAILABLE, коммитов нет (fail-closed)', async () => {
+    const room = await activeRoom();
+    await join(room.id, P1);
+    // identityId — RFC 4122 uuid (P1 с version-ниблом 0 не пройдёт z.uuid()).
+    const effectModule = new EffectEmittingRuntime({
+      kind: 'award.points',
+      identityId: '00000000-0000-4000-8000-000000000001',
+      points: 100,
+      reason: 'test',
+    });
+    const rt = runtimeWith([effectModule]);
+
+    const err = await rt
+      .dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ContractError);
+    expect((err as ContractError).code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(await appEventsOf(room.id)).toHaveLength(0); // до коммита отказ — лог пуст
+  });
+
+  it('11. malformed-эффект модуля → EVENT_PAYLOAD_INVALID (баг модуля, не клиента), коммитов нет', async () => {
+    const room = await activeRoom();
+    await join(room.id, P1);
+    const effectModule = new EffectEmittingRuntime({ kind: 'award.points', identityId: 'not-a-uuid', points: 100 });
+    const rt = runtimeWith([effectModule]);
+
+    const err = await rt
+      .dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ContractError);
+    expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
+    expect(await appEventsOf(room.id)).toHaveLength(0);
   });
 });
