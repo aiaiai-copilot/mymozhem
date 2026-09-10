@@ -1,10 +1,12 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
+import { ContractError } from '@mymozhem/sdk';
 import { MembershipError } from '../membership/membership.errors';
 import { AuthError } from '../auth/auth.errors';
 import { OAuthError } from '../oauth/oauth.errors';
 import { RoomError } from '../room/room.errors';
+import { RealtimeError } from '../realtime/realtime.errors';
 
 // Единственная точка маппинга ошибка → HTTP (design §5): контроллеры статусов не знают.
 // Наружу — ровно {code} (REQ-SEC-006); полное исключение уходит только в серверный лог.
@@ -31,6 +33,12 @@ const STATUS_BY_WIRE_CODE = {
   OAUTH_EMAIL_CONFLICT: 409,
   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
   ROOM_ORGANIZER_NOT_REGISTERED: 403,
+  // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
+  ROOM_NOT_ACTIVE: 409,
+  PRIZE_UNKNOWN: 404,
+  AWARD_UNKNOWN: 404,
+  PRIZE_FUND_EXHAUSTED: 409,
+  REWARD_ALREADY_RESOLVED: 409,
   INTERNAL_ERROR: 500,
 } as const;
 
@@ -77,6 +85,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
       // Покрытие частичное (design §11): по HTTP в этом срезе достижим только
       // ROOM_ORGANIZER_NOT_REGISTERED; прочие коды — INTERNAL_ERROR с error-логом.
       return exception.code === 'ROOM_ORGANIZER_NOT_REGISTERED' ? exception.code : 'INTERNAL_ERROR';
+    }
+    // Ошибки контракта с wire-паритетом кода (rewards ф.3 и далее): класс-
+    // специфичные ветки выше сохраняют свои правила свёртки; сюда попадают
+    // ContractError'ы, коды которых сознательно добавлены в STATUS_BY_WIRE_CODE.
+    if (exception instanceof ContractError && exception.code in STATUS_BY_WIRE_CODE) {
+      return exception.code as WireCode;
+    }
+    // RoomNotActiveError (createPrize, rewards ф.3) — RealtimeError, НЕ ContractError:
+    // симметричная ветка паритета. Blast radius ровно ROOM_NOT_ACTIVE — единственный
+    // realtime-код в STATUS_BY_WIRE_CODE; прочие падают в INTERNAL_ERROR ниже.
+    if (exception instanceof RealtimeError && exception.code in STATUS_BY_WIRE_CODE) {
+      return exception.code as WireCode;
     }
     if (exception instanceof ZodError) return 'REQUEST_INVALID';
     // Prisma-сырьё (включая P2010+SQLSTATE 22P02 uuid-syntax — parked minor): типизируем,

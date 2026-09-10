@@ -30,6 +30,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@nestjs/platform-fastify": "^11.0.0",
     "@nestjs/testing": "^11.0.0",
     "@testcontainers/postgresql": "^12.0.4",
     "@types/jest": "^29.5.14",
