@@ -24,10 +24,13 @@ export const validManifests: AppManifest[] = [
           additionalProperties: false,
         },
         visibility: 'module-private',
+        clientInitiated: true,
       },
+      // Производный тип (эмиссия модуля): клиенту закрыт (design 2026-09-09 §2).
       'round.opened': {
         schema: { type: 'object', properties: {}, additionalProperties: false },
         visibility: 'public',
+        clientInitiated: false,
       },
     },
   },
@@ -62,21 +65,28 @@ export const invalidManifestCases: { name: string; value: unknown }[] = [
     name: 'event short name would forge a namespace',
     value: {
       ...validManifests[0],
-      events: { 'Bad.Key!': { schema: { type: 'object' }, visibility: 'public' } },
+      events: { 'Bad.Key!': { schema: { type: 'object' }, visibility: 'public', clientInitiated: true } },
     },
   },
   {
     name: 'event declares an unknown visibility ceiling',
     value: {
       ...validManifests[0],
-      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'secret' } },
+      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'secret', clientInitiated: true } },
     },
   },
   {
     name: 'event definition misses its visibility ceiling (REQ-CTR-009 makes it mandatory)',
     value: {
       ...validManifests[0],
-      events: { 'answer.submitted': { schema: { type: 'object' } } },
+      events: { 'answer.submitted': { schema: { type: 'object' }, clientInitiated: true } },
+    },
+  },
+  {
+    name: 'event definition misses clientInitiated (design 2026-09-09 §2 makes it mandatory)',
+    value: {
+      ...validManifests[0],
+      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'public' } },
     },
   },
   {

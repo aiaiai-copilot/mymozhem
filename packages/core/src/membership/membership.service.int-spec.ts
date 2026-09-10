@@ -187,6 +187,46 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     expect(result.membership.role).toBe('PARTICIPANT');
   });
 
+  it('join with role spectator creates SPECTATOR membership (REQ-ID-011)', async () => {
+    const room = await roomService.create(ORG);
+    const { membership } = await makeMembership().join({
+      code: room.code,
+      displayName: 'Зритель',
+      ip: '10.0.0.9',
+      role: 'spectator',
+    });
+    expect(membership.role).toBe('SPECTATOR');
+  });
+
+  it('spectator does not consume the participant limit (REQ-ID-011)', async () => {
+    const room = await roomService.create(ORG);
+    const service = makeMembership({ participantLimit: 1 });
+    // Комната заполнена до лимита участниками (существующий харнесс лимита).
+    await service.join({ code: room.code, displayName: 'Игрок', ip: IP });
+    const spectator = await service.join({
+      code: room.code,
+      displayName: 'Зритель',
+      ip: IP2,
+      role: 'spectator',
+    });
+    expect(spectator.membership.role).toBe('SPECTATOR');
+    const err = await service
+      .join({ code: room.code, displayName: 'Лишний', ip: '10.0.0.10' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomParticipantLimitReachedError);
+    expect((err as RoomParticipantLimitReachedError).code).toBe('ROOM_PARTICIPANT_LIMIT_REACHED');
+  });
+
+  it('default join (no role) stays PARTICIPANT (regression)', async () => {
+    const room = await roomService.create(ORG);
+    const { membership } = await makeMembership().join({
+      code: room.code,
+      displayName: 'Игрок',
+      ip: IP,
+    });
+    expect(membership.role).toBe('PARTICIPANT');
+  });
+
   it('refuses the (limit+1)-th attempt from one IP with JOIN_RATE_LIMITED', async () => {
     const room = await roomService.create(ORG);
     const service = makeMembership({ rateLimit: 2 });

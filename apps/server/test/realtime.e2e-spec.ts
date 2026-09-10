@@ -4,9 +4,10 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
 import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
-import { tokenResponseSchema, REALTIME_MESSAGES, type AppManifest } from '@mymozhem/sdk';
+import { tokenResponseSchema, REALTIME_MESSAGES, type AppManifest, type AppRuntimeModule } from '@mymozhem/sdk';
 import {
   APP_MANIFESTS,
+  APP_RUNTIME_MODULES,
   AppRegistryService,
   ConfigurableIoAdapter,
   EventEmitLimiter,
@@ -53,16 +54,32 @@ const TEST_APP: AppManifest = {
     'note.posted': {
       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
       visibility: 'public',
+      clientInitiated: true,
     },
     'round.hinted': {
       schema: { type: 'object', properties: { hint: { type: 'string' } }, required: ['hint'] },
       visibility: 'organizer',
+      clientInitiated: true,
     },
     'secret.recorded': {
       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
       visibility: 'module-private',
+      clientInitiated: true,
     },
   },
+};
+
+// Passthrough-модуль фазы-1 семантики (design 2026-09-09 §7): коммитит клиентский
+// вход как есть, visibility — декларированный потолок типа.
+const TEST_APP_MODULE: AppRuntimeModule = {
+  appId: TEST_APP.appId,
+  manifestVersion: TEST_APP.manifestVersion,
+  manifest: TEST_APP,
+  initialState: () => ({}),
+  reduce: (state) => state,
+  handlePublish: (_ctx, shortName, payload) => [
+    { shortName, payload, visibility: TEST_APP.events[shortName]!.visibility, actor: 'publisher' as const },
+  ],
 };
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -83,6 +100,8 @@ async function createApp(envOverrides: Record<string, string> = {}): Promise<Nes
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(APP_MANIFESTS)
       .useValue([TEST_APP])
+      .overrideProvider(APP_RUNTIME_MODULES)
+      .useValue([TEST_APP_MODULE])
       .compile();
     const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.register(fastifyCookie);

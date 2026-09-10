@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '../config/config.module';
 import { PrismaModule } from '../prisma/prisma.module';
-import { AppRegistryModule } from '../app-registry/app-registry.module';
 import { AuthModule } from '../auth/auth.module';
 import { MembershipModule } from '../membership/membership.module';
 import { APP_CONFIG } from '../config/config.tokens';
@@ -21,7 +20,7 @@ import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
 // «действие + лог» (REQ-DEV-008) не меняется. Единственный модуль ядра, импортирующий
 // socket.io (REQ-RT-006 + boundary-правило).
 @Module({
-  imports: [ConfigModule, AppRegistryModule, PrismaModule, AuthModule, MembershipModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, MembershipModule],
   providers: [
     {
       provide: EventEmitLimiter,

@@ -21,7 +21,8 @@ export type AppDefinition = {
   contractRange?: string;
   appSettings: z.ZodType;
   // Short names; the core prefixes the namespace itself (design §4.1).
-  events: Record<string, { schema: z.ZodType; visibility: Visibility }>;
+  // clientInitiated — обязательное явное решение по каждому типу (fail-safe = false).
+  events: Record<string, { schema: z.ZodType; visibility: Visibility; clientInitiated: boolean }>;
 };
 
 type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
@@ -118,7 +119,7 @@ export const defineApp = (definition: AppDefinition): AppManifest => {
   const events = Object.fromEntries(
     Object.entries(definition.events).map(([shortName, event]) => [
       shortName,
-      { schema: toRegisteredSchema(event.schema), visibility: event.visibility },
+      { schema: toRegisteredSchema(event.schema), visibility: event.visibility, clientInitiated: event.clientInitiated },
     ]),
   );
 

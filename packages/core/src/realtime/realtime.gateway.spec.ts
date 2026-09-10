@@ -33,8 +33,7 @@ type Ack = (value: unknown) => void;
 function makeGateway(overrides: {
   membership?: { findActiveMembership: jest.Mock; onAccessRevoked?: jest.Mock };
   prisma?: { room: { findUnique: jest.Mock }; logEvent: { findMany: jest.Mock } };
-  eventLog?: { commitAppEvent: jest.Mock };
-  outbox?: { run: jest.Mock };
+  appRuntime?: { dispatch: jest.Mock };
   registry?: SubscriptionRegistry;
   tokens?: { verifyAccessToken: jest.Mock };
   reconnectLimiter?: { tryAcquire: jest.Mock };
@@ -47,8 +46,7 @@ function makeGateway(overrides: {
     room: { findUnique: jest.fn().mockResolvedValue({ appId: 'quiz', manifestVersion: 1, appSettings: null }) },
     logEvent: { findMany: jest.fn().mockResolvedValue([]) },
   };
-  const eventLog = overrides.eventLog ?? { commitAppEvent: jest.fn().mockResolvedValue({}) };
-  const outbox = overrides.outbox ?? { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
+  const appRuntime = overrides.appRuntime ?? { dispatch: jest.fn().mockResolvedValue(undefined) };
   const tokens = overrides.tokens ?? { verifyAccessToken: jest.fn().mockReturnValue(GUEST_CLAIMS) };
   const reconnectLimiter = overrides.reconnectLimiter ?? { tryAcquire: jest.fn().mockReturnValue(true) };
   const gateway = new RealtimeGateway(
@@ -56,15 +54,14 @@ function makeGateway(overrides: {
     prisma as never,
     membership as never,
     { getManifest: jest.fn().mockReturnValue(undefined), getEventDefinition: jest.fn().mockReturnValue(undefined) } as never,
-    eventLog as never,
-    outbox as never,
+    appRuntime as never,
     new ProjectionService(),
     overrides.registry ?? new SubscriptionRegistry(),
     { subscribe: jest.fn(), publish: jest.fn() } as never,
     reconnectLimiter as never,
     {} as never,
   );
-  return { gateway, membership, prisma, eventLog, outbox, tokens, reconnectLimiter };
+  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter };
 }
 
 const ackOf = () => {
@@ -208,61 +205,53 @@ describe('RealtimeGateway.handlePublish', () => {
     expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
   });
 
-  it('core namespace is closed for clients (EVENT_UNKNOWN_TYPE)', async () => {
-    const { gateway } = subscribedGateway();
+  it('core namespace is closed for clients (EVENT_UNKNOWN_TYPE), dispatch не вызывается', async () => {
+    const appRuntime = { dispatch: jest.fn().mockResolvedValue(undefined) };
+    const { gateway } = subscribedGateway({ appRuntime });
     const { ack, calls } = ackOf();
     await gateway.handlePublish(fakeSocket() as never, { type: 'core.room.completed', payload: {} }, ack);
     expect(calls).toEqual([{ code: 'EVENT_UNKNOWN_TYPE' }]);
+    expect(appRuntime.dispatch).not.toHaveBeenCalled();
   });
 
-  it('maps commit-chain errors via the mapping table (REQ-SEC-006)', async () => {
+  // Командный хост (design 2026-09-09 §2): gateway диспетчит app-publish в рантайм.
+  // roomId — из подписки, actorId — из claims (REQ-RT-009); request.visibility
+  // здесь не читается — набор и видимость коммитов определяет модуль (REQ-CTR-009).
+  it('dispatches app publish with roomId from the subscription, actorId from claims (REQ-RT-009)', async () => {
+    const appRuntime = { dispatch: jest.fn().mockResolvedValue(undefined) };
+    const { gateway } = subscribedGateway({ appRuntime });
+    const { ack, calls } = ackOf();
+    await gateway.handlePublish(
+      fakeSocket() as never,
+      { type: 'quiz.answer.submitted', payload: { c: 1 }, visibility: 'public' },
+      ack,
+    );
+    expect(calls).toEqual([{ ok: true }]);
+    expect(appRuntime.dispatch).toHaveBeenCalledWith({
+      roomId: SUBSCRIBED_ROOM,
+      actorId: GUEST_CLAIMS.sub,
+      appId: 'quiz',
+      shortName: 'answer.submitted',
+      payload: { c: 1 },
+    });
+  });
+
+  it('отказ диспетчера (AppRejection) маппится на ack {code}', async () => {
+    const { AppRejection } = await import('@mymozhem/sdk');
+    const appRuntime = { dispatch: jest.fn().mockRejectedValue(new AppRejection('PUBLISH_FORBIDDEN', 'denied by module')) };
+    const { gateway } = subscribedGateway({ appRuntime });
+    const { ack, calls } = ackOf();
+    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 } }, ack);
+    expect(calls).toEqual([{ code: 'PUBLISH_FORBIDDEN' }]);
+  });
+
+  it('maps dispatcher infra errors via the mapping table (REQ-SEC-006)', async () => {
     const { RoomNotActiveError } = await import('./realtime.errors');
-    const outbox = { run: jest.fn().mockRejectedValue(new RoomNotActiveError('sealed')) };
-    const { gateway } = subscribedGateway({ outbox });
+    const appRuntime = { dispatch: jest.fn().mockRejectedValue(new RoomNotActiveError('sealed')) };
+    const { gateway } = subscribedGateway({ appRuntime });
     const { ack, calls } = ackOf();
     await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 } }, ack);
     expect(calls).toEqual([{ code: 'ROOM_LOG_SEALED' }]);
-  });
-
-  it('commits with actorId from claims, roomId from the subscription (REQ-RT-009)', async () => {
-    const eventLog = { commitAppEvent: jest.fn().mockResolvedValue({}) };
-    const outbox = { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
-    const { gateway } = subscribedGateway({ eventLog, outbox });
-    const { ack, calls } = ackOf();
-    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 }, visibility: 'public' }, ack);
-    expect(calls).toEqual([{ ok: true }]);
-    expect(eventLog.commitAppEvent).toHaveBeenCalledWith(
-      'tx', SUBSCRIBED_ROOM, 'answer.submitted', { c: 1 }, 'public', GUEST_CLAIMS.sub,
-    );
-  });
-
-  it('defaults visibility to the type ceiling when omitted (design §0.6)', async () => {
-    const eventLog = { commitAppEvent: jest.fn().mockResolvedValue({}) };
-    const outbox = { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
-    const appRegistry = {
-      getManifest: jest.fn(),
-      getEventDefinition: jest.fn().mockReturnValue({ visibility: 'organizer', schema: {}, version: 1 }),
-    };
-    const registry = new SubscriptionRegistry();
-    registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: SUBSCRIBED_ROOM, level: 'public' });
-    const gateway = new RealtimeGateway(
-      { verifyAccessToken: jest.fn() } as never,
-      { room: { findUnique: jest.fn().mockResolvedValue({ manifestVersion: 1 }) }, logEvent: { findMany: jest.fn() } } as never,
-      { findActiveMembership: jest.fn() } as never,
-      appRegistry as never,
-      eventLog as never,
-      outbox as never,
-      new ProjectionService(),
-      registry,
-      { subscribe: jest.fn(), publish: jest.fn() } as never,
-      { tryAcquire: jest.fn() } as never,
-      {} as never,
-    );
-    const { ack } = ackOf();
-    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 } }, ack);
-    expect(eventLog.commitAppEvent).toHaveBeenCalledWith(
-      'tx', SUBSCRIBED_ROOM, 'answer.submitted', { c: 1 }, 'organizer', GUEST_CLAIMS.sub,
-    );
   });
 });
 

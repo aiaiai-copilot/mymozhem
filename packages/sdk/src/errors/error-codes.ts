@@ -34,6 +34,14 @@ export const CONTRACT_ERROR_CODES = [
   'OAUTH_EXCHANGE_FAILED',
   'OAUTH_EMAIL_UNVERIFIED',
   'OAUTH_EMAIL_CONFLICT',
+  // Quiz-срез (фаза 2, design 2026-09-09): диспетчер app-runtime и отказы модуля.
+  'MODULE_UNAVAILABLE',
+  'PUBLISH_FORBIDDEN',
+  'ANSWER_TOO_FAST',
+  'ROUND_NOT_OPEN',
+  'ALREADY_ANSWERED',
+  'QUESTION_UNKNOWN',
+  'OPTION_UNKNOWN',
   'INTERNAL_ERROR',
 ] as const;
 

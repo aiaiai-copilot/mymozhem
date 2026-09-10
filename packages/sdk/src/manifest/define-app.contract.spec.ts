@@ -20,6 +20,7 @@ const defineQuiz = () =>
       'answer.submitted': {
         schema: z.object({ roundId: z.string(), choice: z.number().int() }),
         visibility: 'module-private',
+        clientInitiated: true,
       },
     },
   });
@@ -93,6 +94,20 @@ describe('defineApp', () => {
     expect(manifest.events['answer.submitted'].visibility).toBe('module-private');
   });
 
+  it('carries clientInitiated into the registered manifest', () => {
+    const manifest = defineApp({
+      appId: 'flag-app',
+      manifestVersion: 1,
+      appSettings: z.strictObject({ label: z.string() }),
+      events: {
+        'note.posted': { schema: z.strictObject({ n: z.number() }), visibility: 'public', clientInitiated: true },
+        'note.derived': { schema: z.strictObject({ n: z.number() }), visibility: 'public', clientInitiated: false },
+      },
+    });
+    expect(manifest.events['note.posted']?.clientInitiated).toBe(true);
+    expect(manifest.events['note.derived']?.clientInitiated).toBe(false);
+  });
+
   it('snapshots appSettings with visibility annotations intact (ADR-008)', () => {
     const manifest = defineQuiz();
     expect(readPropertyVisibility(manifest.appSettings, 'title')).toBe('public');
@@ -123,6 +138,7 @@ describe('defineApp', () => {
           'answer.submitted': {
             schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b),
             visibility: 'module-private',
+            clientInitiated: true,
           },
         },
       }),

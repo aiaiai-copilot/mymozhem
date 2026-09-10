@@ -46,6 +46,7 @@ const TEST_APP: AppManifest = {
         additionalProperties: true,
       },
       visibility: 'public',
+      clientInitiated: true,
     },
     'secret.recorded': {
       schema: {
@@ -55,6 +56,7 @@ const TEST_APP: AppManifest = {
         additionalProperties: false,
       },
       visibility: 'module-private',
+      clientInitiated: true,
     },
   },
 };
