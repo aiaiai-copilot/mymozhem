@@ -5,7 +5,11 @@ import {
   ContractError,
   coreEventType,
   isWithinCeiling,
+  REWARDS_EVENTS,
+  rewardsEventType,
   type CoreEventName,
+  type EventTypeDefinition,
+  type RewardsEventName,
   type Visibility,
 } from '@mymozhem/sdk';
 import { APP_CONFIG } from '../config/config.tokens';
@@ -80,18 +84,42 @@ export class EventLogService {
     payload: unknown = {},
     actorId: string | null = null,
   ): Promise<LogEvent> {
-    const definition = CORE_EVENTS[name];
+    return this.commitStaticEvent(tx, roomId, coreEventType(name), CORE_EVENTS[name], payload, actorId);
+  }
+
+  // События контура rewards (design 2026-09-10 §2): тот же статический путь, что
+  // core.*, — реестр REWARDS_EVENTS core-owned, клиентский publish закрыт в gateway
+  // (namespace 'rewards' не зарегистрирован как appId → EVENT_UNKNOWN_TYPE).
+  async commitRewardsEvent(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    name: RewardsEventName,
+    payload: unknown = {},
+    actorId: string | null = null,
+  ): Promise<LogEvent> {
+    return this.commitStaticEvent(tx, roomId, rewardsEventType(name), REWARDS_EVENTS[name], payload, actorId);
+  }
+
+  // Общий статический путь core/rewards событий: схема реестра → appendLocked.
+  private async commitStaticEvent(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    type: string,
+    definition: EventTypeDefinition,
+    payload: unknown,
+    actorId: string | null,
+  ): Promise<LogEvent> {
     const parsed = definition.schema.safeParse(payload);
     if (!parsed.success) {
       throw new ContractError(
         'EVENT_PAYLOAD_INVALID',
-        `payload of ${coreEventType(name)} does not match its core schema`,
+        `payload of ${type} does not match its core schema`,
       );
     }
     return this.appendLocked(
       tx,
       roomId,
-      coreEventType(name),
+      type,
       parsed.data,
       actorId,
       definition.visibility,

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ContractError, validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
@@ -133,5 +134,44 @@ describe('EventLogService.commitCoreEvent', () => {
     expect((await readRoomLog(db.prisma, room.id)).map((e) => e.seq)).toEqual(
       Array.from({ length: N }, (_, i) => i + 1),
     );
+  });
+
+  // commitRewardsEvent — тот же статический путь (commitStaticEvent), реестр
+  // REWARDS_EVENTS (design 2026-09-10 §2).
+  describe('commitRewardsEvent', () => {
+    it('commits reward.awarded with the contract shape', async () => {
+      const room = await rooms.create(ORG);
+      const payload = {
+        awardId: randomUUID(),
+        prizeId: randomUUID(),
+        winnerId: randomUUID(),
+        sourceAppId: 'lottery',
+      };
+      await outbox.run((tx) => eventLog.commitRewardsEvent(tx, room.id, 'reward.awarded', payload));
+
+      const log = await readRoomLog(db.prisma, room.id);
+      expect(log).toHaveLength(1);
+      expect(log[0]).toMatchObject({
+        seq: 1,
+        type: 'rewards.reward.awarded',
+        visibility: 'public',
+        actorId: null,
+        payload,
+        schemaVersion: 1,
+      });
+    });
+
+    it('rejects a payload mismatch with EVENT_PAYLOAD_INVALID and writes nothing', async () => {
+      const room = await rooms.create(ORG);
+      const err = await outbox
+        .run((tx) =>
+          eventLog.commitRewardsEvent(tx, room.id, 'reward.awarded', { awardId: 'not-a-uuid' }),
+        )
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ContractError);
+      expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
+      expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+    });
   });
 });
