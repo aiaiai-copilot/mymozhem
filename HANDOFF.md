@@ -1,10 +1,10 @@
 # HANDOFF
 
-**Date:** 2026-09-10 (девятая сессия: **написан план реализации фазы 3** — `docs/sessions/2026-09-10-rewards-lottery-implementation-plan.md`, 13 задач в 5 батчах; развилки из дизайна §8 решены владельцем: ajv-formats на commit-гейте = Task 1, lint-запрет Math.random = включён в Task 11).
-**Branch:** `main`, впереди origin на 4 коммита (`1bb830c`, `7a32e33` дизайн ф.3, `922fe2c`, `9d45fe2` план ф.3); push — решение владельца; рабочее дерево чистое. Конвейер не запускался — сессия без кода (только docs).
-**Worktree среза:** `.worktrees/quiz` (ветка `quiz`) после мерджа удалён; леджер SDD перенесён в `.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` основного чекаута (не в git, только на этой машине).
+**Date:** 2026-09-10 (десятая сессия: **батч A фазы 3 (Tasks 1-3) исполнен и слит в main** — SDK 1.6.0: ajv-formats на commit-гейте, capabilities манифеста + 7 wire-кодов, AppEffect/AppPublishResult/normalizePublishResult, randomInt/drawPool в AppHostContext, REWARDS_EVENTS, REST DTO rewards, fail-closed CAPABILITY_UNAVAILABLE в диспетчере до Task 7. Гейт 2 снят решением владельца; 10 интерпретаций плана приняты).
+**Branch:** `main` @ `5729fb2`, **синхронизирован с origin** (push b176635..5729fb2 выполнен — решение владельца; ветка `rewards-lottery` тоже на origin); рабочее дерево чистое. Конвейер батча A зелёный: build, lint, boundary-check (553 модуля, 0 нарушений), guardrails, unit (sdk 313 / core 215 / quiz 83), int 161, e2e 58.
+**Worktree среза:** `.worktrees/rewards-lottery` (ветка `rewards-lottery`, после ff-мерджа == main) — СОХРАНЁН для батчей B-E, вход через EnterWorktree по path. Леджер SDD — `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md` основного чекаута (не в git; копия в worktree синхронна на момент мерджа).
 
-**Состояние фаз: фаза 1 ЗАКРЫТА (2026-09-09), фаза 2 (Quiz) ЗАКРЫТА (2026-09-10), фаза 3 — ДИЗАЙН УТВЕРЖДЁН (2026-09-10), реализация заблокирована гейтом 2** (решение владельца в дизайн-сессии: старт реализации — после первого живого события, отдельным решением). Ядро ф.1 (identity, room lifecycle, membership/guest-join/exclusion, realtime полный duplex, event-commit, appSettings, OAuth Google + POST /rooms) и Quiz-срез ф.2 (SDK 1.5.0 рантайм-контракт app-модулей, app-runtime «командный хост» в ядре, пакет `@mymozhem/app-quiz` — манифест, 7 типов событий, чистый редьюсер, скоростная шкала, анти-бот REQ-RT-013, роль SPECTATOR) — реализованы и слиты в `main`. Сверки: `2026-09-09-phase-1-exit-audit.md`, `2026-09-10-phase-2-exit-audit.md`. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фаз: фаза 1 ЗАКРЫТА (2026-09-09), фаза 2 (Quiz) ЗАКРЫТА (2026-09-10), фаза 3 — В РЕАЛИЗАЦИИ: батч A (SDK 1.6.0) слит в main 2026-09-10; гейт 2 снят решением владельца 2026-09-10** (дизайн §0.1 предполагал старт после первого живого события — владелец принял отдельное решение начать). Батчи B-E — новыми сессиями (правило владельца: 3 задачи = новая сессия). Ядро ф.1 (identity, room lifecycle, membership/guest-join/exclusion, realtime полный duplex, event-commit, appSettings, OAuth Google + POST /rooms) и Quiz-срез ф.2 (SDK рантайм-контракт app-модулей, app-runtime «командный хост» в ядре, пакет `@mymozhem/app-quiz` — манифест, 7 типов событий, чистый редьюсер, скоростная шкала, анти-бот REQ-RT-013, роль SPECTATOR) — реализованы и слиты в `main`. Сверки: `2026-09-09-phase-1-exit-audit.md`, `2026-09-10-phase-2-exit-audit.md`. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
@@ -24,7 +24,7 @@
 
 ## Следующее действие
 
-**Следующий срез — исполнение плана фазы 3, батч A (Tasks 1-3: ajv-formats + SDK 1.6.0), новой сессией** (план `docs/sessions/2026-09-10-rewards-lottery-implementation-plan.md`; правило владельца — батчи по 3 задачи, каждый батч новой сессией; worktree `.worktrees/rewards-lottery`, ветка `rewards-lottery`, леджер `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md`). **Старт исполнения — после первого живого события** (гейт 2; проектирование завершено: дизайн + план готовы, дальше только реализация). Развилки плана решены владельцем при его написании (2026-09-10): AJV `format: "uuid"` enforcement — подключить `ajv-formats` (Task 1); lint-запрет `Math.random` в `packages/app-*` — включён (Task 11). Интерпретации плана (10 пунктов) — в его разделе Self-review, к ревью владельцем при старте батча A. **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. **Push на origin — решение владельца** (main впереди origin на 4 коммита). Гейты над фазами — см. раздел ниже.
+**Следующий срез — батч B плана ф.3 (Tasks 4-6: Prisma-схема rewards + миграция с CHECK/частичным индексом, RewardsService, REST-контур rewards), новой сессией** (план `docs/sessions/2026-09-10-rewards-lottery-implementation-plan.md`; worktree `.worktrees/rewards-lottery`, ветка `rewards-lottery` — оба на месте и на origin; леджер `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md` — продолжить, Tasks 1-3 там отмечены complete). Гейт 2 снят (2026-09-10); 10 интерпретаций плана приняты владельцем при старте батча A — ревью при старте B не требуется. Развилки плана решены (ajv-formats — сделано в Task 1; lint-запрет `Math.random` — Task 11). Интерпретация №10: Tasks 10-11 атомарны — батч D не мерджить между ними. **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. Гейты над фазами — см. раздел ниже (юрист открыт; гейт «первое живое событие» для тяжёлых вложений фактически поглощён решением о старте реализации).
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
@@ -57,9 +57,11 @@
 - **`correctAnswers` module-private без аннотации** — fail-safe по умолчанию (REQ-CORE-008); чит-тест ф.2 подтвердил: недоступно ни по одному каналу, включая организатора и replay.
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
-- **Кандидат на решение владельца (из финального ревью ф.2):** AJV warning `unknown format "uuid" ignored` — zod v4 эмитит `format: "uuid"`, stock Ajv 8 без ajv-formats его не принуждает. Для квиза безопасно (uuid-поля только в server-generated событиях); если норма требует enforcement формата на commit-гейте — отдельная задача (ajv-formats или осознанный waiver).
+- ~~AJV warning `unknown format "uuid" ignored`~~ — **закрыто Task 1 батча A** (`420517a`): ajv-formats подключён на commit-гейте, enforcement `format: "uuid"` запинён тестом; invalid-uuid литералов в старых int/e2e-спеках не нашлось (все прогоны зелёные сразу — чистка не потребовалась).
+- **Deferred-миноры батча A (из таск-ревью, триаж на финальном ревью фазы — Batch E):** дубликаты/пустой массив `capabilities` схемой не отсекаются (`.unique()` — при появлении второго capability); ts-jest слабее `tsc -p` (sdk test ≠ проверка типов — sdk build обязателен в гейте); wrapper `randomInt: (b) => randomInt(b)` мог бы быть прямой ссылкой (вкусовщина).
+- **Чистка fail-closed в `asLogEvent` (M-5)** + удаление мёртвой инжекции config (M-2) — пакет косметики realtime (часть про invalid-uuid литералы снята — их нет).
 - **Косметика Quiz-среза (deferred minors, триаж «не гейтят»; полный список — леджер):** неограниченный рост `AppProjectionCache` (per-room записи без эвикции — фаза 4); clamp-ветка скоринга `Math.max(base−k·step,0)` без отдельного теста (провод защищён `points.min(0)`); quiz.e2e-spec.ts:379 мёртвый push closed-ack после проверочного цикла чит-теста; неотписанные live-listeners в чит-тесте; optionIndex-absence в `answer.accepted` проверен по одной ленте из четырёх; устаревший комментарий `realtime.e2e-spec.ts:89-90`; негативный кейс correctIndex неверного типа; литеральная роль `'participant'|'spectator'` в сигнатуре join (кандидат `JoinRequest['role']`); неограниченный рост spectators (кандидат формулировки при ревизии спеки).
-- **Чистка invalid-uuid литералов** в старых int-спеках + fail-closed в `asLogEvent` (M-5) + удаление мёртвой инжекции config (M-2) — пакет косметики realtime.
+- ~~Чистка invalid-uuid литералов~~ (снято Task 1 батча A — литералов нет). Остаток пакета косметики realtime — строкой выше.
 - **Для следующего среза, трогающего configure/app-registry** (из финального ревью appSettings): guard `settings === undefined|null` → `AppSettingsInvalidError`; `ValidateFunction` из `ajv/dist/2020`; race-тест configure-vs-activate с quiz@2; контрактное допущение «settings — не-null JSON value».
 - **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
 - Негативные strictObject-кейсы для ack-схем SDK (минор Task 2); экспорт realtime-фикстур из SDK index — при первом внешнем потребителе.
@@ -97,6 +99,7 @@
 - **Jest CLI:** форма `pnpm --filter @mymozhem/core test:int -- -t "..."` миспарсится — рабочая форма без `--`. Фильтр всегда проверять на >0 матчей. В worktree с говорящим именем testPathPattern матчит путь целиком (см. опыт Quiz-среза).
 - **apps/server e2e резолвит `@mymozhem/core` из dist** — перед `pnpm --filter @mymozhem/server test` обязателен `pnpm build`; core резолвит `@mymozhem/sdk` из dist — после правок SDK `pnpm --filter @mymozhem/sdk build`; то же для `@mymozhem/app-quiz` (server e2e тянет его dist).
 - **Граница app-модулей (Quiz-срез):** `packages/app-*` НЕ импортирует `packages/core` (boundary `app-only-through-sdk`, правило покрывает `packages/app-` generically); `@mymozhem/sdk` — лист. Связывание — только `apps/server` (composition root).
+- **Контракт SDK 1.6.0 (батч A ф.3, `420517a..5729fb2`):** ajv-formats подключён в `AppRegistryService` — `format: "uuid"` принуждается на commit-гейте (невалидный uuid в payload = `EVENT_PAYLOAD_INVALID` до коммита; zod v4 `z.uuid()` требует RFC 9562 version nibble). `handlePublish` может вернуть `{commits, effects}`; старая форма «голый массив» читается `normalizePublishResult` (обратная совместимость, квиз v1 не тронут). **Эффекты fail-closed до Task 7:** любой эффект → `CAPABILITY_UNAVAILABLE` до коммита; `drawPool` в ctx всегда пуст до Task 7. `AppHostContext` += `randomInt` (node:crypto, единственный санкционированный источник случайности, REQ-RWD-011) и `drawPool`. `REWARDS_EVENTS` (reward.awarded/fulfilled/revoked, public, v1, payload — только id) — коммитит ядро (Task 5), не app-модули. `ROOM_NOT_ACTIVE` выведен в `CONTRACT_ERROR_CODES` (интерпретация №7).
 
 ## Отложенные follow-up (не гейтят; полный список с обоснованиями — в леджерах)
 
@@ -111,28 +114,41 @@
 
 ## Осталось недоделанным
 
-- **Следующий срез — батч A плана ф.3 (Tasks 1-3), новой сессией** (см. «Следующее действие»; гейт 2 «первое живое событие» открыт — старт исполнения после события, решение владельца). **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. **Push на origin** — решение владельца (main впереди origin на 4 коммита).
+- **Следующий срез — батч B плана ф.3 (Tasks 4-6), новой сессией** (см. «Следующее действие»; гейт 2 снят 2026-09-10, интерпретации приняты — стартовать можно сразу). **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-09-10 (девятая: план реализации фазы 3 написан)
+## Session 2026-09-10 (десятая: батч A фазы 3 исполнен и слит в main)
 
-*(Блок восьмой сессии (дизайн фазы 3, утверждение по секциям) вырезан — работа в коммитах; восстановимо через `git show 922fe2c:HANDOFF.md`.)*
+*(Блоки восьмой и девятой сессий (дизайн и план фазы 3) вырезаны — работа в коммитах; восстановимо через `git show 922fe2c:HANDOFF.md` и `git show 9d45fe2:HANDOFF.md`.)*
 
 ### Что сделано
 
-- **План реализации фазы 3 написан по superpowers:writing-plans** — `docs/sessions/2026-09-10-rewards-lottery-implementation-plan.md` (3129 строк, 13 задач, батчи A–E по правилу «3 задачи = новая сессия»): A — SDK-дельта 1.6.0 (ajv-formats, capabilities, AppEffect/AppPublishResult, хост-примитивы, REWARDS_EVENTS, REST DTO); B — rewards в ядре (миграция с CHECK + частичным индексом, RewardsService, REST); C — app-runtime (исполнение эффектов, capability-гейт, drawPool) + TTL-свип + app-lottery; D — квиз v2 + composition root + boundary/lint-принуждение; E — e2e квиз-начислений + сверка критериев выхода.
-- **Решения владельца по развилкам дизайна §8** (AskUserQuestion при написании плана): AJV `format: "uuid"` enforcement — подключить `ajv-formats` на commit-гейте (Task 1, waiver отклонён); lint-запрет `Math.random` в `packages/app-*` — включён задачей (Task 11).
-- **Self-review плана пройден** (покрытие дизайна §1–§8, скан плейсхолдеров, консистентность типов — поймана и исправлена одна: сигнатура `executeEffects` несёт `sourceAppId`, диспетчер передаёт appId пиннутого модуля). 10 интерпретаций плана зафиксированы в его разделе Self-review — к ревью владельцем при старте батча A.
-- Исследование швов делегировано двум Explore-агентам (SDK+quiz; ядро) — точные сигнатуры и номера строк вшиты в план; ключевые факты сверены прямыми чтениями (CORE_EVENTS, AppRegistryService/Ajv, HttpExceptionFilter, e2e-хелперы).
+- **Гейт 2 снят решением владельца**, 10 интерпретаций плана (Self-review) приняты без возражений → старт исполнения фазы 3 по superpowers:subagent-driven-development.
+- **Батч A (Tasks 1-3) исполнен** в worktree `.worktrees/rewards-lottery`, каждая задача — TDD с зафиксированным RED→GREEN, двухстадийное ревью (spec + quality) чистое по всем трём:
+  - **Task 1** (`420517a`): ajv-formats в `AppRegistryService` — enforcement `format: "uuid"` на commit-гейте; invalid-uuid литералов в старых спеках не нашлось, чистка не потребовалась.
+  - **Task 2** (`2834c37`): SDK 1.6.0 — `APP_CAPABILITIES`/`appCapabilitySchema`, `capabilities` в манифесте и `defineApp`, 7 wire-кодов (ROOM_NOT_ACTIVE, CAPABILITY_UNAVAILABLE, PRIZE_UNKNOWN, PRIZE_FUND_EXHAUSTED, DRAW_POOL_EMPTY, AWARD_UNKNOWN, REWARD_ALREADY_RESOLVED), fixtures переработаны.
+  - **Task 3** (`5729fb2`): AppEffect (award.prize/award.points), AppPublishResult + normalizePublishResult (обратная совместимость с «голым массивом»), randomInt/drawPool в AppHostContext, REWARDS_EVENTS, REST DTO rewards; диспетчер — нормализация возврата + fail-closed CAPABILITY_UNAVAILABLE на эффектах до Task 7; заглушки ctx в quiz-спеке.
+- **Отклонения от плана (признаны ревью оправданными):** перепин incompatible-range в `contract-version.contract.spec.ts` (`>=1.6.0`→`>=1.7.0` — после bump'а стал satisfiable); тип-предикат `isCommitArray` вместо голого `Array.isArray` (tsc не сужает readonly-массив; ts-jest пропускал — sdk build обязателен как typecheck); валидный RFC 4122 uuid в int-тесте 10.
+- **Конвейер батча зелёный** (build, lint, boundary, guardrails, unit, int, e2e — числа в шапке). **Мердж ff в main + push на origin** — решения владельца в этой сессии.
 
 ### Коммиты этой сессии
 
-- `9d45fe2` docs(plan): план реализации фазы 3 (Rewards + Lottery + TTL-свип + квиз-начисления) — 13 задач, 5 батчей; решены развилки ajv-formats и lint Math.random
+- `420517a` feat(core): ajv-formats на commit-гейте — enforcement format: uuid
+- `2834c37` feat(sdk): контракт 1.6.0 — capabilities манифеста, wire-коды фазы 3
+- `5729fb2` feat(sdk,core): эффекты и хост-примитивы контракта 1.6.0 — AppEffect, AppPublishResult, randomInt/drawPool, REWARDS_EVENTS, REST DTO rewards
+- (далее) docs(handoff): update for session 2026-09-10 — батч A слит, следующий срез — батч B
 
 ### Локальное состояние (не в git)
 
-- Ничего не запущено; конвейер не запускался (сессия без кода). Side-effects на внешние системы: нет. Push не выполнялся — решение владельца (main впереди origin на 4 коммита).
+- Worktree `.worktrees/rewards-lottery` сохранён (== main), Docker/OrbStack запущен (нужен int-лане). В свежем worktree требуется `pnpm install` + `pnpm --filter @mymozhem/core prisma:generate` перед тестами (Prisma Client не генерируется install'ом).
+- Леджер `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/` (основной чекаут): progress.md с pre-flight scan, rulings и deferred-минорами; брифы/отчёты/review-пакеты задач 1-3.
+- Side-effects на внешние системы: push на GitHub (main b176635..5729fb2 + новая ветка rewards-lottery).
+
+### Rulings контроллера (мелкие, зафиксированы в леджере)
+
+1. Int/e2e baseline отдельно не гонялся (worktree == main HEAD с зелёным конвейером ф.2; первый int-прогон — в Task 1). Цена ошибки: не заметить пре-экзистинг красноту — не материализовалось.
+2. Леджер вёлся в worktree (харнесс изолирует запись за его пределы) с копированием в основной чекаут при мердже.
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (батч A новой сессией после гейта 2; ревью интерпретаций плана владельцем; manual smoke OAuth; юрист; push).
+- См. одноимённый раздел выше (батч B новой сессией; manual smoke OAuth; юрист).
