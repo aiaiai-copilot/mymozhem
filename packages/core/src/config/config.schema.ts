@@ -18,6 +18,9 @@ export const configSchema = z.object({
   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
+  // §4: cleanup_interval — 1 ч, 5 мин … 24 ч (секунды). Интервал регламентных
+  // джоб (REQ-ID-010); фаза 3 — свип анонимизации гостей (REQ-ID-003/014, Task 8).
+  CLEANUP_INTERVAL: z.coerce.number().int().min(300).max(86_400).default(3_600),
   // §4: refresh_token_ttl — 30 сут, 1 сут … 90 сут (секунды). Гостевой cap
   // (≤ guest_ttl, REQ-ID-016) применяется в точках выдачи (TokenService.sessionExpiry,
   // setRefreshCookie), не здесь: инвариант REQ-ID-016 — про гостевой refresh,

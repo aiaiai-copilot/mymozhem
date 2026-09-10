@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["identity", "membership", "realtime", "room"]
+  schemas  = ["identity", "membership", "realtime", "rewards", "room"]
 }
 
 enum RoomStatus {
@@ -50,6 +50,9 @@ model Room {
   logEvents       LogEvent[]
   memberships     Membership[]
   exclusions      Exclusion[]
+  prizes          Prize[]
+  awards          Award[]
+  pointsGrants    PointsGrant[]
 
   @@schema("room")
 }
@@ -81,6 +84,8 @@ model Identity {
   providers   IdentityProvider[]
   exclusions  Exclusion[]  @relation("ExclusionTarget")
   exclusionsMade Exclusion[] @relation("ExclusionActor")
+  awardsWon   Award[]
+  pointsGrants PointsGrant[]
 
   @@schema("identity")
 }
@@ -199,4 +204,70 @@ model Exclusion {
   @@unique([roomId, identityId])
   @@index([roomId, ip])
   @@schema("membership")
+}
+
+// === Фаза 3: rewards (design 2026-09-10 §3) ===
+
+model Prize {
+  id            String   @id @default(uuid()) @db.Uuid
+  roomId        String   @db.Uuid
+  name          String
+  quantityTotal Int // исходный фонд, для «раздано X из Y»
+  quantity      Int    // остаток; CHECK (quantity >= 0) — рукописной миграцией (REQ-RWD-010)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  room   Room    @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  awards Award[]
+
+  @@schema("rewards")
+}
+
+// БЕЗ @map: значения в БД uppercase, под дословный SQL частичного индекса
+// (design §3; прецедент MemberRole).
+enum AwardStatus {
+  AWARDED
+  FULFILLED
+  REVOKED
+
+  @@schema("rewards")
+}
+
+model Award {
+  id          String      @id @default(uuid()) @db.Uuid
+  roomId      String      @db.Uuid
+  prizeId     String?     @db.Uuid // REQ-RWD-002b: победитель без сущности приза
+  winnerId    String      @db.Uuid
+  status      AwardStatus @default(AWARDED)
+  sourceAppId String // 'lottery', 'quiz'
+  createdAt   DateTime    @default(now())
+  fulfilledAt DateTime?
+  revokedAt   DateTime?
+
+  room   Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  prize  Prize?   @relation(fields: [prizeId], references: [id], onDelete: Restrict)
+  winner Identity @relation(fields: [winnerId], references: [id], onDelete: Restrict)
+
+  // Единичность победителя по активным записям — частичный уникальный индекс
+  // "Award_single_active_winner_per_prize_key", рукописной миграцией (REQ-RWD-003,
+  // REQ-DEV-006). NULL prizeId не конфликтует (SQL NULLs distinct) — осознанно.
+  @@index([roomId])
+  @@schema("rewards")
+}
+
+model PointsGrant {
+  id          String   @id @default(uuid()) @db.Uuid
+  roomId      String   @db.Uuid
+  identityId  String   @db.Uuid
+  points      Int // только положительные в MVP (принуждается appEffectSchema)
+  reason      String? // 'quiz.round', …
+  sourceAppId String
+  createdAt   DateTime @default(now())
+
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  identity Identity @relation(fields: [identityId], references: [id], onDelete: Restrict)
+
+  // Агрегат «баллы участника» — проекция по ledger'у, не хранимый счётчик.
+  @@index([roomId, identityId])
+  @@schema("rewards")
 }

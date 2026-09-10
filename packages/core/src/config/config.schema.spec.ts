@@ -170,4 +170,17 @@ describe('loadConfig', () => {
       configSchema.safeParse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: 0 }).success,
     ).toBe(false);
   });
+
+  it('accepts CLEANUP_INTERVAL within the §4 range and defaults to 1 hour (REQ-ID-010)', () => {
+    expect(
+      loadConfig({ ...base, CLEANUP_INTERVAL: '600' } as NodeJS.ProcessEnv).CLEANUP_INTERVAL,
+    ).toBe(600);
+    expect(loadConfig({ ...base } as NodeJS.ProcessEnv).CLEANUP_INTERVAL).toBe(3600);
+    expect(() =>
+      loadConfig({ ...base, CLEANUP_INTERVAL: '60' } as NodeJS.ProcessEnv),
+    ).toThrow(/CLEANUP_INTERVAL/); // < 5 мин
+    expect(() =>
+      loadConfig({ ...base, CLEANUP_INTERVAL: '90000' } as NodeJS.ProcessEnv),
+    ).toThrow(/CLEANUP_INTERVAL/); // > 24 ч
+  });
 });
