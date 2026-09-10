@@ -104,6 +104,27 @@ describe('event-commit read-path (REQ-CTR-008/009)', () => {
   });
 });
 
+// Фаза 3, Task 1 (решение владельца 2026-09-10): ajv-formats на commit-гейте.
+// zod v4 эмитит format: "uuid" для z.uuid(); stock Ajv 8 без ajv-formats его
+// игнорировал (warning "unknown format") — невалидный uuid проходил гейт.
+describe('eventValidatorFor — string formats', () => {
+  const service = new AppRegistryService([]);
+  const validate = service.eventValidatorFor('testapp', 1, 'draw.run', {
+    type: 'object',
+    properties: { drawId: { type: 'string', format: 'uuid' } },
+    required: ['drawId'],
+    additionalProperties: false,
+  });
+
+  it('rejects a non-uuid drawId', () => {
+    expect(validate({ drawId: 'not-a-uuid' })).toBe(false);
+  });
+
+  it('accepts an RFC 9562 uuid', () => {
+    expect(validate({ drawId: '3f6b2b6e-9c5a-4f1e-8b2d-7a9c1e0f2a3b' })).toBe(true);
+  });
+});
+
 describe('AppRegistryModule', () => {
   it('provides AppRegistryService with an empty registry when composition root registers none', async () => {
     const moduleRef = await Test.createTestingModule({

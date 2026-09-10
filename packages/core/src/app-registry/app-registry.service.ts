@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import Ajv2020 from 'ajv/dist/2020';
+import addFormats from 'ajv-formats';
 import type { ValidateFunction } from 'ajv';
 import type { AppManifest, JsonSchemaObject } from '@mymozhem/sdk';
 import { buildAppRegistry, type AppRegistry } from './app-registry';
@@ -17,9 +18,14 @@ export class AppRegistryService {
   // Ajv2020: манифестные схемы несут $schema draft 2020-12 — дефолтный Ajv (draft-07)
   // на них падает. strict: false — схемы несут аннотацию x-visibility (ADR-008),
   // неизвестный ajv keyword, который strict-режим отклонил бы.
-  private readonly ajv = new Ajv2020({ allErrors: true, strict: false });
+  private readonly ajv: Ajv2020;
 
   constructor(@Inject(APP_MANIFESTS) manifests: readonly unknown[]) {
+    // ajv-formats (фаза 3, Task 1): zod v4 эмитит format: "uuid" для z.uuid();
+    // без подключённых форматов Ajv 8 их игнорирует — uuid-поля клиентских команд
+    // (drawId/prizeId лотереи) не принуждались бы на commit-гейте.
+    this.ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(this.ajv);
     // Built once at construction (boot); immutable thereafter (REQ-CORE-004). A bad
     // manifest throws here and fails startup — fail-closed.
     this.registry = buildAppRegistry(manifests);
