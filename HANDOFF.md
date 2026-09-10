@@ -1,78 +1,68 @@
 # HANDOFF
 
-**Date:** 2026-09-10 (сессия начата 2026-09-09, шестая за день: **Quiz-срез, батч 4 из 5 исполнен** — Tasks 10–12 плана `docs/sessions/2026-09-09-quiz-implementation-plan.md` сделаны и прошли двухстадийное ревью (1 fix round в Task 11); правило владельца: **батчи по 3 задачи, каждый батч — новая сессия**)
-**Branch:** `main` (2 коммита впереди `origin/main` — handoff-коммиты батчей 2 и 3; push — решение владельца; рабочее дерево чистое).
-**Активный worktree среза:** `.worktrees/quiz` (ветка `quiz`, от a75346e, НЕ на origin) — 14 коммитов: батч 1 (`7112534` контракт 1.5.0 + 7 wire-кодов, `eafee47` join-request role, `2d4c39c` clientInitiated) + батч 2 (`4f994ff` рантайм-контракт SDK; `9a161e4` APP_MANIFESTS-seam; `13d5d0e` app-runtime диспетчер) + батч 3 (`e376385` gateway→диспетчер + passthrough e2e; `9036b96` join с ролью spectator; `a0002fa` **erratum нейминга: события квиза dotted-lowercase — `question.opened`…**; `5cf1df7` пакет app-quiz: манифест, appSettings, 7 типов) + батч 4 (`27c63f3` quiz-редьюсер; `9750944`+`4d33181` handlers со скорингом и анти-ботом; `e30ac5a` wiring в composition root). Леджер SDD: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git). **Следующая сессия: войти в worktree `.worktrees/quiz`, исполнить батч 5 = Tasks 13–14** (quiz e2e — приёмка фазы 2; финальное ревью всего среза) по тому же леджеру.
+**Date:** 2026-09-10 (седьмая сессия Quiz-среза: **батч 5/5 исполнен, срез закрыт и слит в `main`**) — Tasks 13–14 плана `docs/sessions/2026-09-09-quiz-implementation-plan.md`: приёмочные e2e (9/9), финальное двухстадийное ревью чистое, сверка критериев фазы 2 — **фаза 2 ЗАКРЫТА** (`docs/sessions/2026-09-10-phase-2-exit-audit.md`).
+**Branch:** `main` (несколько коммитов впереди `origin/main` — handoff-коммиты батчей, merge-коммит Quiz-среза, этот handoff; **push — решение владельца**; рабочее дерево чистое). Полный конвейер на слитом main — зелёный (build/lint/typecheck/boundary/guardrails/int 159/159/unit+e2e 634/634).
+**Worktree среза:** `.worktrees/quiz` (ветка `quiz`) после мерджа удалён; леджер SDD перенесён в `.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` основного чекаута (не в git, только на этой машине).
 
-**Состояние фазы 1 — ЗАКРЫТА.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог, appSettings write path, Membership/guest-join, транспортный auth/HTTP, event-commit, realtime read/handshake (полный duplex), membership-exclusion (исключение участника + немедленный отзыв доступа, rejoin-блок по IP), **OAuth-срез (Google login + POST /rooms + REGISTERED-токены без guest-cap, контракт 1.4.0)** — реализованы и слиты в `main`; 2026-09-09 сверкой критериев подтверждено закрытие фазы целиком (включая запечатывание лога REQ-RT-016 — оно вошло в event-commit срез). Леджеры исполнения срезов: `.superpowers/sdd/*/progress.md` (не в git, только на этой машине). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+**Состояние фаз: фаза 1 ЗАКРЫТА (2026-09-09), фаза 2 (Quiz) ЗАКРЫТА (2026-09-10).** Ядро ф.1 (identity, room lifecycle, membership/guest-join/exclusion, realtime полный duplex, event-commit, appSettings, OAuth Google + POST /rooms) и Quiz-срез ф.2 (SDK 1.5.0 рантайм-контракт app-модулей, app-runtime «командный хост» в ядре, пакет `@mymozhem/app-quiz` — манифест, 7 типов событий, чистый редьюсер, скоростная шкала, анти-бот REQ-RT-013, роль SPECTATOR) — реализованы и слиты в `main`. Сверки: `2026-09-09-phase-1-exit-audit.md`, `2026-09-10-phase-2-exit-audit.md`. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
 ## Как войти в контекст за одно чтение
 
 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
 2. Этот файл целиком.
 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
-4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
-5. `docs/spec/amendment-v1.4-admin-contour.md` — **утверждённый перенос REQ-ID-012 (админ-контур) в ф.4** (решение владельца 2026-09-09, по итогам сверки ф.1).
-6. `docs/sessions/2026-09-09-phase-1-exit-audit.md` — **сверка критериев выхода ф.1** (вердикт: фаза 1 закрыта; таблица критерий → артефакт).
-7. `docs/sessions/2026-09-09-quiz-module-design.md` — **утверждённый дизайн Quiz-среза (фаза 2)**; §0 — решения владельца (модель игры, подход A «командный хост», SPECTATOR флагом).
-8. `docs/sessions/2026-09-09-quiz-implementation-plan.md` — **план исполнения Quiz-среза, 14 задач, TDD** — вход для следующей сессии.
-9. `.superpowers/sdd/*/progress.md` — леджеры исполнения прежних срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджеров срезов исключения и OAuth на машине нет — их история: планы + `git log` (исключение `89d887f..c2e60da`, OAuth `44db424..ab973f4`).
-10. `docs/sessions/2026-08-18-membership-exclusion-{design,implementation-plan}.md` — исполненные дизайн+план среза исключения (9/9, работа в коммитах; читать при разборе истории, §0 дизайна — решения владельца).
-11. `docs/sessions/2026-09-02-oauth-{design,implementation-plan}.md` — исполненные дизайн+план OAuth-среза (9/9 + final review + ZodError-фикс, работа в коммитах; §0 дизайна — решения владельца).
-12. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
+4. `docs/spec/amendment-v1.3-phase-remapping.md` — утверждённая пере-разметка фаз.
+5. `docs/spec/amendment-v1.4-admin-contour.md` — перенос REQ-ID-012 (админ-контур) в ф.4.
+6. `docs/sessions/2026-09-09-phase-1-exit-audit.md` и `docs/sessions/2026-09-10-phase-2-exit-audit.md` — сверки критериев выхода ф.1 и ф.2 (обе фазы закрыты).
+7. `docs/sessions/2026-09-09-quiz-module-design.md` — утверждённый дизайн Quiz-среза (§0 — решения владельца; §3 — erratum нейминга dotted-lowercase) — читать как образец перед дизайном следующего app-модуля.
+8. `.superpowers/sdd/*/progress.md` — леджеры исполнения срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджеров срезов исключения и OAuth на машине нет — их история: планы + `git log` (исключение `89d887f..c2e60da`, OAuth `44db424..ab973f4`).
+9. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы и дизайны прежних срезов (включая realtime: `docs/sessions/2026-08-05-realtime-read-handshake-{design,implementation-plan}.md`) читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 4cab30c:HANDOFF.md`.
+Исполненные планы и дизайны прежних срезов читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show b8f655b:HANDOFF.md`.
 
 ## Следующее действие
 
-**Исполнить план Quiz-среза батчами по 3 задачи, каждый батч — новая сессия** (правило владельца 2026-09-09) — план `docs/sessions/2026-09-09-quiz-implementation-plan.md`, спека `2026-09-09-quiz-module-design.md`, леджер `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md`. Батчи 1–4 (Tasks 1–12) сделаны, ревью чистые. **Следующий батч 5 = Tasks 13–14** (quiz e2e — приёмка фазы 2, 9 сценариев включая чит-тест утечки correctAnswers/correctIndex и анти-бот на проводе; Task 14 — финальное ревью всего среза, по нему deferred minors из леджера). **Мердж в main — после Task 14, не между батчами.** **Внимание: после erratum `a0002fa` имена событий в плане/дизайне — dotted-lowercase (`question.opened`, `answer.submitted`, `question.closed`, `game.finish`, `answer.accepted`, `question.revealed`, `game.finished`); TS-идентификаторы `*Payload` остались camelCase.** Работа только в worktree `.worktrees/quiz` (ветка `quiz`). Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (действие владельца). Push на origin — решение владельца. Гейты над фазами — см. раздел ниже.
+**Quiz-срез закрыт и слит. Следующий срез — выбор владельца** (по фазовому плану впереди фаза 3 — Rewards + Lottery, но см. гейты ниже; кандидаты также: web-client-срез, пакеты косметики из follow-up). По правилу владельца 2026-09-02: **новый срез не начинать в текущей сессии — фиксировать в HANDOFF и стоп**; срезы исполняются батчами по 3 задачи, каждый батч — новая сессия (правило 2026-09-09). Перед первым живым событием остаётся **manual smoke с реальными Google-кредами** (действие владельца). **Push на origin — решение владельца** (main впереди origin на handoff-коммиты + merge среза + этот handoff). Гейты над фазами — см. раздел ниже.
 
 **Остаточные риски, принятые мерджем (realtime-срез):**
 - **Duplicate-acceptance в subscribe** (осознанный trade-off дизайна §4): join каналов — ДО чтения лога, поэтому событие, закоммиченное между join и чтением, придёт и live, и в snapshot. Клиент без seq/cursor (REQ-RT-011a) дедуплицировать не может — принято для MVP; ссылка для фазовой работы над курсором (ф.4).
 - **Deferred-миноры финального ревью (ride, триаж «не гейтят»):** M-2 — мёртвая инжекция `config` в RealtimeGateway (убрать при следующем касании); M-4 — cross-socket timing в live-visibility e2e (микроскопическое окно флейка; маркер на organizer-сокете сделает детерминированным); M-5 — `asLogEvent` fallback fail-open (`?? row.visibility`) — fail-closed throw при следующем расширении enum EventVisibility. (M-3 — stale registry entry — **закрыт срезом исключения**, `74035f9`.)
 - Риски прошлых срезов (refresh-ротация strict, access-токены ≤15 мин после терминации, `/health/ready` 503) неизменны — `git show 3d7de83:HANDOFF.md`.
 
-**Санкционированные отклонения OAuth-среза** (прошли ревью, зафиксированы в леджере среза; леджер удалён с worktree — история в `git log 44db424..ab973f4`):
-1. **T5:** twin re-check `findUnique(provider_subject)` внутри ветки email-конфликта `findOrCreateByProvider` — пречек конфликта сам подвержен гонке (проигравший видел identity близнеца → EMAIL_CONFLICT вместо повторного логина; поймано race-кейсом самого плана); фикс в рамках design §4, reviewer verdict sound.
-2. **T6:** email-фикстура google-client спека `alex@example.com` вместо `a@b.c` (zod v4 `z.email()` отклоняет односимвольный TLD) + type-only импорт ProviderProfile.
-3. **T7:** POST /rooms возвращает `joinPolicy` из валидированного запроса, не из Prisma-строки (Prisma-enum `'GUESTS'` vs SDK wire lowercase `'guests'` — сниппет плана не компилировался и лил uppercase на провод; echo === persisted по контракту `RoomService.create`).
-4. **T8:** `ReplyLike.redirect` и оба call-site'а — сигнатура fastify v5 `redirect(url, code?)` (плановая декларация кодировала порядок v4; e2e поймал 500 на всех /auth/google*).
-5. **Final review:** ZodError-гард в exchange-catch OAuthService — `ZodError.message` (JSON-дамп issues) мог нести PII провайдера в серверный лог (`4bb08e1`).
+**Санкционированные отклонения Quiz-среза** (все прошли ревью, полный журнал — леджер `.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` и §4 exit-аудита ф.2):
+1. **Ruling pre-flight:** плотность seq ассертится относительно baseline (lifecycle-события уже в логе), не абсолютных 1..20.
+2. **T5:** `describe('AppRegistryModule')` переведён на `register([])` — статический импорт стал fail-closed.
+3. **T7:** `AppRuntimeModule.register` получил `imports: [PrismaModule, MembershipModule, RealtimeModule]` — без них Nest DI не разрешает deps AppRuntimeService (int-spec строил сервис вручную, минуя контейнер).
+4. **T8:** гард лимита участников обёрнут `if (role !== 'spectator')` — count-запрос (PARTICIPANT) не тронут, прочие гейты (exclusion по IP, rate-limit) сохранены.
+5. **T9 (ruling, erratum):** wire-имена событий квиза — dotted-lowercase (`question.opened`, `answer.submitted`, `question.closed`, `game.finish`, `answer.accepted`, `question.revealed`, `game.finished`) под существующую `shortEventNameSchema`; ослабление схемы отклонено (blast radius на все приложения, REQ-CTR-008). TS-идентификаторы `*Payload` остались camelCase.
+6. **T10:** `reduceQuiz` игнорирует `payload.totals`, перестраивает totals из `awarded` — проекция не доверяет производным данным payload (запинено тестом с заведомо неверным totals).
+7. **T11 (fix round 1):** standings — плотный ранг (1,2,2,3), не competition ranking; различающий тест {100,50,50,30}.
+8. **T13:** e2e без override'ов `APP_MANIFESTS`/`APP_RUNTIME_MODULES` — под тестом фактический composition root (сильнее буквы плана); локальная копия `readRoomLog` в спеке (barrel ядра его не экспортирует — утверждение плана устарело); противоречие плана о standings/total 0 разрешено в пользу сценария 1 (totals только из awarded — гость, не отвечавший ни разу, в standings не попадает).
 
-**Опыт OAuth-среза для следующих:**
-- **Мердж ветки со схемным изменением требует `prisma generate` на main** — worktree нёс свой сгенерированный клиент, main остался со stale (typecheck/int/e2e падают с `Property 'identityProvider' does not exist` — диагноз по первой ошибке, не по «мердж сломал»).
-- **Структурный тип транспорта может кодировать неверную сигнатуру адаптера** — `ReplyLike.redirect` воссоздавал fastify v4 под fastify 5; unit-фейки такой дрейф не видят принципиально, ловится только wire-e2e. При расширении `ReplyLike` сверять сигнатуру с исходником fastify.
-- **jest `-t` матчит имена тестов, не describe-файлы** — фильтры в планах формулировать по имени теста/describe или гонять спек по пути; проверять >0 матчей.
-- **Демон контейнеров (OrbStack) может зависнуть** — симптом: testcontainers-лане каскадные таймауты (33 мин вместо 7 с) при зелёном коде; диагноз: `docker ps` висит. Лечение `orbctl restart docker` — дёргает ВСЕ контейнеры машины; `--rm`-контейнеры при этом удаляются.
+**Опыт Quiz-среза для следующих:**
+- **jest testPathPattern матчит ПУТЬ, включая имя worktree** — `.worktrees/quiz/` в пути делает `-- quiz` матчем ВСЕХ e2e-сьютов (каждый прогон = полная лана ~10 с/сьюта). Для точечного прогона использовать уникальное имя файла (`-- quiz.e2e`).
+- **Live-кадр может прийти раньше ack publish** (fan-out синхронен с коммитом) — waiters навешивать ДО триггерящего publish, иначе тест повиснет на flush (прецедент: сценарий 1 quiz.e2e, таймаут 180 с).
+- **Сырой `$queryRaw` лога отдаёт visibility lowercase** (`'public'`), не Prisma-имя — фильтры по логу в e2e учитывают (та же ловушка, что asLogEvent в realtime-срезе).
+- **e2e на проводе снова поймал то, что unit не видел** — порядок «waiter до publish»; DI-разрешение модулей (`imports` в register) видно только через реальный контейнер.
+- **Финальное ревью подтвердило:** REQ-RT-007 (payload-нейтральность) на app-пути покрыт `app-runtime.int-spec.ts` тестом 8 (20 конкурентных dispatch, чередование 0/4KB, seq плотные baseline..+39).
 
-**Санкционированные владельцем отклонения от плана realtime-среза** (все прошли ревью, зафиксированы в леджере):
-1. fanOut изолирует per-event доставку try/catch + server log (иначе бросок слушателя отклонял бы `outbox.run` ПОСЛЕ коммита) — с тестом.
-2. handleSubscribe error-containment: try/catch → ack `{code:'INTERNAL_ERROR'}` через общий `wireCodeOf` (плановый код отдавал unhandled rejection — риск падения единственной реплики) — с тестом.
-3. `EventLogService.appendLocked`: нормализация `asLogEvent` — staged-события из `$queryRaw RETURNING *` несли raw-метку enum (`'public'`), не Prisma-имя (`'PUBLIC'`); fanOut молча ронял ВСЮ live-доставку (replay не затронут) — с регрессионным int-тестом.
-4. `ConfigurableIoAdapter` принимает Nest httpServer явно — без него socket.io слушал отдельный случайный порт (затрагивало и prod `main.ts`).
-5. `.dependency-cruiser.cjs`: правило `socketio-only-in-realtime` — dist-исключение в pathNot (CI build→boundary-check ловил скомпилированные .d.ts) + якорь `to.path` на серверный пакет (`socket.io/` не матчит `socket.io-client`). Пробами подтверждено: на src-нарушениях правило срабатывает, guardrails живы.
-6. Порядок subscribe: join до чтения лога (дизайн §4) — плановый verbatim-порядок был lossy (событие между чтением и join терялось молча); фикс финального ревью + e2e replay-видимости (M-1).
-
-Опыт этой сессии для следующих:
-- **zod v4 `z.uuid()` требует валидный version nibble.** Литералы вида `00000000-0000-0000-0000-...` НЕ проходят (версия 0). В старых core int-спеках такие есть (ORG/P1) — безвредны, пока не проходят через `z.uuid()`; в e2e на проводе ломают проекцию событий с таким actorId. Кандидат на чистку.
-- **boundary-check круизит dist** (CI: build → boundary-check, `tsPreCompilationDeps`) — легальный type-import из свежего dist может зажечь правило; диагностировать до вывода «граница нарушена».
-- e2e на проводе — ловец реальных багов среза: оба бага (raw-enum staged, отдельный порт io) всплыли только на живом socket.io-client, unit-фейки их не видели.
-- Субагент может умереть на API-квоте (403 billing cycle) — повторный диспатч прошёл без изменений; леджер + report-файлы делают это безболезненным.
-
-**Швы realtime-среза для будущих планов:**
-- Шов дизайна §9 **закрыт**: срез исключения вызывает `RealtimeGateway.revokeRoomAccess(identityId, roomId)` через hook `onAccessRevoked`; реестр подписок и `socketsOf` потреблены.
-- MODERATOR сейчас → уровень `public` (amendment v1.3); если права вырастут — пересмотреть маппинг уровня в `handleSubscribe`.
-- Курсор replay (REQ-RT-011б) и метаданные seq — фаза 4; наружная форма события курсор структурно исключает (strictObject), эволюция — аддитивная через minor-версию контракта.
-- Per-event re-check членства в live-доставке не делается (решение §0) — при исключении подписка рвётся через hook (реализовано), не через фильтрацию.
+**Швы Quiz-среза для будущих планов:**
+- **Рантайм-контракт app-модуля (SDK 1.5.0):** `AppRuntimeModule` (manifest + reduce + handlePublish), `AppCommit`, `AppHostContext` (actorId, now ISO, roomId), `AppRejection` — единственный путь механики к логу; отказ модуля — типизированный код из `CONTRACT_ERROR_CODES`, до коммита.
+- **Диспетчер `AppRuntimeService`:** гейты до вызова модуля (room ACTIVE → пин `(appId, manifestVersion)` → membership → SPECTATOR → clientInitiated → owner-схема payload), коммит пакетом событий одной транзакцией через `outbox.run`; per-room сериализация `RoomSerializer` (FIFO, identity-checked cleanup); проекция — `AppProjectionCache` + replay из лога, `invalidateProjection(roomId)` для пересоздания.
+- **Связывание модулей — только в composition root** (`apps/server/src/app.module.ts`): `AppRegistryModule.register([...])`, `AppRuntimeModule.register([...])`, оба global (шов Task 5/7).
+- **Имена событий app-модулей — dotted-lowercase** (`shortEventNameSchema`), полный wire-тип `<appId>.<shortName>`.
+- **SPECTATOR (REQ-ID-011):** wire lowercase `spectator` ↔ Prisma `SPECTATOR` в одной точке membership; зритель вне лимита участников; publish зрителю → `PUBLISH_FORBIDDEN` на гейте диспетчера.
+- **`correctAnswers` module-private без аннотации** — fail-safe по умолчанию (REQ-CORE-008); чит-тест ф.2 подтвердил: недоступно ни по одному каналу, включая организатора и replay.
 
 **Follow-up пакеты, подбираемые будущими планами явно:**
-- **Чистка invalid-uuid литералов** в старых int-спеках (см. опыт выше) + fail-closed в `asLogEvent` (M-5) + удаление мёртвой инжекции config (M-2) — пакет косметики realtime.
-- **Права эмита по ролям (SPECTATOR)** — app-семантика, фаза 2 (M-3 и мягкое удаление membership закрыты срезом исключения).
+- **Кандидат на решение владельца (из финального ревью ф.2):** AJV warning `unknown format "uuid" ignored` — zod v4 эмитит `format: "uuid"`, stock Ajv 8 без ajv-formats его не принуждает. Для квиза безопасно (uuid-поля только в server-generated событиях); если норма требует enforcement формата на commit-гейте — отдельная задача (ajv-formats или осознанный waiver).
+- **Косметика Quiz-среза (deferred minors, триаж «не гейтят»; полный список — леджер):** неограниченный рост `AppProjectionCache` (per-room записи без эвикции — фаза 4); clamp-ветка скоринга `Math.max(base−k·step,0)` без отдельного теста (провод защищён `points.min(0)`); quiz.e2e-spec.ts:379 мёртвый push closed-ack после проверочного цикла чит-теста; неотписанные live-listeners в чит-тесте; optionIndex-absence в `answer.accepted` проверен по одной ленте из четырёх; устаревший комментарий `realtime.e2e-spec.ts:89-90`; негативный кейс correctIndex неверного типа; литеральная роль `'participant'|'spectator'` в сигнатуре join (кандидат `JoinRequest['role']`); неограниченный рост spectators (кандидат формулировки при ревизии спеки).
+- **Чистка invalid-uuid литералов** в старых int-спеках + fail-closed в `asLogEvent` (M-5) + удаление мёртвой инжекции config (M-2) — пакет косметики realtime.
 - **Для следующего среза, трогающего configure/app-registry** (из финального ревью appSettings): guard `settings === undefined|null` → `AppSettingsInvalidError`; `ValidateFunction` из `ajv/dist/2020`; race-тест configure-vs-activate с quiz@2; контрактное допущение «settings — не-null JSON value».
 - **Для web-client-среза:** CORS без `credentials: true` + SameSite=Strict — клиент с другого origin не сможет использовать refresh-куку (сейчас корректно для same-origin).
 - Негативные strictObject-кейсы для ack-схем SDK (минор Task 2); экспорт realtime-фикстур из SDK index — при первом внешнем потребителе.
 - Из membership/guest-join: гонка soft-delete/status-flip в `MembershipService.join` — принятый класс гонки (design fork (б)); JSDoc на `RoomService.create` про lowercase-in/Prisma-name-out.
-- Deferred-миноры event-commit (ride): `eventValidatorFor` игнорирует schema-аргумент на cache-hit; некомпилируемая app-схема падает лениво (кандидат boot-time compile-check в app-registration срез); 6 точек ручного конструирования `EventLogService` в спеках дрейфуют (кандидат — test-module builder; после realtime-среза таких точек стало больше — вес вырос).
+- Deferred-миноры event-commit (ride): `eventValidatorFor` игнорирует schema-аргумент на cache-hit; некомпилируемая app-схема падает лениво (кандидат boot-time compile-check в app-registration срез); точки ручного конструирования `EventLogService` в спеках дрейфуют (кандидат — test-module builder).
 
 ## Два гейта над фазами
 
@@ -81,7 +71,7 @@
 
 ## Долгоживущие ограничения, введённые срезами
 
-- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`, `20260730101037_auth_sessions`, `20260819154552_membership_exclusion`, `20260902191322_oauth_identity_provider`. Любое изменение — только новой миграцией.
+- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`, `20260730101037_auth_sessions`, `20260819154552_membership_exclusion`, `20260902191322_oauth_identity_provider`. Любое изменение — только новой миграцией. (Quiz-срез схему БД не трогал — состояние модуля живёт в логе событий.)
 - **Socket.io граница:** серверный `socket.io` импортируется только из `packages/core/src/realtime` (REQ-RT-006, правило dependency-cruiser с якорем на пакет `socket.io/`); `socket.io-client` — только `apps/server/test` (devDep). Правило круизит и dist (CI build→boundary-check) — в pathNot есть dist-исключение, осознанное.
 - **Fan-out realtime:** publish в RealtimeBus — строго после коммита транзакции (`EventOutbox.run`); исключения слушателей изолированы в `fanOut` gateway (не отклоняют `run`); commit вне `outbox.run` бросает `EventOutboxMissingContextError` (fail-closed); вложенный `run` запрещён.
 - **Subscribe:** join каналов — ДО чтения лога (duplicate-acceptance, дизайн §4); гейты (schema/guest-scope/мульти-подписка/membership) — до join; catch-путь чистит запись реестра.
@@ -95,15 +85,16 @@
 - **Конвенция порядка блокировок:** advisory lock комнаты — всегда leaf-most; транзакция, захватившая его, не должна после этого писать в `room."Room"`.
 - **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
 - **Prisma 7.8 adapter-pg: форма ошибок raw-запросов.** Падающий `$queryRaw` оборачивается в `PrismaClientKnownRequestError` с кодом `P2010`; SQLSTATE внутри message и `meta.driverAdapterError.cause.originalCode`. Матчить `code === 'P2010'` + подстроки (прецедент `isRoomCodeCollision`). Также: `$queryRaw` возвращает сырое DB-значение enum (`'public'`), а не Prisma-имя (`'PUBLIC'`) — для staged-событий нормализует `asLogEvent` (realtime-срез); при `RETURNING *` из raw INSERT — re-read через клиент (прецедент `insertRoom`) или явная нормализация.
-- **Инвариант «change both or neither» (теперь ТРИ места, с OAuth-среза):** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в частичном индексе `"Identity_registered_email_key"`, guarded INSERT в `RoomService.create` и пречеке конфликта в `IdentityService.findOrCreateByProvider`. Менять только вместе. (Комментарий в `room.service.ts:82-83` всё ещё говорит «два места» — известный дрейф, поправить при следующем касании.)
-- **Хост-порты 5432 и 55432:** контейнеры `lt-pg`/`lt-pg-sdd` (не проектные) были удалены 2026-09-03 рестартом OrbStack и не восстановлены — на 2026-09-09 порты свободны, перед публикацией authoring-контейнера всё равно проверять `docker ps`.
-- **Testcontainers v12 + OrbStack — две ловушки restart'а контейнера** (вскрыты DB-down тестом 2026-09-09): (1) у Started-контейнера нет `start()`, а `StoppedTestContainer` — только метаданные: stop/start идут через `getContainerRuntimeClient()` (`client.container.stop/start(getById(id))`); (2) **OrbStack переназначает случайный host-порт при restart** — старый пул мёртв навсегда, клиент пересоздаётся на фактический порт из `inspect`. Оба приёма зашиты в харнесс (`stopContainer`/`startContainer`, последний возвращает новый `PrismaService`).
-- **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория. Prisma 7 CLI вообще работает только из корня репо (`prisma.config.ts` там): форма `pnpm --filter @mymozhem/core exec prisma …` падает — использовать `pnpm exec prisma …` из корня.
-- **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Мутирует глобальный `process.env.DATABASE_URL` без восстановления (безопасно только при `maxWorkers: 1`); требует cwd = корень репозитория. С 2026-09-09 несёт `stopContainer`/`startContainer` для тестов недоступности БД (REQ-DEV-008, `db-down.int-spec.ts`).
+- **Инвариант «change both or neither» (ТРИ места):** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в частичном индексе `"Identity_registered_email_key"`, guarded INSERT в `RoomService.create` и пречеке конфликта в `IdentityService.findOrCreateByProvider`. Менять только вместе. (Комментарий в `room.service.ts:82-83` всё ещё говорит «два места» — известный дрейф, поправить при следующем касании.)
+- **Хост-порты 5432 и 55432:** контейнеры `lt-pg`/`lt-pg-sdd` (не проектные) были удалены 2026-09-03 рестартом OrbStack и не восстановлены — перед публикацией authoring-контейнера проверять `docker ps`.
+- **Testcontainers v12 + OrbStack — две ловушки restart'а контейнера:** (1) у Started-контейнера нет `start()`, stop/start идут через `getContainerRuntimeClient()` (`client.container.stop/start(getById(id))`); (2) **OrbStack переназначает случайный host-порт при restart** — старый пул мёртв навсегда, клиент пересоздаётся на фактический порт из `inspect`. Оба приёма зашиты в харнесс (`stopContainer`/`startContainer`, последний возвращает новый `PrismaService`).
+- **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория. Prisma 7 CLI работает только из корня репо (`prisma.config.ts` там): форма `pnpm --filter @mymozhem/core exec prisma …` падает — использовать `pnpm exec prisma …` из корня.
+- **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Мутирует глобальный `process.env.DATABASE_URL` без восстановления (безопасно только при `maxWorkers: 1`); требует cwd = корень репозитория. Несёт `stopContainer`/`startContainer` для тестов недоступности БД (REQ-DEV-008, `db-down.int-spec.ts`).
 - **`ReplyLike` — адаптер fastify 5:** сигнатуры сверять с fastify 5 (`redirect(url, code?)`, code дефолт 302). OAuth-куки (`mm_oauth_*`) — `SameSite=Lax` осознанно (возврат с Google — top-level GET), path `/auth`, TTL `OAUTH_STATE_TTL`; refresh-кука остаётся `Strict`. Гостевой cap refresh — ТОЛЬКО в точках выдачи (`TokenService.sessionExpiry` ⇄ `setRefreshCookie` — «одна норма в двух местах», менять вместе); конфиг-инварианта `REFRESH ≤ GUEST_TTL` больше нет.
-- **Прогон интеграционной ланы поднимают контейнеры Postgres** (~8 с локально на файл). Docker Desktop должен быть запущен.
-- **Jest CLI:** форма `pnpm --filter @mymozhem/core test:int -- -t "..."` миспарсится — рабочая форма без `--`. Фильтр всегда проверять на >0 матчей.
-- **apps/server e2e резолвит `@mymozhem/core` из dist** — перед `pnpm --filter @mymozhem/server test` обязателен `pnpm build`; core резолвит `@mymozhem/sdk` из dist — после правок SDK `pnpm --filter @mymozhem/sdk build`.
+- **Прогон интеграционной ланы поднимает контейнеры Postgres** (~8 с локально на файл). Docker Desktop/OrbStack должен быть запущен.
+- **Jest CLI:** форма `pnpm --filter @mymozhem/core test:int -- -t "..."` миспарсится — рабочая форма без `--`. Фильтр всегда проверять на >0 матчей. В worktree с говорящим именем testPathPattern матчит путь целиком (см. опыт Quiz-среза).
+- **apps/server e2e резолвит `@mymozhem/core` из dist** — перед `pnpm --filter @mymozhem/server test` обязателен `pnpm build`; core резолвит `@mymozhem/sdk` из dist — после правок SDK `pnpm --filter @mymozhem/sdk build`; то же для `@mymozhem/app-quiz` (server e2e тянет его dist).
+- **Граница app-модулей (Quiz-срез):** `packages/app-*` НЕ импортирует `packages/core` (boundary `app-only-through-sdk`, правило покрывает `packages/app-` generically); `@mymozhem/sdk` — лист. Связывание — только `apps/server` (composition root).
 
 ## Отложенные follow-up (не гейтят; полный список с обоснованиями — в леджерах)
 
@@ -118,41 +109,36 @@
 
 ## Осталось недоделанным
 
-- **Quiz-срез (фаза 2) исполняется батчами** — батчи 1–4 (Tasks 1–12) сделаны, батч 5 (Tasks 13–14) впереди новой сессией (см. «Следующее действие»); **manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца.
+- **Следующий срез — выбор владельца** (фаза 3 Rewards+Lottery по плану — но гейт 2 «первое живое событие» над ней; альтернативы: web-client, follow-up пакеты). **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. **Push на origin** — решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 - **CLAUDE.md несёт устаревший указатель точки входа** (`docs/sessions/handoff-to-aidd-session.md` вместо `HANDOFF.md`) и развилку turbo/nx как нерешённую — AGENTS.md синхронизирован, CLAUDE.md не тронут (решение владельца).
+- **Кандидат на решение владельца:** enforcement `format: "uuid"` на commit-гейте (AJV + ajv-formats или осознанный waiver) — из финального ревью ф.2.
 
-## Session 2026-09-09→10 (шестая: Quiz-срез, батч 4 — Tasks 10–12)
+## Session 2026-09-10 (седьмая: Quiz-срез, батч 5 — Tasks 13–14, мердж в main)
 
-*(Блоки сессий «вторая»–«пятая» вырезаны — их работа в коммитах; восстановимо через `git show a80fe90:HANDOFF.md`, `git show bdc8e20:HANDOFF.md`, `git show 0ce12a8:HANDOFF.md`, `git show b7f7174:HANDOFF.md`. Ruling нейминга событий батча 3 (dotted-lowercase) зафиксирован в дизайне §3 (erratum-плашка) и в разделе «Следующее действие».)*
+*(Блоки сессий «вторая»–«шестая» вырезаны — их работа в коммитах; восстановимо через `git show a80fe90:HANDOFF.md`, `git show bdc8e20:HANDOFF.md`, `git show 0ce12a8:HANDOFF.md`, `git show b7f7174:HANDOFF.md`, `git show b8f655b:HANDOFF.md`.)*
 
 ### Что сделано
 
-- **Task 10 (app-quiz, `27c63f3`):** `quiz-state.ts` — `QuizState` + чистый `reduceQuiz` (проекция из лога, ADR-005, REQ-CORE-004); totals перестраивается из `awarded` (payload.totals сознательно игнорируется, запинено тестом с заведомо неверным totals); неизвестный тип — reference-identical no-op. Ревью чистое.
-- **Task 11 (app-quiz, `9750944` + фикс `4d33181`):** `quiz-handlers.ts` + `quiz-runtime.ts` — ролевые гейты (команды ведущего ORGANIZER-only; ответ PARTICIPANT-only), анти-бот REQ-RT-013 (строгий `<`, `0` = контроль выкл), скоростная шкала `max(base − k·step, 0)` по seq, standings. Ревью поймал competition ranking вместо dense (1,2,2,4 вместо 1,2,2,3) — fix round 1, различающий тест {100,50,50,30} → 1,2,2,3, re-review ADDRESSED. Ревью чистое после фикса.
-- **Task 12 (server, `e30ac5a`):** квиз в composition root — `AppRegistryModule.register([quiz.manifest])`, `AppRuntimeModule.register([quiz.runtime])`, dep `@mymozhem/app-quiz: workspace:*`; все 49 server e2e зелёные (override'ы тестовых модулей не затронуты). Ревью чистое.
-- Все три задачи: subagent-driven (implementers sonnet/sonnet/haiku, reviewers sonnet), RED→GREEN задокументировано, boundary/typecheck/lint зелёные.
+- **Task 13 (`88fab49`):** `apps/server/test/quiz.e2e-spec.ts` (+531) — все 9 приёмочных сценариев ф.2: полная игра (2 раунда, скоростная шкала, dense-rank standings, порядок live = порядку лога у 4 клиентов), чит-тест сериализацией (ни один pre-reveal кадр/ack/snapshot не несёт correctIndex/correctAnswers; replay легален; module-private никому включая организатора), late-join участника/зрителя, анти-бот REQ-RT-013, конкурентный double-answer (ровно один ok + ALREADY_ANSWERED), ролевые гейты, пересоздание проекции через invalidateProjection, ROOM_LOG_SEALED. Ревью чистое (4 minors → deferred). Прод-код не тронут.
+- **Task 14:** полный конвейер на ветке зелёный; **финальное двухстадийное ревью среза (fable) — Stage 1 spec PASS по всем группам REQ и всем 4 критериям ф.2 (включая REQ-RT-007 на app-пути), Stage 2: 0 Critical / 0 Important, «Ready to merge: Yes»**; триаж 9 deferred minors — все stay-deferred; **сверка критериев ф.2** (`f7b6b3b`, `docs/sessions/2026-09-10-phase-2-exit-audit.md`) — вердикт: фаза 2 закрыта.
+- **Мердж `quiz` → `main`** (no-ff, решение владельца в этой сессии; `pnpm install` — already up to date; схема БД не менялась, `prisma generate` не нужен) → полный конвейер на слитом main зелёный (int 159/159; sdk 280, core 213, app-quiz 83, server 58).
+- Леджер SDD перенесён из worktree в `.superpowers/sdd/2026-09-09-quiz-implementation-plan/` основного чекаута; worktree `.worktrees/quiz` и ветка `quiz` удалены после зелёного мерджа. LOC-снапшот main: ~13.9k строк TS (src+test), из них app-quiz 1060, core/app-runtime 764, quiz.e2e 531; срез: +2923/−165 по 63 файлам.
+- Все задачи: subagent-driven (T13 implementer sonnet, reviewer sonnet; финальный ревью fable), RED→GREEN задокументировано (скелет e2e упал до реализации).
 
-### Санкционированные отклонения и judgment calls батча (прошли ревью, в леджере)
+### Санкционированные отклонения и rulings батча (прошли ревью, в леджере)
 
-1. **T10:** `reduceQuiz` игнорирует `payload.totals` события `question.revealed`, перестраивает totals из `awarded` — проекция выводится, а не доверяет payload (защитная семантика; reviewer подтвердил).
-2. **T11:** детерминированный порядок `totals`/`standings` (total desc, tie-break по actorId); `awarded` включает правильные ответы с 0 очков при clamp (буквальная формула брифа); защитный `EVENT_UNKNOWN_TYPE` на неизвестный shortName — все признаны согласованными с брифом.
+- Полный список отклонений среза (8) — в разделе «Санкционированные отклонения Quiz-среза» выше и в §4 exit-аудита. Новые в этом батче: T13 — без override'ов (реальный composition root), локальный `readRoomLog`, разрешение противоречия плана о standings/total 0 в пользу сценария 1.
 
 ### Коммиты этой сессии
 
-- На ветке `quiz` (worktree `.worktrees/quiz`): `27c63f3` · `9750944` · `4d33181` · `e30ac5a`. На `main` — только этот handoff.
+- На ветке `quiz` (теперь в main через merge): `88fab49` (quiz e2e), `f7b6b3b` (сверка критериев ф.2). На `main` — merge-коммит среза и этот handoff.
 
 ### Локальное состояние (не в git)
 
-- Ничего не запущено; тест-контейнеры testcontainers остановлены. Side-effects на внешние системы: нет. Push не выполнялся — решение владельца (на `main` 2 handoff-коммита впереди origin).
-- Леджер SDD пополнен строками Task 10/11/12: `.worktrees/quiz/.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git, только на этой машине).
-
-### Deferred minors (вход для триажа Task 14 — финального ревью среза; не гейтят)
-
-- Перенесено из батча 3: T7 — устаревший комментарий над `createApp` в `realtime.e2e-spec.ts:90`; T8 — литеральная роль `'participant'|'spectator'` в сигнатуре join (кандидат `JoinRequest['role']`), неограниченный рост spectators (кандидат формулировки при ревизии спеки); T9 — deprecated-аннотация eslint в lockfile, негативный кейс `correctIndex` неверного типа.
-- T10: фикстура раунда 2 в `quiz-state.spec.ts:120-127` опускает обязательный по схеме `correctIndex` (безвредно, редьюсер поле не читает); `answer.submitted` пишется редьюсером и при `accepting === false` (соответствует брифу, гейтинг — забота handlers).
-- T11: скоринг-тест покрывает 2 правильных ответа вместо 3 из брифа (k=2 и clamp-ветки без отдельного кейса; формула покрыта); тесты await'ят синхронный `handleQuizPublish` (безвредно).
+- Ничего не запущено; тест-контейнеры testcontainers остановлены. Side-effects на внешние системы: нет. Push не выполнялся — решение владельца (main впереди origin).
+- Леджер SDD: `.superpowers/sdd/2026-09-09-quiz-implementation-plan/progress.md` (не в git, только на этой машине).
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (батч 5 = Tasks 13–14 новой сессией; manual smoke OAuth; юрист; CLAUDE.md-указатель).
+- См. одноимённый раздел выше (следующий срез — выбор владельца; manual smoke OAuth; юрист; push; CLAUDE.md-указатель; AJV uuid-format — решение владельца).
