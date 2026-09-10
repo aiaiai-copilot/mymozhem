@@ -27,7 +27,7 @@ describe('contract version', () => {
     expect(isContractRangeSatisfied(range)).toBe(true);
   });
 
-  it.each(['^2.0.0', '>=1.6.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
+  it.each(['^2.0.0', '>=1.7.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
     expect(isContractRangeSatisfied(range)).toBe(false);
   });
 

@@ -35,14 +35,22 @@ export const manifestEventSchema = z.strictObject({
   clientInitiated: z.boolean(),
 });
 
+// Capability манифеста (REQ-RWD-001/005): точка расширения, заложенная в ф.2
+// (strictObject сознательно отвергал поле до фазы 3). Неизвестное значение —
+// отказ валидации манифеста.
+export const APP_CAPABILITIES = ['rewards'] as const;
+export const appCapabilitySchema = z.enum(APP_CAPABILITIES);
+export type AppCapability = z.infer<typeof appCapabilitySchema>;
+
 // The manifest (design §5). strictObject: an unknown field is refused rather than
-// ignored — notably `capabilities`, which ADR-003 will introduce for rewards in
-// phase 3 and which must not appear as empty scaffolding now (CLAUDE.md §2.3).
+// ignored. `capabilities` — поле фазы 3 (design 2026-09-10): принято, enum принуждает
+// известные значения; до фазы 3 strictObject его отклонял (CLAUDE.md §2.3).
 export const appManifestSchema = z.strictObject({
   appId: appIdSchema,
   manifestVersion: z.number().int().positive(),
   contractRange: contractRangeSchema,
   appSettings: jsonSchemaObjectSchema,
   events: z.record(shortEventNameSchema, manifestEventSchema),
+  capabilities: z.array(appCapabilitySchema).optional(),
 });
 export type AppManifest = z.infer<typeof appManifestSchema>;

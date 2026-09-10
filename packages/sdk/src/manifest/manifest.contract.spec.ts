@@ -35,4 +35,18 @@ describe('app manifest contract', () => {
   it('refuses a malformed range', () => {
     expect(contractRangeSchema.safeParse('garbage!!').success).toBe(false);
   });
+
+  it('accepts a manifest with known capabilities', () => {
+    const m = validManifests[0];
+    expect(appManifestSchema.safeParse({ ...m, capabilities: ['rewards'] }).success).toBe(true);
+  });
+
+  it('rejects unknown capability values', () => {
+    const m = validManifests[0];
+    expect(appManifestSchema.safeParse({ ...m, capabilities: ['teleport'] }).success).toBe(false);
+  });
+
+  it('capabilities remain optional', () => {
+    expect(appManifestSchema.safeParse(validManifests[0]).success).toBe(true);
+  });
 });

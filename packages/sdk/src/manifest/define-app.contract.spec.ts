@@ -145,6 +145,23 @@ describe('defineApp', () => {
     ).toThrow(ContractError);
   });
 
+  it('passes capabilities from the definition into the manifest', () => {
+    const manifest = defineApp({
+      appId: 'lottery',
+      manifestVersion: 1,
+      capabilities: ['rewards'],
+      appSettings: z.strictObject({}),
+      events: {
+        'draw.completed': {
+          schema: z.strictObject({ drawId: z.uuid() }),
+          visibility: 'public',
+          clientInitiated: false,
+        },
+      },
+    });
+    expect(manifest.capabilities).toEqual(['rewards']);
+  });
+
   it('refuses a misspelled visibility annotation', () => {
     expect(() =>
       defineApp({

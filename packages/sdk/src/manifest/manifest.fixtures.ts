@@ -34,6 +34,35 @@ export const validManifests: AppManifest[] = [
       },
     },
   },
+  // Capability фазы 3 (design 2026-09-10): манифест с делегированием rewards
+  // (REQ-RWD-001/005) — валиден.
+  {
+    appId: 'lottery',
+    manifestVersion: 1,
+    contractRange: '^1.0.0',
+    capabilities: ['rewards'],
+    appSettings: {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        fundLimit: { type: 'number', 'x-visibility': 'public' },
+      },
+      required: ['fundLimit'],
+      additionalProperties: false,
+    },
+    events: {
+      'draw.completed': {
+        schema: {
+          type: 'object',
+          properties: { drawId: { type: 'string' } },
+          required: ['drawId'],
+          additionalProperties: false,
+        },
+        visibility: 'public',
+        clientInitiated: false,
+      },
+    },
+  },
 ];
 
 export const invalidManifestCases: { name: string; value: unknown }[] = [
@@ -90,7 +119,7 @@ export const invalidManifestCases: { name: string; value: unknown }[] = [
     },
   },
   {
-    name: 'manifest carries a capabilities field (rewards is phase 3 — design §5)',
-    value: { ...validManifests[0], capabilities: ['rewards'] },
+    name: 'unknown capability value',
+    value: { ...validManifests[0], capabilities: ['teleport'] },
   },
 ];

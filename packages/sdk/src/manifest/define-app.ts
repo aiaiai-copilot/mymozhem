@@ -5,6 +5,7 @@ import type { Visibility } from '../visibility/visibility';
 import { assertVisibilityAnnotations } from './app-settings-visibility';
 import {
   appManifestSchema,
+  type AppCapability,
   type AppManifest,
   type JsonSchemaObject,
 } from './manifest.schema';
@@ -19,6 +20,8 @@ export type AppDefinition = {
   manifestVersion: number;
   // Defaults to the current major of the contract (REQ-CTR-004).
   contractRange?: string;
+  // Фаза 3 (design 2026-09-10): capabilities манифеста (REQ-RWD-001/005).
+  readonly capabilities?: readonly AppCapability[];
   appSettings: z.ZodType;
   // Short names; the core prefixes the namespace itself (design §4.1).
   // clientInitiated — обязательное явное решение по каждому типу (fail-safe = false).
@@ -129,6 +132,7 @@ export const defineApp = (definition: AppDefinition): AppManifest => {
     contractRange: definition.contractRange ?? `^${CONTRACT_VERSION}`,
     appSettings,
     events,
+    ...(definition.capabilities ? { capabilities: [...definition.capabilities] } : {}),
   };
 
   const parsed = appManifestSchema.safeParse(manifest);

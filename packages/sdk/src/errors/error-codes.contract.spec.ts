@@ -42,6 +42,13 @@ describe('contract errors', () => {
       'ALREADY_ANSWERED',
       'QUESTION_UNKNOWN',
       'OPTION_UNKNOWN',
+      'ROOM_NOT_ACTIVE',
+      'CAPABILITY_UNAVAILABLE',
+      'PRIZE_UNKNOWN',
+      'PRIZE_FUND_EXHAUSTED',
+      'DRAW_POOL_EMPTY',
+      'AWARD_UNKNOWN',
+      'REWARD_ALREADY_RESOLVED',
       'INTERNAL_ERROR',
     ]);
   });
@@ -55,6 +62,18 @@ describe('contract errors', () => {
     'QUESTION_UNKNOWN',
     'OPTION_UNKNOWN',
   ] as const)('accepts phase-2 code %s', (code) => {
+    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+  });
+
+  it.each([
+    'ROOM_NOT_ACTIVE',
+    'CAPABILITY_UNAVAILABLE',
+    'PRIZE_UNKNOWN',
+    'PRIZE_FUND_EXHAUSTED',
+    'DRAW_POOL_EMPTY',
+    'AWARD_UNKNOWN',
+    'REWARD_ALREADY_RESOLVED',
+  ] as const)('accepts phase-3 code %s', (code) => {
     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
   });
 
