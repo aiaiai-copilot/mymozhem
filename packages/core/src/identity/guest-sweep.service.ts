@@ -19,10 +19,14 @@ export class GuestSweepService {
     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
   ) {}
 
-  // Возвращает число анонимизированных identity. Вся выборка/гард/запись — одна
-  // транзакция: гард-чек внутри неё закрывает окно гонки «награда создана между
-  // чтением кандидатов и анонимизацией» (перечитывание deletedAt в updateMany —
-  // вторая линия от гонки с ручным исключением).
+  // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
+  // самого свипа (выборка кандидатов + запись); перечитывание deletedAt в
+  // updateMany — вторая линия от гонки с ручным исключением. Гард читает ВНЕ
+  // транзакции (hasOpenAwards идёт через this.prisma, отдельное соединение):
+  // остаётся узкое окно «award закоммичен между гард-чеком и коммитом свипа» —
+  // принято как риск MVP (свип раз в CLEANUP_INTERVAL, окно миллисекунды).
+  // Закрытие окна — design-level решение (tx-aware гард / serializable+retry),
+  // зафиксировано в леджере для владельца.
   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
     return this.prisma.$transaction(async (tx) => {
