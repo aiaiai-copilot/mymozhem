@@ -1,4 +1,9 @@
-import { AppRejection, type AppCommit, type AppHostContext } from '@mymozhem/sdk';
+import {
+  AppRejection,
+  type AppEffect,
+  type AppHostContext,
+  type AppPublishResult,
+} from '@mymozhem/sdk';
 import type { z } from 'zod';
 import type {
   answerSubmittedPayload,
@@ -23,7 +28,7 @@ function requireOrganizer(ctx: Ctx): void {
   }
 }
 
-function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
+function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
   requireOrganizer(ctx);
   if (ctx.state.finished) {
     throw new AppRejection('ROUND_NOT_OPEN', 'игра завершена');
@@ -35,10 +40,13 @@ function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, 
   if (p.questionIndex >= settings.questions.length) {
     throw new AppRejection('QUESTION_UNKNOWN', `вопроса с индексом ${p.questionIndex} нет в настройках`);
   }
-  return [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }];
+  return {
+    commits: [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }],
+    effects: [],
+  };
 }
 
-function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
+function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
   // Организатор не играет; SPECTATOR отсекается ядром раньше — ветка защитная.
   if (ctx.actorRole !== 'PARTICIPANT') {
     throw new AppRejection('PUBLISH_FORBIDDEN', 'отвечать могут только участники');
@@ -66,15 +74,18 @@ function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, 
   ) {
     throw new AppRejection('ANSWER_TOO_FAST', 'ответ отправлен раньше минимального интервала');
   }
-  return [
-    { shortName: 'answer.submitted', payload, visibility: 'module-private', actor: 'publisher' },
-    {
-      shortName: 'answer.accepted',
-      payload: { questionIndex: p.questionIndex, actorId: ctx.actorId },
-      visibility: 'public',
-      actor: 'server',
-    },
-  ];
+  return {
+    commits: [
+      { shortName: 'answer.submitted', payload, visibility: 'module-private', actor: 'publisher' },
+      {
+        shortName: 'answer.accepted',
+        payload: { questionIndex: p.questionIndex, actorId: ctx.actorId },
+        visibility: 'public',
+        actor: 'server',
+      },
+    ],
+    effects: [],
+  };
 }
 
 // Детерминированный порядок табло: по убыванию total, при равенстве — по actorId.
@@ -82,7 +93,7 @@ function byTotalDescThenActor(a: { actorId: string; total: number }, b: { actorI
   return b.total - a.total || (a.actorId < b.actorId ? -1 : a.actorId > b.actorId ? 1 : 0);
 }
 
-function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
+function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
   requireOrganizer(ctx);
   const { state } = ctx;
   const p = payload as z.infer<typeof questionClosedPayload>;
@@ -108,23 +119,33 @@ function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string,
   const totals = Object.entries(totalsMap)
     .map(([actorId, total]) => ({ actorId, total }))
     .sort(byTotalDescThenActor);
-  return [
-    { shortName: 'question.closed', payload, visibility: 'public', actor: 'publisher' },
-    {
-      shortName: 'question.revealed',
-      payload: {
-        questionIndex,
-        awarded,
-        totals,
-        ...(correctIndex !== undefined ? { correctIndex } : {}),
+  // Начисления rewards (design §5): reveal-событие и ledger-записи коммитятся
+  // одной транзакцией с эффектами. Табло остаётся проекцией квиза; ledger —
+  // платформенная запись. Дублирование осознанное; инвариант «менять вместе»:
+  // изменение скоринга трогает обе записи; сходимость — e2e Task 13.
+  const effects: AppEffect[] = awarded
+    .filter((a) => a.points > 0) // clamp-ветка шкалы не порождает нулевых грантов
+    .map((a) => ({ kind: 'award.points', identityId: a.actorId, points: a.points, reason: 'quiz.round' }));
+  return {
+    commits: [
+      { shortName: 'question.closed', payload, visibility: 'public', actor: 'publisher' },
+      {
+        shortName: 'question.revealed',
+        payload: {
+          questionIndex,
+          awarded,
+          totals,
+          ...(correctIndex !== undefined ? { correctIndex } : {}),
+        },
+        visibility: 'public',
+        actor: 'server',
       },
-      visibility: 'public',
-      actor: 'server',
-    },
-  ];
+    ],
+    effects,
+  };
 }
 
-function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppCommit[] {
+function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppPublishResult {
   requireOrganizer(ctx);
   if (ctx.state.finished) {
     throw new AppRejection('ROUND_NOT_OPEN', 'игра уже завершена');
@@ -144,17 +165,20 @@ function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppCommit[] {
     }
     return { ...entry, place };
   });
-  return [
-    { shortName: 'game.finish', payload, visibility: 'public', actor: 'publisher' },
-    { shortName: 'game.finished', payload: { standings }, visibility: 'public', actor: 'server' },
-  ];
+  return {
+    commits: [
+      { shortName: 'game.finish', payload, visibility: 'public', actor: 'publisher' },
+      { shortName: 'game.finished', payload: { standings }, visibility: 'public', actor: 'server' },
+    ],
+    effects: [], // game.finished эффектов не несёт (решение §0.8)
+  };
 }
 
 export function handleQuizPublish(
   ctx: AppHostContext<QuizState>,
   shortName: string,
   payload: Record<string, unknown>,
-): AppCommit[] {
+): AppPublishResult {
   const settings = quizSettingsSchema.parse(ctx.settings);
   switch (shortName) {
     case 'question.opened':

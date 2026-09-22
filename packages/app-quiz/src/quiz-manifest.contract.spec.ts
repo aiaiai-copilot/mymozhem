@@ -37,6 +37,13 @@ describe('quiz manifest', () => {
     expect(manifest.manifestVersion).toBe(QUIZ_MANIFEST_VERSION);
   });
 
+  // Фаза 3 (REQ-RWD-001, REQ-RT-004): пин версии 2 и capability rewards —
+  // начисления баллов уходят эффектами, исполняемыми рантаймом.
+  it('pins manifestVersion 2 with the rewards capability', () => {
+    expect(QUIZ_MANIFEST_VERSION).toBe(2);
+    expect(manifest.capabilities).toEqual(['rewards']);
+  });
+
   it('registers exactly the 7 quiz event types', () => {
     expect(Object.keys(manifest.events).sort()).toEqual(
       EXPECTED_EVENTS.map(([name]) => name).sort(),

@@ -1,6 +1,5 @@
 import {
   AppRejection,
-  type AppCommit,
   type AppHostContext,
   type ContractErrorCode,
 } from '@mymozhem/sdk';
@@ -103,10 +102,13 @@ describe('handleQuizPublish / question.opened', () => {
   });
 
   it('commits question.opened as public/publisher on happy path', async () => {
-    const commits = (await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 })) as AppCommit[];
-    expect(commits).toEqual([
-      { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
-    ]);
+    const result = await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 });
+    expect(result).toEqual({
+      commits: [
+        { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
+      ],
+      effects: [],
+    });
   });
 });
 
@@ -166,49 +168,55 @@ describe('handleQuizPublish / answer.submitted', () => {
   });
 
   it('REQ-RT-013: accepts an answer at exactly the interval boundary', async () => {
-    const commits = (await submit(
+    const result = await submit(
       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0), now: '2026-09-09T12:00:01.000Z' },
       { questionIndex: 0, optionIndex: 1 },
-    )) as AppCommit[];
-    expect(commits).toHaveLength(2);
+    );
+    expect(result.commits).toHaveLength(2);
+    expect(result.effects).toEqual([]);
   });
 
   it('REQ-RT-013: minAnswerIntervalMs = 0 disables the control entirely', async () => {
     const settings: QuizSettings = { ...SETTINGS, minAnswerIntervalMs: 0 };
-    const commits = (await submit(
+    const result = await submit(
       { actorRole: 'PARTICIPANT', actorId: P1, settings, state: openState(0), now: T0 },
       { questionIndex: 0, optionIndex: 1 },
-    )) as AppCommit[];
-    expect(commits).toHaveLength(2);
+    );
+    expect(result.commits).toHaveLength(2);
+    expect(result.effects).toEqual([]);
   });
 
   it('accepts when openedAt is null (no open timestamp recorded)', async () => {
-    const commits = (await submit(
+    const result = await submit(
       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0, { openedAt: null }), now: T0 },
       { questionIndex: 0, optionIndex: 1 },
-    )) as AppCommit[];
-    expect(commits).toHaveLength(2);
+    );
+    expect(result.commits).toHaveLength(2);
+    expect(result.effects).toEqual([]);
   });
 
   it('commits answer.submitted (module-private/publisher) + answer.accepted (public/server) on happy path', async () => {
-    const commits = (await submit(
+    const result = await submit(
       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0), now: '2026-09-09T12:00:02.000Z' },
       { questionIndex: 0, optionIndex: 1 },
-    )) as AppCommit[];
-    expect(commits).toEqual([
-      {
-        shortName: 'answer.submitted',
-        payload: { questionIndex: 0, optionIndex: 1 },
-        visibility: 'module-private',
-        actor: 'publisher',
-      },
-      {
-        shortName: 'answer.accepted',
-        payload: { questionIndex: 0, actorId: P1 },
-        visibility: 'public',
-        actor: 'server',
-      },
-    ]);
+    );
+    expect(result).toEqual({
+      commits: [
+        {
+          shortName: 'answer.submitted',
+          payload: { questionIndex: 0, optionIndex: 1 },
+          visibility: 'module-private',
+          actor: 'publisher',
+        },
+        {
+          shortName: 'answer.accepted',
+          payload: { questionIndex: 0, actorId: P1 },
+          visibility: 'public',
+          actor: 'server',
+        },
+      ],
+      effects: [],
+    });
   });
 });
 
@@ -239,8 +247,8 @@ describe('handleQuizPublish / question.closed', () => {
         [P3]: { optionIndex: 0, seq: 2 }, // wrong
       },
     });
-    const commits = (await close({ state }, { questionIndex: 0 })) as AppCommit[];
-    expect(commits).toEqual([
+    const result = await close({ state }, { questionIndex: 0 });
+    expect(result.commits).toEqual([
       { shortName: 'question.closed', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
       {
         shortName: 'question.revealed',
@@ -262,23 +270,70 @@ describe('handleQuizPublish / question.closed', () => {
     ]);
   });
 
+  it('начисления: эффект award.points на каждого ответившего с points > 0, reason quiz.round', async () => {
+    // Два правильных ответа (P2 быстрее P1) и один неверный;
+    // scoring { base: 1000, step: 100 } → awarded P2=1000, P1=900.
+    const state = openState(0, {
+      answers: {
+        [P1]: { optionIndex: 1, seq: 3 }, // correct, second
+        [P2]: { optionIndex: 1, seq: 1 }, // correct, first
+        [P3]: { optionIndex: 0, seq: 2 }, // wrong
+      },
+    });
+    const result = await close({ state }, { questionIndex: 0 });
+    expect(result.effects).toEqual([
+      { kind: 'award.points', identityId: P2, points: 1000, reason: 'quiz.round' },
+      { kind: 'award.points', identityId: P1, points: 900, reason: 'quiz.round' },
+    ]);
+    // Неверный ответ эффекта не даёт; reveal-коммит не изменился (awarded/totals как прежде).
+    expect(result.commits.map((c) => c.shortName)).toEqual(['question.closed', 'question.revealed']);
+    expect(result.commits[1].payload.awarded).toEqual([
+      { actorId: P2, points: 1000 },
+      { actorId: P1, points: 900 },
+    ]);
+  });
+
+  it('clamp-ветка скоринга (points = 0) эффекта не порождает', async () => {
+    // scoring { base: 100, step: 100 }, три правильных ответа: 100, 0, 0 →
+    // эффект только на первого (points > 0).
+    const settings: QuizSettings = { ...SETTINGS, scoring: { base: 100, step: 100 } };
+    const state = openState(0, {
+      answers: {
+        [P1]: { optionIndex: 1, seq: 1 },
+        [P2]: { optionIndex: 1, seq: 2 },
+        [P3]: { optionIndex: 1, seq: 3 },
+      },
+    });
+    const result = await close({ settings, state }, { questionIndex: 0 });
+    expect(result.effects).toEqual([
+      { kind: 'award.points', identityId: P1, points: 100, reason: 'quiz.round' },
+    ]);
+    // Нулевые начисления остаются видимы в reveal (табло), но не в ledger.
+    expect(result.commits[1].payload.awarded).toEqual([
+      { actorId: P1, points: 100 },
+      { actorId: P2, points: 0 },
+      { actorId: P3, points: 0 },
+    ]);
+  });
+
   it('merges awarded points into pre-existing totals', async () => {
     const state = openState(0, {
       totals: { [P1]: 500 },
       answers: { [P1]: { optionIndex: 1, seq: 1 } },
     });
-    const commits = (await close({ state }, { questionIndex: 0 })) as AppCommit[];
-    const revealed = commits[1];
+    const result = await close({ state }, { questionIndex: 0 });
+    const revealed = result.commits[1];
     expect(revealed.payload.totals).toEqual([{ actorId: P1, total: 1500 }]);
   });
 
   it('omits correctIndex and awards nothing when the question has no configured correct answer', async () => {
     const settings: QuizSettings = { ...SETTINGS, correctAnswers: [] };
     const state = openState(0, { answers: { [P1]: { optionIndex: 1, seq: 1 } } });
-    const commits = (await close({ settings, state }, { questionIndex: 0 })) as AppCommit[];
-    const revealed = commits[1];
+    const result = await close({ settings, state }, { questionIndex: 0 });
+    const revealed = result.commits[1];
     expect(revealed.payload).toEqual({ questionIndex: 0, awarded: [], totals: [] });
     expect(revealed.payload).not.toHaveProperty('correctIndex');
+    expect(result.effects).toEqual([]);
   });
 });
 
@@ -299,33 +354,37 @@ describe('handleQuizPublish / game.finish', () => {
       ...initialQuizState(),
       totals: { [P1]: 100, [P2]: 50, [P3]: 50, [P4]: 30 },
     };
-    const commits = (await finish({ state })) as AppCommit[];
-    expect(commits).toEqual([
-      { shortName: 'game.finish', payload: {}, visibility: 'public', actor: 'publisher' },
-      {
-        shortName: 'game.finished',
-        payload: {
-          standings: [
-            { actorId: P1, total: 100, place: 1 },
-            { actorId: P2, total: 50, place: 2 },
-            { actorId: P3, total: 50, place: 2 },
-            { actorId: P4, total: 30, place: 3 },
-          ],
+    const result = await finish({ state });
+    expect(result).toEqual({
+      commits: [
+        { shortName: 'game.finish', payload: {}, visibility: 'public', actor: 'publisher' },
+        {
+          shortName: 'game.finished',
+          payload: {
+            standings: [
+              { actorId: P1, total: 100, place: 1 },
+              { actorId: P2, total: 50, place: 2 },
+              { actorId: P3, total: 50, place: 2 },
+              { actorId: P4, total: 30, place: 3 },
+            ],
+          },
+          visibility: 'public',
+          actor: 'server',
         },
-        visibility: 'public',
-        actor: 'server',
-      },
-    ]);
+      ],
+      effects: [],
+    });
   });
 
   it('finishes with empty standings when nobody scored', async () => {
-    const commits = (await finish({})) as AppCommit[];
-    expect(commits[1]).toEqual({
+    const result = await finish({});
+    expect(result.commits[1]).toEqual({
       shortName: 'game.finished',
       payload: { standings: [] },
       visibility: 'public',
       actor: 'server',
     });
+    expect(result.effects).toEqual([]);
   });
 });
 
@@ -355,10 +414,13 @@ describe('createQuizRuntime / createQuizApp', () => {
 
   it('dispatches handlePublish through the runtime module', async () => {
     const runtime = createQuizRuntime();
-    const commits = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
-    expect(commits).toEqual([
-      { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
-    ]);
+    const result = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
+    expect(result).toEqual({
+      commits: [
+        { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
+      ],
+      effects: [],
+    });
   });
 
   it('createQuizApp returns the manifest and the runtime', () => {
