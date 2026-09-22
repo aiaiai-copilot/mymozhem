@@ -116,17 +116,27 @@ describe('RewardsService (int)', () => {
     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(2);
   });
 
-  it('конкурентный дубль одного награждения → один победитель, quantity −1 ровно раз (REQ-RWD-003)', async () => {
+  it('конкурентный дубль одного награждения → один победитель, quantity −1 ровно раз, транзакция после no-op жива (REQ-RWD-003)', async () => {
     const { room, prize } = await seedPrize(5);
     const winner = await guest();
-    const results = await Promise.allSettled([
-      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
-      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
-    ]);
-    // Оба завершились успешно: повтор — типизированный no-op, не отказ.
-    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    const pointsTarget = await guest();
+    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
+    // Повтор — в батче с award.points в ОДНОМ executeEffects (дубль первым, до
+    // points), последовательно после первого прогона: no-op дубля не должен
+    // отравлять транзакцию — sibling-эффект обязан закоммититься (unique-violation
+    // в Postgres абортит tx; не-возбуждающий ON CONFLICT DO NOTHING — нет).
+    await outbox.run((tx) =>
+      rewards.executeEffects(tx, room.id, 'lottery', [
+        prizeEffect(prize.id, winner.id), // сетевой повтор — типизированный no-op, не отказ
+        { kind: 'award.points', identityId: pointsTarget.id, points: 10, reason: 'tx-alive' },
+      ]),
+    );
     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(1);
     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(4);
+    // Транзакция прогона-дубля жила до конца: points-запись закоммичена ровно раз.
+    const grants = await db.prisma.pointsGrant.findMany({ where: { roomId: room.id } });
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ identityId: pointsTarget.id, points: 10 });
   });
 
   it('повторное вручение — типизированный no-op; cross-переход (revoke после fulfill) — REWARD_ALREADY_RESOLVED (REQ-RWD-007)', async () => {

@@ -67,25 +67,28 @@ export class RewardsService {
   ): Promise<void> {
     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
     if (!prize) throw new PrizeUnknownError(prizeId);
-    let awardId: string;
-    try {
-      const award = await tx.award.create({
-        data: { roomId, prizeId, winnerId, sourceAppId },
-      });
-      awardId = award.id;
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        return; // сетевой повтор того же награждения — типизированный no-op
-      }
-      throw err;
-    }
+    // НЕ try/catch P2002: unique-violation абортит Postgres-транзакцию (25P02 на
+    // каждый следующий statement, COMMIT молча откатывает) — в батче эффектов это
+    // убило бы sibling-эффекты и коммиты событий. Дубль — не-возбуждающим
+    // INSERT ... ON CONFLICT DO NOTHING по частичному индексу (REQ-RWD-003).
+    // Не-nullable колонок без DB-дефолта, кроме перечисленных, в модели нет.
+    const inserted = await tx.$executeRaw`
+      INSERT INTO rewards."Award" (id, "roomId", "prizeId", "winnerId", "sourceAppId")
+      VALUES (gen_random_uuid(), ${roomId}::uuid, ${prizeId}::uuid, ${winnerId}::uuid, ${sourceAppId})
+      ON CONFLICT ("roomId", "prizeId", "winnerId") WHERE "status" IN ('AWARDED', 'FULFILLED') DO NOTHING`;
+    if (inserted === 0) return; // сетевой повтор — no-op ДО декремента: фонд не тратим
+    // id вставленной строки — перечиткой по ключу индекса (прецедент re-read —
+    // insertRoom, HANDOFF: adapter-pg + RETURNING из raw INSERT надёжнее обходить).
+    const award = await tx.award.findFirstOrThrow({
+      where: { roomId, prizeId, winnerId, status: { in: ['AWARDED', 'FULFILLED'] } },
+    });
     const decremented = await tx.$executeRaw`
       UPDATE rewards."Prize" SET quantity = quantity - 1, "updatedAt" = now()
       WHERE id = ${prizeId}::uuid AND quantity >= 1`;
     if (decremented === 0) throw new PrizeFundExhaustedError(prizeId); // откатит insert
     // REQ-SEC-009: payload — только id.
     await this.eventLog.commitRewardsEvent(tx, roomId, 'reward.awarded', {
-      awardId,
+      awardId: award.id,
       prizeId,
       winnerId,
       sourceAppId,

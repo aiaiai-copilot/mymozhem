@@ -1,6 +1,7 @@
 import { ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
+import { ContractError } from '@mymozhem/sdk';
 import { AuthError } from '../auth/auth.errors';
 import {
   ActorNotMemberError,
@@ -13,13 +14,11 @@ import {
 } from '../membership/membership.errors';
 import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
 import { RoomOrganizerNotRegisteredError, RoomTransitionError } from '../room/room.errors';
-import { EventTypeUnknownError, RoomNotActiveError } from '../realtime/realtime.errors';
 import {
-  AwardUnknownError,
-  PrizeFundExhaustedError,
-  PrizeUnknownError,
-  RewardAlreadyResolvedError,
-} from '../rewards/rewards.errors';
+  ActorNotMemberError as RealtimeActorNotMemberError,
+  EventTypeUnknownError,
+  RoomNotActiveError,
+} from '../realtime/realtime.errors';
 import { HttpExceptionFilter } from './http-exception.filter';
 
 type ReplyMock = { status: jest.Mock; send: jest.Mock };
@@ -75,14 +74,20 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['room transition (прочий RoomError)', new RoomTransitionError('x'), 500, 'INTERNAL_ERROR'],
     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
-    ['prize unknown', new PrizeUnknownError('p'), 404, 'PRIZE_UNKNOWN'],
-    ['award unknown', new AwardUnknownError('a'), 404, 'AWARD_UNKNOWN'],
-    ['prize fund exhausted', new PrizeFundExhaustedError('p'), 409, 'PRIZE_FUND_EXHAUSTED'],
-    ['reward already resolved', new RewardAlreadyResolvedError('a', 'FULFILLED'), 409, 'REWARD_ALREADY_RESOLVED'],
+    // Кейсы кидают голый ContractError (не конкретные классы rewards): остальному
+    // core нельзя импортировать core/rewards (boundary Task 11 круизит и спеки).
+    ['prize unknown', new ContractError('PRIZE_UNKNOWN', 'x'), 404, 'PRIZE_UNKNOWN'],
+    ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
+    ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
+    ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
     // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
     ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],
-    // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE.
+    // Пин второго realtime-кода ветки: realtime-вариант ActorNotMemberError (гейт
+    // эмита) — тот же wire-код/статус, что membership-вариант выше.
+    ['actor not member (realtime-вариант)', new RealtimeActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
+    // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE
+    // и ACTOR_NOT_MEMBER.
     ['event type unknown (прочий RealtimeError)', new EventTypeUnknownError('x'), 500, 'INTERNAL_ERROR'],
     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],

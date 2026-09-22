@@ -92,9 +92,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
     if (exception instanceof ContractError && exception.code in STATUS_BY_WIRE_CODE) {
       return exception.code as WireCode;
     }
-    // RoomNotActiveError (createPrize, rewards ф.3) — RealtimeError, НЕ ContractError:
-    // симметричная ветка паритета. Blast radius ровно ROOM_NOT_ACTIVE — единственный
-    // realtime-код в STATUS_BY_WIRE_CODE; прочие падают в INTERNAL_ERROR ниже.
+    // RoomNotActiveError (createPrize, rewards ф.3) и realtime-вариант
+    // ActorNotMemberError (membership-гейт эмита, realtime-срез) — RealtimeError,
+    // НЕ ContractError: симметричная ветка паритета, охраняемая членством кода в
+    // STATUS_BY_WIRE_CODE. Blast radius ровно два realtime-кода: ROOM_NOT_ACTIVE
+    // (409) и ACTOR_NOT_MEMBER (403 — тот же wire-код и статус, что у
+    // membership-варианта в ветке выше); прочие падают в INTERNAL_ERROR ниже.
     if (exception instanceof RealtimeError && exception.code in STATUS_BY_WIRE_CODE) {
       return exception.code as WireCode;
     }
