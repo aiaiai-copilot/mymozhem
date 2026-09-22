@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { randomInt } from 'node:crypto';
 import {
   appCommitSchema,
@@ -19,6 +19,7 @@ import { AppModuleUnavailableError, PublishForbiddenError } from './app-runtime.
 import { RoomSerializer } from './room-serializer';
 import { AppProjectionCache } from './app-projection-cache';
 import { APP_RUNTIME_MODULES, type RegisteredRuntimeModules } from './app-runtime.tokens';
+import { AWARD_EFFECT_HANDLER, type AwardEffectHandler } from './effects';
 
 // Командный хост (design 2026-09-09 §2): клиентский publish app-типа исполняется
 // модулем ДО коммита; модуль возвращает события или бросает типизированный отказ.
@@ -36,6 +37,8 @@ export class AppRuntimeService {
     private readonly outbox: EventOutbox,
     private readonly projections: AppProjectionCache,
     @Inject(APP_RUNTIME_MODULES) private readonly modules: RegisteredRuntimeModules,
+    @Optional() @Inject(AWARD_EFFECT_HANDLER)
+    private readonly awardEffectHandler?: AwardEffectHandler,
   ) {}
 
   invalidateProjection(roomId: string): void {
@@ -90,6 +93,7 @@ export class AppRuntimeService {
     if (!mod) {
       throw new AppModuleUnavailableError(room.appId, room.manifestVersion);
     }
+    const hasRewardsCapability = mod.manifest.capabilities?.includes('rewards') ?? false;
     // 4. Тип — клиентская команда пиннутого манифеста. Производные типы клиенту закрыты.
     const eventDef = this.appRegistry.getEventDefinition(room.appId, room.manifestVersion, params.shortName);
     if (!eventDef) {
@@ -116,11 +120,13 @@ export class AppRuntimeService {
       settings: room.appSettings,
       state,
       now: new Date().toISOString(),
-      // Хост-примитивы (design 2026-09-10 §2). drawPool наполняется только для
-      // модулей с capability 'rewards' — в Task 7; до него всегда пуст (ни один
-      // модуль с capability ещё не зарегистрирован).
+      // Хост-примитивы (design 2026-09-10 §2). Пул — только модулю с capability
+      // 'rewards' (design §2): publish'и квиза не грузят membership. Запрос до
+      // вызова модуля, снапшот на момент команды.
       randomInt: (boundExclusive: number) => randomInt(boundExclusive),
-      drawPool: [],
+      drawPool: hasRewardsCapability
+        ? await this.membership.listActiveParticipantPool(params.roomId)
+        : [],
     };
     // 7. Вызов модуля. AppRejection (ContractError) уходит наверх как есть —
     //    до коммита ничего не пишется.
@@ -136,13 +142,22 @@ export class AppRuntimeService {
         );
       }
     }
+    let effectHandler: AwardEffectHandler | undefined;
     if (effects.length > 0) {
-      // Исполнитель эффектов — Task 7 (AWARD_EFFECT_HANDLER + capability-гейт).
-      // До него любой эффект — типизированный отказ, коммитов не было (fail-closed).
-      throw new ContractError(
-        'CAPABILITY_UNAVAILABLE',
-        'award effects are not executable in this deployment',
-      );
+      if (!hasRewardsCapability) {
+        // Эффект награждения без capability манифеста — отказ до исполнения (REQ-RWD-001).
+        throw new ContractError(
+          'CAPABILITY_UNAVAILABLE',
+          `module ${mod.appId}@${mod.manifestVersion} emitted award effects without the 'rewards' capability`,
+        );
+      }
+      effectHandler = this.awardEffectHandler;
+      if (!effectHandler) {
+        throw new ContractError(
+          'CAPABILITY_UNAVAILABLE',
+          'rewards effect handler is not wired in this deployment',
+        );
+      }
     }
     for (const commit of commits) {
       const parsed = appCommitSchema.safeParse(commit);
@@ -152,9 +167,15 @@ export class AppRuntimeService {
       }
     }
     // 8. Коммиты — через единственный путь записи, в одной транзакции, в порядке
-    //    массива (seq возрастает — порядок модулем задан осознанно).
-    if (commits.length > 0) {
+    //    массива (seq возрастает — порядок модулем задан осознанно). Транзакция
+    //    открывается и для effect-only publish (коммитов может не быть).
+    if (commits.length > 0 || effectHandler) {
       const committed = await this.outbox.run(async (tx) => {
+        // Эффекты ДО событий (design §2): событие «победитель определён» не попадает
+        // в лог, если награждение не состоялось; отказ эффекта откатывает всё.
+        if (effectHandler) {
+          await effectHandler.executeEffects(tx, params.roomId, mod.appId, effects);
+        }
         const out = [];
         for (const commit of commits) {
           out.push(
@@ -171,7 +192,9 @@ export class AppRuntimeService {
         return out;
       });
       // 9. Тёплый fold: проекция продвигается закоммиченными событиями.
-      this.foldCommitted(mod, params.roomId, state, committed);
+      if (committed.length > 0) {
+        this.foldCommitted(mod, params.roomId, state, committed);
+      }
     }
   }
 

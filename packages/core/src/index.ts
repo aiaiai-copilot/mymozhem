@@ -11,6 +11,7 @@ export * from './app-registry/app-registry.service';
 export * from './app-registry/app-registry.module';
 export * from './app-runtime/app-runtime.tokens';
 export * from './app-runtime/app-runtime.errors';
+export * from './app-runtime/effects';
 export * from './app-runtime/room-serializer';
 export * from './app-runtime/app-projection-cache';
 export * from './app-runtime/app-runtime.service';

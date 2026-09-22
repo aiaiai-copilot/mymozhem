@@ -1,4 +1,6 @@
-import type { AppManifest, AppRuntimeModule, AppHostContext, AppLogEvent, AppCommit, AppPublishResult } from '@mymozhem/sdk';
+import { randomUUID } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
+import type { AppManifest, AppRuntimeModule, AppHostContext, AppLogEvent, AppCommit, AppEffect, AppPublishResult } from '@mymozhem/sdk';
 import { AppRejection, ContractError } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
@@ -17,6 +19,8 @@ import { EventPayloadInvalidError, RoomNotActiveError } from '../realtime/realti
 import { AppRuntimeService } from './app-runtime.service';
 import { AppProjectionCache } from './app-projection-cache';
 import { PublishForbiddenError, AppModuleUnavailableError } from './app-runtime.errors';
+import type { AwardEffectHandler } from './effects';
+import { RewardsService } from '../rewards/rewards.service';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 const P1 = '00000000-0000-0000-0000-0000000000a1';
@@ -76,6 +80,10 @@ const TEST_APP: AppManifest = {
 // Вторая версия манифеста — для теста «пин на версию без зарегистрированного
 // рантайм-модуля» (реестр знает манифест, диспетчер модуль — нет).
 const TEST_APP_V2: AppManifest = { ...TEST_APP, manifestVersion: 2 };
+
+// Третья версия — с capability 'rewards' (фаза 3): тот же appId, чтобы работали
+// хелперы dispatch/activeRoom; реестр принимает версии одного appId массивом.
+const TEST_APP_CAPABLE: AppManifest = { ...TEST_APP, manifestVersion: 3, capabilities: ['rewards'] };
 
 interface TestState {
   sum: number;
@@ -156,6 +164,57 @@ class EffectEmittingRuntime implements AppRuntimeModule<TestState> {
   }
 }
 
+// Capability-модуль (manifest с capabilities: ['rewards'], версия 3): захватывает
+// ctx (drawPool/randomInt — шпион для тестов хост-примитивов) и возвращает
+// заданные commits/effects. Композиция над TestAppRuntime — как EffectEmittingRuntime.
+class CapableRuntime implements AppRuntimeModule<TestState> {
+  private readonly base = new TestAppRuntime();
+  readonly appId = this.base.appId;
+  readonly manifestVersion = 3;
+  readonly manifest = TEST_APP_CAPABLE;
+  observedCtx: AppHostContext<TestState> | null = null;
+
+  constructor(private readonly result: AppPublishResult) {}
+
+  initialState(): TestState {
+    return this.base.initialState();
+  }
+
+  reduce(state: TestState, event: AppLogEvent): TestState {
+    return this.base.reduce(state, event);
+  }
+
+  handlePublish(ctx: AppHostContext<TestState>): AppPublishResult {
+    this.observedCtx = ctx;
+    return this.result;
+  }
+}
+
+// Plain-модуль формы 1.6.0 БЕЗ capabilities (манифест TEST_APP): возвращает
+// заданный AppPublishResult (commits + effects), захватывает ctx.
+class PlainResultRuntime implements AppRuntimeModule<TestState> {
+  private readonly base = new TestAppRuntime();
+  readonly appId = this.base.appId;
+  readonly manifestVersion = this.base.manifestVersion;
+  readonly manifest = this.base.manifest;
+  observedCtx: AppHostContext<TestState> | null = null;
+
+  constructor(private readonly result: AppPublishResult) {}
+
+  initialState(): TestState {
+    return this.base.initialState();
+  }
+
+  reduce(state: TestState, event: AppLogEvent): TestState {
+    return this.base.reduce(state, event);
+  }
+
+  handlePublish(ctx: AppHostContext<TestState>): AppPublishResult {
+    this.observedCtx = ctx;
+    return this.result;
+  }
+}
+
 describe('AppRuntimeService (командный хост, design 2026-09-09 §2)', () => {
   let db: TestDb;
   let rooms: RoomService;
@@ -177,7 +236,7 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
     for (let i = 0; i < 20; i++) {
       await seedIdentity(db.prisma, { id: racerId(i), kind: 'GUEST' });
     }
-    registry = new AppRegistryService([TEST_APP, TEST_APP_V2]);
+    registry = new AppRegistryService([TEST_APP, TEST_APP_V2, TEST_APP_CAPABLE]);
     bus = new RealtimeBus();
     outbox = new EventOutbox(db.prisma, bus);
     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
@@ -423,8 +482,8 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
     expect(testModule.observedSums).toEqual([0, 1, 3]);
   });
 
-  const runtimeWith = (modules: AppRuntimeModule<TestState>[]) =>
-    new AppRuntimeService(db.prisma, membership, registry, eventLog, outbox, new AppProjectionCache(), modules);
+  const runtimeWith = (modules: AppRuntimeModule<TestState>[], awardHandler?: AwardEffectHandler) =>
+    new AppRuntimeService(db.prisma, membership, registry, eventLog, outbox, new AppProjectionCache(), modules, awardHandler);
 
   it('10. валидный эффект до появления исполнителя (Task 7) → CAPABILITY_UNAVAILABLE, коммитов нет (fail-closed)', async () => {
     const room = await activeRoom();
@@ -460,5 +519,193 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
     expect(err).toBeInstanceOf(ContractError);
     expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
     expect(await appEventsOf(room.id)).toHaveLength(0);
+  });
+
+  // Task 7 (design 2026-09-10 §2): исполнение эффектов, capability-гейт,
+  // наполнение хост-примитивов drawPool/randomInt.
+  describe('эффекты и хост-примитивы (Task 7)', () => {
+    it('backward compat: модуль, вернувший голый AppCommit[], коммитится как прежде', async () => {
+      const room = await activeRoom();
+      await join(room.id, P1);
+
+      // TestAppRuntime.handlePublish возвращает старую форму — голый массив.
+      await dispatch(room.id, P1, 'note.posted', { n: 5 });
+
+      const appEvents = await appEventsOf(room.id);
+      expect(appEvents.map((e) => e.type)).toEqual(['test-app.note.posted', 'test-app.note.echoed']);
+    });
+
+    it('эффекты без capability → CAPABILITY_UNAVAILABLE, в лог ничего не попадает', async () => {
+      const room = await activeRoom();
+      await join(room.id, P1);
+      // identityId — RFC 4122 uuid (см. тест 10: version-нибл 0 не пройдёт z.uuid()).
+      const effect: AppEffect = {
+        kind: 'award.points',
+        identityId: '00000000-0000-4000-8000-000000000001',
+        points: 100,
+        reason: 'test',
+      };
+      const mod = new PlainResultRuntime({
+        commits: [{ shortName: 'note.posted', payload: { n: 1 }, visibility: 'public', actor: 'publisher' }],
+        effects: [effect],
+      });
+      const rt = runtimeWith([mod]);
+      const baseline = await db.prisma.logEvent.count({ where: { roomId: room.id } });
+
+      const err = await rt
+        .dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ContractError);
+      expect((err as ContractError).code).toBe('CAPABILITY_UNAVAILABLE');
+      // Отказ до исполнения и до коммитов: ни echo-коммита, ни чего-либо ещё.
+      expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(baseline);
+    });
+
+    it('эффекты с capability, но без подключённого исполнителя → CAPABILITY_UNAVAILABLE (fail-closed)', async () => {
+      const room = await activeRoom(3);
+      await join(room.id, P1);
+      const effect: AppEffect = {
+        kind: 'award.points',
+        identityId: '00000000-0000-4000-8000-000000000001',
+        points: 10,
+      };
+      const mod = new CapableRuntime({ commits: [], effects: [effect] });
+      // AppRuntimeService сконструирован без 8-го аргумента — deployment без rewards.
+      const rt = runtimeWith([mod]);
+      const baseline = await db.prisma.logEvent.count({ where: { roomId: room.id } });
+
+      const err = await rt
+        .dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ContractError);
+      expect((err as ContractError).code).toBe('CAPABILITY_UNAVAILABLE');
+      expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(baseline);
+    });
+
+    it('с подключённым исполнителем эффекты исполняются ДО коммитов одной транзакцией: отказ эффекта откатывает события', async () => {
+      const room = await activeRoom(3);
+      await join(room.id, P1);
+      const effect: AppEffect = {
+        kind: 'award.points',
+        identityId: '00000000-0000-4000-8000-000000000001',
+        points: 10,
+      };
+      const mod = new CapableRuntime({
+        commits: [{ shortName: 'note.posted', payload: { n: 1 }, visibility: 'public', actor: 'publisher' }],
+        effects: [effect],
+      });
+      // Провайдер-спай: на момент вызова читает лог ВНУТРИ присланной tx —
+      // если бы коммиты шли до эффектов, незакоммиченные события были бы видны.
+      const logCountAtCall: number[] = [];
+      const spy: AwardEffectHandler = {
+        executeEffects: jest.fn(async (tx: Prisma.TransactionClient, roomId: string) => {
+          logCountAtCall.push(await tx.logEvent.count({ where: { roomId } }));
+          throw new ContractError('PRIZE_FUND_EXHAUSTED', 'simulated fund exhaustion');
+        }),
+      };
+      const rt = runtimeWith([mod], spy);
+      const baseline = await db.prisma.logEvent.count({ where: { roomId: room.id } });
+
+      const err = await rt
+        .dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ContractError);
+      expect((err as ContractError).code).toBe('PRIZE_FUND_EXHAUSTED');
+      expect(spy.executeEffects).toHaveBeenCalledTimes(1);
+      // Сигнатура шва: (tx, roomId, sourceAppId, effects) — как у RewardsService.
+      expect((spy.executeEffects as jest.Mock).mock.calls[0][1]).toBe(room.id);
+      expect((spy.executeEffects as jest.Mock).mock.calls[0][2]).toBe('test-app');
+      expect((spy.executeEffects as jest.Mock).mock.calls[0][3]).toEqual([effect]);
+      // Эффекты вызваны ДО коммитов: внутри tx лога ещё нет; отказ откатил всё.
+      expect(logCountAtCall).toEqual([baseline]);
+      expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(baseline);
+    });
+
+    it('дубль award.prize в одном dispatch с реальным RewardsService — typed no-op: приз выдан один раз, quantity −1, события модуля в логе', async () => {
+      const room = await activeRoom(3);
+      await join(room.id, P1);
+      const winner = await seedIdentity(db.prisma, { id: randomUUID(), kind: 'GUEST' });
+      await join(room.id, winner.id);
+      const prize = await db.prisma.prize.create({
+        data: { roomId: room.id, name: 'Приз', quantityTotal: 2, quantity: 2 },
+      });
+      const effect: AppEffect = { kind: 'award.prize', prizeId: prize.id, winnerId: winner.id };
+      const mod = new CapableRuntime({
+        commits: [
+          { shortName: 'note.posted', payload: { n: 1 }, visibility: 'public', actor: 'publisher' },
+          { shortName: 'note.echoed', payload: { n: 2 }, visibility: 'public', actor: 'server' },
+        ],
+        effects: [effect, effect], // сетевой повтор в одном батче — не отказ
+      });
+      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox);
+      const rt = runtimeWith([mod], rewardsHandler);
+
+      await rt.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
+
+      expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(1);
+      expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
+      const log = await readRoomLog(db.prisma, room.id);
+      expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(1);
+      expect(log.filter((e) => e.type === 'test-app.note.echoed')).toHaveLength(1);
+      expect(log.filter((e) => e.type === 'rewards.reward.awarded')).toHaveLength(1);
+    });
+
+    it('drawPool: capability-модуль получает активных PARTICIPANT (без организатора/зрителей/исключённых), plain-модуль — пустой пул', async () => {
+      const room = await activeRoom(3); // организатор ORG — член с ролью ORGANIZER
+      await join(room.id, P1);
+      await join(room.id, P2);
+      await join(room.id, SPEC, 'SPECTATOR');
+      await join(room.id, P3);
+      // Исключённый участник — soft-delete membership (прецедент MembershipService.exclude).
+      await db.prisma.membership.update({
+        where: { roomId_identityId: { roomId: room.id, identityId: P3 } },
+        data: { deletedAt: new Date() },
+      });
+      const capable = new CapableRuntime({ commits: [], effects: [] });
+      const rtCapable = runtimeWith([capable]);
+
+      await rtCapable.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
+
+      expect(capable.observedCtx?.drawPool).toHaveLength(2);
+      expect(capable.observedCtx?.drawPool).toEqual(
+        expect.arrayContaining([
+          { identityId: P1, kind: 'GUEST' },
+          { identityId: P2, kind: 'GUEST' },
+        ]),
+      );
+
+      // Plain-модуль (без capability): publish не грузит membership — пул пуст.
+      const plainRoom = await activeRoom();
+      await join(plainRoom.id, P1);
+      const plain = new PlainResultRuntime({ commits: [], effects: [] });
+      const rtPlain = runtimeWith([plain]);
+
+      await rtPlain.dispatch({ roomId: plainRoom.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
+
+      expect(plain.observedCtx?.drawPool).toEqual([]);
+    });
+
+    it('ctx.randomInt — node:crypto CSPRNG: границы и покрытие (REQ-RWD-011 sanity)', async () => {
+      const room = await activeRoom(3);
+      await join(room.id, P1);
+      const mod = new CapableRuntime({ commits: [], effects: [] });
+      const rt = runtimeWith([mod]);
+
+      await rt.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
+
+      const ctx = mod.observedCtx;
+      expect(ctx).not.toBeNull();
+      const seen = new Set<number>();
+      for (let i = 0; i < 3000; i++) {
+        const v = ctx!.randomInt(3);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThan(3);
+        seen.add(v);
+      }
+      expect(seen).toEqual(new Set([0, 1, 2]));
+    });
   });
 });

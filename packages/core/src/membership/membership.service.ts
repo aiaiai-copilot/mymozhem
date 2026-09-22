@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Identity, Membership, Prisma } from '@prisma/client';
-import { displayNameSchema } from '@mymozhem/sdk';
+import { displayNameSchema, type DrawPoolEntry } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdentityService } from '../identity/identity.service';
 import { APP_CONFIG } from '../config/config.tokens';
@@ -136,6 +136,22 @@ export class MembershipService {
       }
     }
     return { excluded: true };
+  }
+
+  // Снапшот пула розыгрыша для хост-примитива drawPool (design 2026-09-10 §2):
+  // активные PARTICIPANT-членства комнаты; организатор (роль ORGANIZER), зрители
+  // (SPECTATOR), исключённые и soft-deleted не входят. Комната удалённая — пул пуст.
+  async listActiveParticipantPool(roomId: string): Promise<DrawPoolEntry[]> {
+    const rows = await this.prisma.membership.findMany({
+      where: {
+        roomId,
+        role: 'PARTICIPANT',
+        deletedAt: null,
+        room: { deletedAt: null },
+      },
+      select: { identityId: true, identity: { select: { kind: true } } },
+    });
+    return rows.map((r) => ({ identityId: r.identityId, kind: r.identity.kind }));
   }
 
   // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
