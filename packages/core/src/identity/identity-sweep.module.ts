@@ -31,7 +31,12 @@ class GuestSweepScheduler implements OnApplicationBootstrap, OnApplicationShutdo
   }
 
   onApplicationShutdown(): void {
-    this.registry.deleteInterval('guest-sweep');
+    // Симметрия жизненного цикла: onApplicationBootstrap срабатывает на listen(),
+    // а e2e на app.inject() (init + close без listen) интервал не регистрирует —
+    // deleteInterval бросил бы "No Interval was found". Снятие идемпотентно.
+    if (this.registry.doesExist('interval', 'guest-sweep')) {
+      this.registry.deleteInterval('guest-sweep');
+    }
   }
 }
 

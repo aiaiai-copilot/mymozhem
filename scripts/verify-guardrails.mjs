@@ -35,6 +35,22 @@ writeFileSync(
   "import '../../../packages/core/src/health/health.module';\nexport const probe = 1;\n",
 );
 
+// 4) Rewards-boundary probe: a core domain outside rewards importing rewards
+// (forbidden: rewards-only-through-di-tokens, REQ-RWD-001 — связка только
+// через DI-токены AWARD_EFFECT_HANDLER / ANONYMIZATION_GUARDS). Импорт
+// относительный: пакетный путь '@mymozhem/core/src/…' depcruise не резолвит,
+// и probe ловил бы not-to-unresolvable вместо целевого правила.
+const rewardsProbe = 'packages/core/src/room/__probe-rewards-boundary.ts';
+writeFileSync(
+  rewardsProbe,
+  "import '../rewards/rewards.module';\nexport const probe = 1;\n",
+);
+
+// 5) Math.random probe: случайность app-модуля через Math.random
+// (forbidden: REQ-RWD-011 — только ctx.randomInt, CSPRNG хоста).
+const mathRandomProbe = 'packages/app-quiz/src/__probe-math-random.ts';
+writeFileSync(mathRandomProbe, 'export const x = Math.random();\n');
+
 try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
@@ -48,10 +64,20 @@ try {
     'apps → core src-internals import (dependency-cruiser)',
     `pnpm exec depcruise ${appsProbe} --config .dependency-cruiser.cjs`,
   );
+  expectFailure(
+    'core domain → rewards import (dependency-cruiser)',
+    `pnpm exec depcruise ${rewardsProbe} --config .dependency-cruiser.cjs`,
+  );
+  expectFailure(
+    'Math.random in app module (eslint)',
+    `pnpm exec eslint ${mathRandomProbe}`,
+  );
 } finally {
   rmSync(boundaryProbe, { force: true });
   rmSync('scripts/__probe__', { recursive: true, force: true });
   rmSync(appsProbe, { force: true });
+  rmSync(rewardsProbe, { force: true });
+  rmSync(mathRandomProbe, { force: true });
 }
 
 if (process.exitCode) {

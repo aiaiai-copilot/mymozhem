@@ -31,4 +31,18 @@ module.exports = tseslint.config(
     files: ['**/*.ts'],
     rules: moduleLevelMutableRule,
   },
+  {
+    // REQ-RWD-011 (решение владельца 2026-09-10): случайность app-модулей —
+    // только ctx.randomInt (CSPRNG хоста); Math.random отсекается машиной.
+    files: ['packages/app-*/src/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.object.name='Math'][callee.property.name='random']",
+          message: 'Случайность app-модулей — только ctx.randomInt (CSPRNG хоста, REQ-RWD-011).',
+        },
+      ],
+    },
+  },
 );

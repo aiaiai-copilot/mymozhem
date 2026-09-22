@@ -36,6 +36,22 @@ module.exports = {
       to: { path: 'node_modules/socket[.]io[/\\\\]' },
     },
     {
+      name: 'rewards-only-through-di-tokens',
+      comment:
+        'Ядро не зависит от rewards (REQ-RWD-001): связка — DI-токены AWARD_EFFECT_HANDLER ' +
+        '(app-runtime/effects) и ANONYMIZATION_GUARDS (identity); единственные точки, ' +
+        'импортирующие core/rewards, — barrel index.ts и сам модуль rewards.',
+      severity: 'error',
+      from: {
+        path: '^packages/core/src',
+        // int-spec — миниатюра composition root: интеграционный тест законно
+        // собирает реальный RewardsModule/RewardsService для проверки связки
+        // (guest-sweep.int-spec, app-runtime.int-spec); правило про продакшн-код.
+        pathNot: ['^packages/core/src/rewards', '^packages/core/src/index\\.ts$', '[.]int-spec[.]ts$'],
+      },
+      to: { path: '^packages/core/src/rewards' },
+    },
+    {
       name: 'no-circular',
       comment: 'Циклические зависимости запрещены.',
       severity: 'error',

@@ -7,6 +7,7 @@ import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membe
 import { EventLogService } from '../realtime/event-log.service';
 import { EventOutbox } from '../realtime/event-outbox';
 import { RoomNotActiveError } from '../realtime/realtime.errors';
+import type { AwardEffectHandler } from '../app-runtime/effects';
 import {
   AwardUnknownError,
   PrizeFundExhaustedError,
@@ -20,8 +21,10 @@ import {
 // 2) REST-методы (createPrize/listAwards/fulfill/revoke) — свои outbox.run.
 // События rewards.* коммитятся в той же транзакции (лог — нотификация и аудит,
 // ADR-005; таблицы остаются источником состояния).
+// implements AwardEffectHandler: DI-шов REQ-RWD-001 — app-runtime знает только
+// интерфейс; импорт типа rewards → app-runtime/effects разрешён boundary-правилом.
 @Injectable()
-export class RewardsService {
+export class RewardsService implements AwardEffectHandler {
   constructor(
     private readonly prisma: PrismaService,
     private readonly membership: MembershipService,
