@@ -302,6 +302,56 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       expect(pool.map((p) => p.identityId)).toEqual([alive.identity.id]);
     });
   });
+
+  describe('assertMember / assertOrganizer / listRoster (UI-срез)', () => {
+    it('assertMember throws ActorNotMemberError for non-member, returns membership for member', async () => {
+      const room = await roomService.create(ORG);
+      const joined = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+      const service = makeMembership();
+      await expect(service.assertMember(room.id, P1)).rejects.toBeInstanceOf(ActorNotMemberError);
+      const membership = await service.assertMember(room.id, joined.identity.id);
+      expect(membership.identityId).toBe(joined.identity.id);
+      expect(membership.role).toBe('PARTICIPANT');
+    });
+
+    it('assertOrganizer throws ActorNotOrganizerError for PARTICIPANT, passes for ORGANIZER', async () => {
+      const room = await roomService.create(ORG);
+      const joined = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+      const service = makeMembership();
+      await expect(
+        service.assertOrganizer(room.id, joined.identity.id),
+      ).rejects.toBeInstanceOf(ActorNotOrganizerError);
+      const membership = await service.assertOrganizer(room.id, ORG);
+      expect(membership.role).toBe('ORGANIZER');
+    });
+
+    it('listRoster returns active members with identity displayName (null after sweep)', async () => {
+      // Организатор + гость + swept-гость (displayName null) + исключённый (deletedAt
+      // membership): исключённого в ростере нет, swept-гость с null-именем есть.
+      const room = await roomService.create(ORG);
+      const service = makeMembership();
+      const alive = await service.join({ code: room.code, displayName: 'Живой', ip: IP });
+      const swept = await service.join({ code: room.code, displayName: 'Сметённый', ip: IP2 });
+      const excluded = await service.join({ code: room.code, displayName: 'Исключённый', ip: '10.0.0.11' });
+      await db.prisma.membership.update({
+        where: { id: excluded.membership.id },
+        data: { deletedAt: new Date() },
+      });
+      await db.prisma.identity.update({
+        where: { id: swept.identity.id },
+        data: { deletedAt: new Date(), displayName: null },
+      });
+
+      const roster = await service.listRoster(room.id);
+
+      expect(roster).toHaveLength(3);
+      const byIdentity = new Map(roster.map((r) => [r.identityId, r]));
+      expect(byIdentity.get(ORG)).toMatchObject({ role: 'ORGANIZER', displayName: null });
+      expect(byIdentity.get(alive.identity.id)).toMatchObject({ role: 'PARTICIPANT', displayName: 'Живой' });
+      expect(byIdentity.get(swept.identity.id)).toMatchObject({ role: 'PARTICIPANT', displayName: null });
+      expect(byIdentity.has(excluded.identity.id)).toBe(false);
+    });
+  });
 });
 
 describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {

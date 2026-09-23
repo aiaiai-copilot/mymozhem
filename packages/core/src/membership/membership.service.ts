@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { Identity, Membership, Prisma } from '@prisma/client';
+import type { Identity, MemberRole, Membership, Prisma } from '@prisma/client';
 import { displayNameSchema, type DrawPoolEntry } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdentityService } from '../identity/identity.service';
@@ -68,6 +68,33 @@ export class MembershipService {
     });
     if (!membership || membership.deletedAt !== null || membership.room.deletedAt !== null) return null;
     return membership;
+  }
+
+  // Актор — активный член комнаты любой роли (UI-срез: ростер, решение №10).
+  async assertMember(roomId: string, identityId: string): Promise<Membership> {
+    const m = await this.findActiveMembership(roomId, identityId);
+    if (!m) {
+      throw new ActorNotMemberError(`identity ${identityId} is not an active member of room ${roomId}`);
+    }
+    return m;
+  }
+
+  // Актор — ORGANIZER комнаты (UI-срез: lifecycle-контур, решение №9).
+  async assertOrganizer(roomId: string, identityId: string): Promise<Membership> {
+    const m = await this.assertMember(roomId, identityId);
+    if (m.role !== 'ORGANIZER') {
+      throw new ActorNotOrganizerError(`identity ${identityId} is not organizer of room ${roomId}`);
+    }
+    return m;
+  }
+
+  // Ростер комнаты: активные membership'ы; displayName null после TTL-свипа (решение №10).
+  async listRoster(roomId: string): Promise<{ identityId: string; displayName: string | null; role: MemberRole }[]> {
+    const rows = await this.prisma.membership.findMany({
+      where: { roomId, deletedAt: null, room: { deletedAt: null } },
+      select: { identityId: true, role: true, identity: { select: { displayName: true } } },
+    });
+    return rows.map((r) => ({ identityId: r.identityId, displayName: r.identity.displayName, role: r.role }));
   }
 
   // Исключение участника организатором (REQ-ID-006 ч.3): soft-delete membership,
