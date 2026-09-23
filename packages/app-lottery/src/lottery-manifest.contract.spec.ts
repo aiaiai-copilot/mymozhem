@@ -57,11 +57,12 @@ describe('lottery manifest', () => {
 describe('registered appSettings JSON Schema', () => {
   const validate = ajv.compile(manifest.appSettings);
 
-  // Зарегистрированный артефакт (z.toJSONSchema, output-режим) требует ключ
-  // drawEligibility явно: ядро валидирует verdict-only, без коэрсии (REQ-CORE-007).
-  // Дефолт guests_allowed живёт на zod-уровне (защитный parse в handler'е).
-  it('rejects an empty settings snapshot (drawEligibility required in the registered schema)', () => {
-    expect(validate({})).toBe(false);
+  // Зарегистрированный артефакт (z.toJSONSchema, io:'input' — решение владельца
+  // C-9.1, REQ-RWD-014): defaulted ключ drawEligibility НЕ required на входе —
+  // configure `{}` проходит verdict-only гейт ядра (REQ-CORE-007). Дефолт
+  // guests_allowed применяет zod-parse в handler'е модуля.
+  it('accepts an empty settings snapshot (drawEligibility defaulted, optional in the registered schema)', () => {
+    expect(validate({})).toBe(true);
   });
 
   it.each([['guests_allowed'], ['verified']] as const)('accepts drawEligibility=%s', (drawEligibility) => {
