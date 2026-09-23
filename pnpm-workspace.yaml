@@ -11,3 +11,9 @@ allowBuilds:
   prisma: false
   protobufjs: false
   ssh2: false
+# @prisma/studio-core (GUI prisma studio, у нас не используется) авто-устанавливает
+# peer'ы react 19, но для peer '*' @types/react-dom pnpm переиспользует инстанс 18.x
+# из apps/web → ложный конфликт типов внутри prebuilt-пакета. Разрешаем явно.
+peerDependencyRules:
+  allowedVersions:
+    '@types/react': '19'

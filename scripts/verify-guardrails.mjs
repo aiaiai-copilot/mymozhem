@@ -76,6 +76,17 @@ writeFileSync(
 const webSocketProbe = 'apps/web/src/__probe-socket__.ts';
 writeFileSync(webSocketProbe, "import 'socket.io-client';\nexport const probe = 1;\n");
 
+// 8) Cross-app probe: apps/web импортирует apps/server (forbidden:
+// web-no-cross-app-imports — путь в core только через sdk, дизайн UI-среза §2).
+// Цель — apps/server/src/main.ts: не под ^packages/, поэтому импорт матчит
+// ТОЛЬКО новое правило и не может быть замаскирован соседним (web-only-through-sdk
+// ловит apps/web → packages/*, apps-only-through-core-entrypoint — apps/* → core/src).
+const crossAppProbe = 'apps/web/src/__probe-cross-app__.ts';
+writeFileSync(
+  crossAppProbe,
+  "import '../../server/src/main';\nexport const probe = 1;\n",
+);
+
 try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
@@ -112,6 +123,11 @@ try {
     `pnpm exec depcruise ${webSocketProbe} --config .dependency-cruiser.cjs`,
     'web-socketio-only-in-realtime',
   );
+  expectFailure(
+    'web → other apps/* import (dependency-cruiser)',
+    `pnpm exec depcruise ${crossAppProbe} --config .dependency-cruiser.cjs`,
+    'web-no-cross-app-imports',
+  );
 } finally {
   rmSync(boundaryProbe, { force: true });
   rmSync('scripts/__probe__', { recursive: true, force: true });
@@ -120,6 +136,7 @@ try {
   rmSync(mathRandomProbe, { force: true });
   rmSync(webCoreProbe, { force: true });
   rmSync(webSocketProbe, { force: true });
+  rmSync(crossAppProbe, { force: true });
 }
 
 if (process.exitCode) {

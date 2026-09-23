@@ -345,6 +345,8 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       const roster = await service.listRoster(room.id);
 
       expect(roster).toHaveLength(3);
+      // Порядок ростера детерминирован: joinedAt asc (организатор первым).
+      expect(roster.map((r) => r.identityId)).toEqual([ORG, alive.identity.id, swept.identity.id]);
       const byIdentity = new Map(roster.map((r) => [r.identityId, r]));
       expect(byIdentity.get(ORG)).toMatchObject({ role: 'ORGANIZER', displayName: null });
       expect(byIdentity.get(alive.identity.id)).toMatchObject({ role: 'PARTICIPANT', displayName: 'Живой' });

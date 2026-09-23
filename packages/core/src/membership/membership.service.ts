@@ -89,9 +89,12 @@ export class MembershipService {
   }
 
   // Ростер комнаты: активные membership'ы; displayName null после TTL-свипа (решение №10).
+  // Порядок детерминирован (joinedAt asc): без orderBy Postgres не гарантирует
+  // стабильность выдачи, и ростер перемешивался бы между refetch'ами клиента.
   async listRoster(roomId: string): Promise<{ identityId: string; displayName: string | null; role: MemberRole }[]> {
     const rows = await this.prisma.membership.findMany({
       where: { roomId, deletedAt: null, room: { deletedAt: null } },
+      orderBy: { joinedAt: 'asc' },
       select: { identityId: true, role: true, identity: { select: { displayName: true } } },
     });
     return rows.map((r) => ({ identityId: r.identityId, displayName: r.identity.displayName, role: r.role }));

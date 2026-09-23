@@ -23,6 +23,13 @@ module.exports = {
       to: { path: '^packages/', pathNot: ['^packages/sdk/', '^packages/app-quiz/', '^packages/app-lottery/'] },
     },
     {
+      name: 'web-no-cross-app-imports',
+      severity: 'error',
+      comment: 'apps/web не импортирует другие apps/* — путь в core только через sdk (дизайн UI-среза §2).',
+      from: { path: '^apps/web/src' },
+      to: { path: '^apps/', pathNot: '^apps/web/' },
+    },
+    {
       name: 'web-socketio-only-in-realtime',
       severity: 'error',
       comment: 'socket.io-client — только в apps/web/src/realtime (зеркало REQ-RT-006 на клиенте).',
