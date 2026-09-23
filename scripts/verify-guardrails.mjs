@@ -4,10 +4,20 @@
 import { execSync } from 'node:child_process';
 import { writeFileSync, rmSync, mkdirSync } from 'node:fs';
 
-function expectFailure(label, cmd) {
+// expectOutput — обязательная проверка, ЧЕМ именно сработал enforcer: probe,
+// матчащий несколько правил (напр. apps/web → core ловится и web-only-through-sdk,
+// и apps-only-through-core-entrypoint), иначе проходит вакуумно — при удалении
+// целевого правила exit code остаётся ненулевым за счёт соседнего (review Task 6).
+function expectFailure(label, cmd, expectOutput) {
   try {
     execSync(cmd, { stdio: 'pipe' });
-  } catch {
+  } catch (err) {
+    const output = `${err.stdout?.toString() ?? ''}${err.stderr?.toString() ?? ''}`;
+    if (!output.includes(expectOutput)) {
+      console.error(`FAIL — guardrail fired, но без ожидаемого сигнала "${expectOutput}" on: ${label}`);
+      process.exitCode = 1;
+      return;
+    }
     console.log(`OK   — guardrail fired on: ${label}`);
     return;
   }
@@ -70,30 +80,37 @@ try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
     `pnpm exec depcruise ${boundaryProbe} --config .dependency-cruiser.cjs`,
+    'sdk-is-leaf',
   );
   expectFailure(
     'module-level mutable export (eslint)',
     `pnpm exec eslint ${mutableProbe} --no-ignore`,
+    'REQ-CORE-004',
   );
   expectFailure(
     'apps → core src-internals import (dependency-cruiser)',
     `pnpm exec depcruise ${appsProbe} --config .dependency-cruiser.cjs`,
+    'apps-only-through-core-entrypoint',
   );
   expectFailure(
     'core domain → rewards import (dependency-cruiser)',
     `pnpm exec depcruise ${rewardsProbe} --config .dependency-cruiser.cjs`,
+    'rewards-only-through-di-tokens',
   );
   expectFailure(
     'Math.random in app module (eslint)',
     `pnpm exec eslint ${mathRandomProbe}`,
+    'REQ-RWD-011',
   );
   expectFailure(
     'web → core import (dependency-cruiser)',
     `pnpm exec depcruise ${webCoreProbe} --config .dependency-cruiser.cjs`,
+    'web-only-through-sdk-and-app-packages',
   );
   expectFailure(
     'socket.io-client outside web/src/realtime (dependency-cruiser)',
     `pnpm exec depcruise ${webSocketProbe} --config .dependency-cruiser.cjs`,
+    'web-socketio-only-in-realtime',
   );
 } finally {
   rmSync(boundaryProbe, { force: true });
