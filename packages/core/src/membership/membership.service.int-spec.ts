@@ -285,6 +285,23 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       expect(await makeMembership().findActiveMembership(room.id, P1)).toBeNull();
     });
   });
+
+  describe('listActiveParticipantPool', () => {
+    it('excludes swept (anonymized) guests from the draw pool (P2)', async () => {
+      const room = await roomService.create(ORG);
+      const service = makeMembership();
+      const alive = await service.join({ code: room.code, displayName: 'Живой', ip: IP });
+      const swept = await service.join({ code: room.code, displayName: 'Сметённый', ip: IP2 });
+      // Свип (GuestSweepService) анонимизирует identity строкой deletedAt + displayName=null,
+      // membership гостя остаётся живым — без фильтра по identity swept-гость попадает в пул.
+      await db.prisma.identity.update({
+        where: { id: swept.identity.id },
+        data: { deletedAt: new Date(), displayName: null },
+      });
+      const pool = await service.listActiveParticipantPool(room.id);
+      expect(pool.map((p) => p.identityId)).toEqual([alive.identity.id]);
+    });
+  });
 });
 
 describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {

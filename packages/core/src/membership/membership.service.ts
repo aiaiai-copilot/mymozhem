@@ -140,7 +140,8 @@ export class MembershipService {
 
   // Снапшот пула розыгрыша для хост-примитива drawPool (design 2026-09-10 §2):
   // активные PARTICIPANT-членства комнаты; организатор (роль ORGANIZER), зрители
-  // (SPECTATOR), исключённые и soft-deleted не входят. Комната удалённая — пул пуст.
+  // (SPECTATOR), исключённые и soft-deleted не входят; swept-гости (TTL-анонимизация
+  // identity, решение владельца P2) — тоже вне пула. Комната удалённая — пул пуст.
   async listActiveParticipantPool(roomId: string): Promise<DrawPoolEntry[]> {
     const rows = await this.prisma.membership.findMany({
       where: {
@@ -148,6 +149,7 @@ export class MembershipService {
         role: 'PARTICIPANT',
         deletedAt: null,
         room: { deletedAt: null },
+        identity: { deletedAt: null }, // P2: swept-гость (TTL-анонимизация) вне пула розыгрыша
       },
       select: { identityId: true, identity: { select: { kind: true } } },
     });
