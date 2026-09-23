@@ -19,6 +19,8 @@
 6. **Проекторный экран нужен** (spectator-view, роль SPECTATOR уже есть в backend).
 7. **Подход A — клиентский слой внутри `apps/web`, проекции через переиспользование чистых редьюсеров app-пакетов.** **Зафиксировано как временное решение MVP.** Точка расширения (словами, не кодом, CLAUDE.md §2.3): выделение framework-agnostic `@mymozhem/client-sdk` — задел платформенной фазы при появлении внешнего потребителя; клиентский слой проектируется без React-зависимостей вне хуков, чтобы выделение было механическим.
 8. **Браузерный e2e — Playwright smoke-сьют** (happy-path), в CI.
+9. **HTTP-транспорт lifecycle/configure — новый backend-контур среза** (вскрыто при планировании): `RoomService.configure/activate/complete/cancel` до среза не имели HTTP-пути (e2e ходили сервисным). Добавляются: `POST /rooms/:id/configure`, `POST /rooms/:id/activate`, `POST /rooms/:id/complete`, `POST /rooms/:id/cancel` — organizer-only (`ACTOR_NOT_ORGANIZER`), ответ — форма `createRoomResponseSchema`.
+10. **Ростер виден всем членам комнаты** (вскрыто при планировании: displayName никогда не попадает в лог/провод по REQ-SEC-009, а табло и экран без имён бессмысленны на живом событии). Добавляется `GET /rooms/:id/members` → `{ members: [{ identityId, displayName (null после свипа), role (lowercase wire) }] }`, доступ любому активному члену комнаты (participant/spectator/organizer) по access-токену. Лог остаётся id-only (REQ-SEC-009 не нарушается — ростер read-контур, не события).
 
 ## 1. Цель и критерии успеха
 
@@ -35,6 +37,8 @@
 - **Прод:** `vite build` → статика в Docker-артефакте; Fastify раздаёт same-origin (`@fastify/static`, SPA-fallback на `index.html` для не-API маршрутов; API-пути регистрируются до static). CORS не включается.
 - **Dev:** vite dev-server с proxy REST-путей backend'а (`/rooms`, `/auth`, `/health`) и `/socket.io` (ws) на локальный server; для браузера всё same-origin, CORS не нужен и в dev.
 - **CI/сборка:** turbo-таски `build`/`lint`/`typecheck`/`test` для web (build зависит от build sdk/app-*); Dockerfile += стейдж сборки web, dist копируется в runtime-стейдж рядом с server dist.
+
+**Backend-дополнения среза (решения №9/№10, §0):** rooms-lifecycle контур (`configure`/`activate`/`complete`/`cancel` по HTTP, organizer-only) и roster-эндпоинт (`GET /rooms/:id/members`, любой активный член). SDK += `configureRoomRequestSchema`, `rosterEntrySchema`/`rosterResponseSchema` (wire-роли lowercase, displayName nullable — null после TTL-свипа).
 
 **Pre-tasks среза (решения сессии 16 по вопросам ф.3, код до клиентских задач):**
 - **P1 (C-9.1, REQ-RWD-014):** `toRegisteredSchema` в SDK генерирует JSON Schema в input-режиме (`io: 'input'`) — defaulted ключи appSettings необязательны в артефакте, configure `{}` проходит verdict-only гейт, дефолты применяет zod-parse handler'а. SDK → 1.7.0. Контрактные тесты: defaulted ключ необязателен; `{}` принимается.
@@ -89,8 +93,9 @@ Wire-событие — `{type, payload, actorId}` (`projectedEventSchema`), б�
 2. Участник с телефона: join по ссылке → ответы → табло; обрыв соединения виден и самолечится переподключением без потери состояния (перефолд).
 3. Проекторный экран: spectator-view показывает вопрос/табло/итоги без интерактива и без auth-контура.
 4. `correctAnswers` недоступны ни на одном клиенте (структурно — replay/видимость; наследует чит-тест ф.2).
-5. Pre-tasks P1/P2 исполнены: configure `{}` с defaulted полем принимается (контрактный тест SDK 1.7.0); свипнутый гость вне drawPool (тест).
-6. Конвейер зелёный: существующие гейты + web build/lint/typecheck/unit + Playwright smoke + новые boundary-правила с живыми probe'ами.
+5. Backend-контуры среза: lifecycle/configure по HTTP (organizer-only, `ACTOR_NOT_ORGANIZER` чужому) и ростер (`GET /rooms/:id/members` любому члену; displayName swept-гостя — null; в лог displayName не попадает — REQ-SEC-009 сохранён).
+6. Pre-tasks P1/P2 исполнены: configure `{}` с defaulted полем принимается (контрактный тест SDK 1.7.0); свипнутый гость вне drawPool (тест).
+7. Конвейер зелёный: существующие гейты + web build/lint/typecheck/unit + Playwright smoke + новые boundary-правила с живыми probe'ами.
 
 ## 9. Риски и задел (фиксируются, не решаются в срезе)
 
