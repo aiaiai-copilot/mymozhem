@@ -38,7 +38,7 @@
 - **Dev:** vite dev-server с proxy REST-путей backend'а (`/rooms`, `/auth`, `/health`) и `/socket.io` (ws) на локальный server; для браузера всё same-origin, CORS не нужен и в dev.
 - **CI/сборка:** turbo-таски `build`/`lint`/`typecheck`/`test` для web (build зависит от build sdk/app-*); Dockerfile += стейдж сборки web, dist копируется в runtime-стейдж рядом с server dist.
 
-**Backend-дополнения среза (решения №9/№10, §0):** rooms-lifecycle контур (`configure`/`activate`/`complete`/`cancel` по HTTP, organizer-only) и roster-эндпоинт (`GET /rooms/:id/members`, любой активный член). SDK += `configureRoomRequestSchema`, `rosterEntrySchema`/`rosterResponseSchema` (wire-роли lowercase, displayName nullable — null после TTL-свипа).
+**Backend-дополнения среза (решения №9/№10, §0):** rooms-lifecycle контур (`configure`/`activate`/`complete`/`cancel` по HTTP, organizer-only) и roster-эндпоинт (`GET /rooms/:id/members`, любой активный член). Плюс `GET /rooms/:id/prizes` (список призов с остатком фонда — вскрыто при планировании: `GET /rooms/:id/rewards` отдаёт только awards, а консоли нужен prizeId и остаток для розыгрыша). SDK += `configureRoomRequestSchema`, `rosterEntrySchema`/`rosterResponseSchema` (wire-роли lowercase, displayName nullable — null после TTL-свипа), `listPrizesResponseSchema`.
 
 **Pre-tasks среза (решения сессии 16 по вопросам ф.3, код до клиентских задач):**
 - **P1 (C-9.1, REQ-RWD-014):** `toRegisteredSchema` в SDK генерирует JSON Schema в input-режиме (`io: 'input'`) — defaulted ключи appSettings необязательны в артефакте, configure `{}` проходит verdict-only гейт, дефолты применяет zod-parse handler'а. SDK → 1.7.0. Контрактные тесты: defaulted ключ необязателен; `{}` принимается.
@@ -60,6 +60,8 @@ Wire-событие — `{type, payload, actorId}` (`projectedEventSchema`), б�
   1. OAuth → `POST /rooms`.
   2. **Редактор квиза** (форма: вопросы/варианты/правильный/scoring/minAnswerIntervalMs) → `configure` (quiz@2) → `activate`.
   3. **Консоль ведущего:** код комнаты крупно + копируемая ссылка; ведение — «открыть вопрос N» → счётчик ответов live → «закрыть» → «показать ответ» → табло; список участников с исключением (exclude); призы (создание + quantity, список awards); «разыграть» (draw.run) → победитель; fulfill/revoke; завершение комнаты.
+
+  **Одна комната — одно приложение** (семантика ф.3: пин `(appId, manifestVersion)`, REQ-RT-004; «связь с квизом отсутствует» — дизайн ф.3 §4). Консоль следует пину комнаты: quiz-комната даёт ведение квиза, lottery-комната — розыгрыш. Событие «квиз + розыгрыш» = две комнаты последовательно (участники заходят по второму коду для розыгрыша); setup спрашивает приложение при configure. Связка «разыграть среди набравших N очков» — задел (ф.3, YAGNI).
 - `/play/:code?` — участник: код из URL/ввод + displayName → guest-join → лобби → вопрос с вариантами → ack «принято» → после reveal «верно/неверно» + табло → финал: итоговое табло + победители розыгрыша.
 - `/screen/:code` — проектор: spectator-join по коду, read-only: текущий вопрос крупно → табло после reveal → итоги лотереи.
 
