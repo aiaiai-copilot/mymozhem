@@ -1,0 +1,12 @@
+/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
+   раскладке (дизайн §0.4). Дизайн-система — отдельная задача батча C. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}

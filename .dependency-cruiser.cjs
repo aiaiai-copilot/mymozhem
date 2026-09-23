@@ -16,6 +16,20 @@ module.exports = {
       to: { path: '^packages/core/' },
     },
     {
+      name: 'web-only-through-sdk-and-app-packages',
+      severity: 'error',
+      comment: 'apps/web видит только контракт (sdk) и чистые app-пакеты; core — за границей (ADR-002).',
+      from: { path: '^apps/web/src' },
+      to: { path: '^packages/', pathNot: ['^packages/sdk/', '^packages/app-quiz/', '^packages/app-lottery/'] },
+    },
+    {
+      name: 'web-socketio-only-in-realtime',
+      severity: 'error',
+      comment: 'socket.io-client — только в apps/web/src/realtime (зеркало REQ-RT-006 на клиенте).',
+      from: { path: '^apps/web/src', pathNot: '^apps/web/src/realtime' },
+      to: { path: 'node_modules/socket[.]io-client' },
+    },
+    {
       name: 'apps-only-through-core-entrypoint',
       comment:
         'apps/* обращаются к ядру только через пакетный entrypoint @mymozhem/core, не в его src-внутренности (ADR-002, REQ-DEV-001).',
@@ -70,5 +84,14 @@ module.exports = {
     doNotFollow: { path: 'node_modules' },
     tsConfig: { fileName: 'tsconfig.base.json' },
     tsPreCompilationDeps: true,
+    enhancedResolveOptions: {
+      // depcruise по умолчанию игнорирует package.json "exports" (exportsFields: [] —
+      // наследие enhanced-resolve 4), а современные ESM-пакеты (@vitejs/plugin-react)
+      // публикуют точку входа ТОЛЬКО через exports → ложный not-to-unresolvable.
+      // Включаем exports; conditionNames обязаны быть заданы явно — дефолт depcruise
+      // пуст, и условные exports (zod: types/import/require без default) не резолвятся.
+      exportsFields: ['exports'],
+      conditionNames: ['types', 'import', 'require', 'node', 'default'],
+    },
   },
 };

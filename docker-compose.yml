@@ -24,6 +24,9 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      # UI-срез (дизайн §2): same-origin раздача собранного SPA из того же образа
+      # (build-стейдж Dockerfile собирает apps/web турбо-таской в /app/apps/web/dist).
+      WEB_STATIC_DIR: /app/apps/web/dist
       PORT: 3000
       NODE_ENV: production
     ports:
