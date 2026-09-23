@@ -13,12 +13,23 @@ import { AuthController } from './auth.controller';
 import { ExcludeController } from './exclude.controller';
 import { OAuthController } from './oauth.controller';
 import { RoomsController } from './rooms.controller';
+import { RoomsLifecycleController } from './rooms-lifecycle.controller';
+import { MembersController } from './members.controller';
 import { HttpExceptionFilter } from './http-exception.filter';
 import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER, REFRESH_RATE_LIMITER } from './auth.tokens';
 
 @Module({
   imports: [ConfigModule, MembershipModule, AuthModule, OAuthModule, RoomModule],
-  controllers: [JoinController, AuthController, ExcludeController, OAuthController, RoomsController],
+  controllers: [
+    JoinController,
+    AuthController,
+    ExcludeController,
+    OAuthController,
+    RoomsController,
+    // UI-срез (решения №9/№10): HTTP-контур lifecycle комнаты и ростер.
+    RoomsLifecycleController,
+    MembersController,
+  ],
   providers: [
     // Единственная точка маппинга ошибка → HTTP для всего приложения (design §5).
     { provide: APP_FILTER, useClass: HttpExceptionFilter },

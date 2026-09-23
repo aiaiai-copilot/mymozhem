@@ -168,6 +168,37 @@ describe('RewardsController (int)', () => {
     expect(list.json().awards).toHaveLength(1);
   });
 
+  it('GET /rooms/:id/prizes: organizer видит список с quantity/quantityTotal; participant → 403', async () => {
+    const { room, token } = await orgRoom();
+    await rewards.createPrize(room.id, ORG, { name: 'Приз A', quantity: 2 });
+    await rewards.createPrize(room.id, ORG, { name: 'Приз B', quantity: 1 });
+
+    const list = await app.inject({
+      method: 'GET',
+      url: `/rooms/${room.id}/prizes`,
+      headers: auth(token),
+    });
+    expect(list.statusCode).toBe(200);
+    // Остаток фонда (quantity) рядом с quantityTotal — консоли нужен для розыгрыша
+    // (UI-срез: GET /rooms/:id/prizes).
+    expect(list.json().prizes).toHaveLength(2);
+    expect(list.json().prizes[0]).toMatchObject({ name: 'Приз A', quantity: 2, quantityTotal: 2 });
+    expect(list.json().prizes[1]).toMatchObject({ name: 'Приз B', quantity: 1, quantityTotal: 1 });
+
+    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    await db.prisma.membership.create({
+      data: { roomId: room.id, identityId: guest.id, role: 'PARTICIPANT', joinIp: '127.0.0.1' },
+    });
+    const guestToken = (await tokens.issueGuestTokens(guest.id, room.id)).accessToken;
+    const forbidden = await app.inject({
+      method: 'GET',
+      url: `/rooms/${room.id}/prizes`,
+      headers: auth(guestToken),
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json()).toEqual({ code: 'ACTOR_NOT_ORGANIZER' });
+  });
+
   it('без токена → 401 SESSION_INVALID', async () => {
     const { room } = await orgRoom();
     const res = await app.inject({ method: 'GET', url: `/rooms/${room.id}/rewards` });
