@@ -1,8 +1,8 @@
 # HANDOFF
 
-**Date:** 2026-09-23 (четырнадцатая сессия: **батч E фазы 3 (Task 13) исполнен — фаза 3 ЗАКРЫТА сверкой** — quiz-points.e2e (сходимость ledger↔табло, идемпотентность, PII; гейт quiz@1-пина через APP_MANIFEST_UNKNOWN на configure, ruling E-13.1); exit-аудит ф.3 (`docs/sessions/2026-09-23-phase-3-exit-audit.md`, все 8 критериев §7 ✅); финальное целосрезовое ревью A–E — «Ready to close phase 3: Yes», 0 Critical/0 Important, must-fix нет, fix-wave не потребовалась). **Мердж батча E в main НЕ выполнен — решение владельца** (ветка == main + 2 коммита).
-**Branch:** worktree `.worktrees/rewards-lottery`, ветка `rewards-lottery` @ `917bea1` (= `main` @ `e7b188e` + `0db792f` e2e + `917bea1` exit-аудит; rebase на e7b188e чистый — ff готов); `main` **впереди origin/main на 14 коммитов** (push — отдельное решение владельца, не выполнялся); рабочее дерево чистое. Конвейер на HEAD ветки зелёный (worktree, прогон до rebase на `0db792f` — дерево после rebase идентично main+2 новых файла): build 5/5, lint, boundary-check, guardrails (5 probe'ов alive), unit (sdk 313 / quiz 86 / lottery 34 / core 223), e2e 67 (58 + lottery 7 + quiz-points 2), int 188.
-**Worktree среза:** `.worktrees/rewards-lottery` (ветка `rewards-lottery` @ 917bea1) — после мерджа батча E срез фазы 3 завершён, worktree можно снимать (решение владельца). Леджер SDD — `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md`, синхронен в обоих чекаутах (не в git; `git clean -fdx` уничтожит) — сохранён как журнал rulings среза (проектная конвенция).
+**Date:** 2026-09-23 (пятнадцатая сессия: **батч E слит в main и запушен на origin — фаза 3 ЗАКРЫТА и опубликована** — ff-мердж `e7b188e..33e89ff` (решение владельца), верификация конвейера на слитом дереве зелёная, push origin main выполнен (решение владельца). Четырнадцатой сессией батч E (Task 13) был исполнен: quiz-points.e2e (сходимость ledger↔табло, идемпотентность, PII; гейт quiz@1-пина через APP_MANIFEST_UNKNOWN, ruling E-13.1), exit-аудит ф.3 (`docs/sessions/2026-09-23-phase-3-exit-audit.md`, все 8 критериев §7 ✅), финальное целосрезовое ревью A–E — «Ready to close phase 3: Yes», 0 Critical/0 Important, fix-wave не потребовалась.)
+**Branch:** `main` — синхронен с `origin/main` (push 2026-09-23, 18 коммитов: батчи B+C+D+E + handoff'ы); рабочее дерево чистое. Конвейер на слитом дереве (основной чекаут, после мерджа) зелёный: build 5/5, lint, boundary-check (621 модуль, 0 нарушений), guardrails (5 probe'ов alive), unit (sdk 313 / quiz 86 / lottery 34 / core 223), e2e 67 (58 + lottery 7 + quiz-points 2), int 188.
+**Worktree среза:** `.worktrees/rewards-lottery` (ветка `rewards-lottery` @ 33e89ff == main до handoff-коммита 15-й сессии) — СОХРАНЁН (решение владельца при мердже — не снимать); срез фазы 3 завершён, снятие — отдельное решение. Леджер SDD — `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md`, синхронен в обоих чекаутах (не в git; `git clean -fdx` уничтожит) — журнал rulings среза (проектная конвенция).
 
 **Состояние фаз: фаза 1 ЗАКРЫТА (2026-09-09), фаза 2 (Quiz) ЗАКРЫТА (2026-09-10), фаза 3 (Rewards + Lottery + TTL-свип + квиз-начисления) ЗАКРЫТА сверкой (2026-09-23)** — план исполнен 13/13 задач батчами A–E, все критерии §7 дизайна (= §5 пакета) подтверждены артефактами; сверка — `docs/sessions/2026-09-23-phase-3-exit-audit.md` (вкл. §6 — открытые вопросы владельцу со статусами). Следующий срез — выбор владельца (кандидаты: фаза 4 по roadmap §5 пакета; открытые вопросы ф.3 — желательно до/на старте ф.4). Ядро ф.1 (identity, room lifecycle, membership/guest-join/exclusion, realtime полный duplex, event-commit, appSettings, OAuth Google + POST /rooms) и Quiz-срез ф.2 (SDK рантайм-контракт app-модулей, app-runtime «командный хост» в ядре, пакет `@mymozhem/app-quiz` — манифест, 7 типов событий, чистый редьюсер, скоростная шкала, анти-бот REQ-RT-013, роль SPECTATOR) — реализованы и слиты в `main`. Сверки: `2026-09-09-phase-1-exit-audit.md`, `2026-09-10-phase-2-exit-audit.md`, `2026-09-23-phase-3-exit-audit.md`. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
 
@@ -20,7 +20,7 @@
 10. `.superpowers/sdd/*/progress.md` — леджеры исполнения срезов (не в git, только на этой машине; `git clean -fdx` уничтожит). Леджеров срезов исключения и OAuth на машине нет — их история: планы + `git log` (исключение `89d887f..c2e60da`, OAuth `44db424..ab973f4`).
 11. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
 
-Исполненные планы и дизайны прежних срезов читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show e7b188e:HANDOFF.md`.
+Исполненные планы и дизайны прежних срезов читать при разборе истории — их работа в коммитах. Состояние на конец прошлой сессии: `git show 33e89ff:HANDOFF.md`.
 
 ## Следующее действие
 
@@ -155,33 +155,30 @@
 
 ## Осталось недоделанным
 
-- **Мердж батча E в main — решение владельца** (ветка `rewards-lottery` @ 917bea1 == main @ e7b188e + 2 коммита, rebase чистый, ff готов; после мерджа worktree можно снимать). **Следующий срез — выбор владельца** (фаза 4 по §5 пакета — новой сессией через brainstorm → design → plan; либо сначала решения по открытым вопросам ф.3). **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. **Push main на origin** (14 коммитов: батчи B+C+D + handoff'ы; +2 после мерджа батча E) — отдельное решение владельца. **Открытые вопросы владельцу** (C-9.1 дефолт settings, свипнутый гость в drawPool, D-12.2 revoke vs winner-exclusion, окно гонки свипа, registered-join шов) — см. «Следующее действие» и exit-аудит §6.
+- **Следующий срез — выбор владельца** (фаза 4 по §5 пакета — новой сессией через brainstorm → design → plan; либо сначала решения по открытым вопросам ф.3). Мердж батча E и push на origin **выполнены** (2026-09-23, решения владельца). **Manual smoke OAuth с реальными Google-кредами** перед первым живым событием — действие владельца. **Открытые вопросы владельцу** (C-9.1 дефолт settings, свипнутый гость в drawPool, D-12.2 revoke vs winner-exclusion, окно гонки свипа, registered-join шов) — см. «Следующее действие» и exit-аудит §6. **Снятие worktree `.worktrees/rewards-lottery`** — отложенное решение владельца.
 - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
 
-## Session 2026-09-23 (четырнадцатая: батч E фазы 3 исполнен — фаза 3 закрыта сверкой)
+## Session 2026-09-23 (пятнадцатая: мердж батча E в main + push — фаза 3 опубликована)
 
-*(Блоки десятой-тринадцатой сессий (батчи A-D) вырезаны — работа в коммитах; восстановимы через `git show 617a637:HANDOFF.md`, `git show 11c7476:HANDOFF.md`, `git show a89474d:HANDOFF.md` и `git show e7b188e:HANDOFF.md`.)*
+*(Блоки десятой-четырнадцатой сессий (батчи A-E) вырезаны — работа в коммитах; восстановимы через `git show 617a637:HANDOFF.md`, `git show 11c7476:HANDOFF.md`, `git show a89474d:HANDOFF.md`, `git show e7b188e:HANDOFF.md` и `git show 33e89ff:HANDOFF.md`.)*
 
 ### Что сделано
 
-- **Батч E (Task 13) исполнен** в worktree `.worktrees/rewards-lottery` по superpowers:subagent-driven-development, TDD на проводе, ревью на каждом шаге:
-  - **e2e квиз-начислений** (`0db792f`): `apps/server/test/quiz-points.e2e-spec.ts` — 2 кейса на реальном composition root: (1) сходимость ledger↔табло (3 гранта pointsGrant, суммы ≡ awarded из reveal, P1=1900/P2=1000), идемпотентность (повторный closed → ROUND_NOT_OPEN, грантов не прибавилось), PII-цикл по всему логу (REQ-SEC-009); (2) гейт quiz@1-пина — configure → `APP_MANIFEST_UNKNOWN` (ruling E-13.1: скетч плана «publish → MODULE_UNAVAILABLE» недостижим — configure/activate fail-closed, REQ-CORE-007; MODULE_UNAVAILABLE покрыт app-runtime.int-spec кейсом 4). 2/2 стабильно на 2 прогонах. Таск-ревью чистое (Spec ✅ 10/10, Approved).
-  - **Exit-аудит фазы 3** (`917bea1`): `docs/sessions/2026-09-23-phase-3-exit-audit.md` — все 8 критериев design §7 (= §5 пакета) подтверждены артефактами файл:строка; вердикт — фаза закрыта.
-- **Финальное целосрезовое ревью (fable, диапазон 0fddb16..37b13ac — батчи A–E, 18 коммитов) — «Ready to close phase 3: Yes»:** Stage 1 confirmed по всем 21 REQ группам; поперечные швы (effects flow в одной tx, core-independence от rewards, сходимость табло↔ledger, DB-инварианты) подтверждены end-to-end; Stage 2 — 0 Critical/0 Important; триаж 28 deferred-строк леджера — все stay-deferred (2 закрыты по ходу), must-fix ни одного. Fix-wave не потребовалась. Код четырёх стоящих эскалаций владельцу (C-9.1, drawPool, D-12.2, C-8.1) подтверждён соответствующим их описаниям.
-- **Мердж в main НЕ выполнялся** — решение владельца (ветка == main + 2 коммита, rebase на e7b188e чистый, ff готов).
+- **Обнаружено при входе:** батч E уже исполнен четырнадцатой сессией (ветка `rewards-lottery` == main + 3 коммита: e2e квиз-начислений, exit-аудит ф.3, handoff) — девственного среза для этой сессии не было, работа не дублировалась.
+- **Мердж батча E в main (решение владельца, локальный):** ff `e7b188e..33e89ff` (3 коммита, rebase четырнадцатой сессии оставил ветку готовой к ff). Выход из worktree-сессии через ExitWorktree(keep) — git-операции над main из worktree-сессии блокируются харнессом.
+- **Верификация на слитом дереве (основной чекаут): ЗЕЛЁНАЯ** — build 5/5, lint, boundary-check (621 модуль, 0 нарушений), guardrails (5 probe'ов alive), unit (sdk 313 / quiz 86 / lottery 34 / core 223), e2e 67/67 (7 сьютов, вкл. quiz-points 2), int 188/188. Docker/OrbStack запущен.
+- **Push origin main (решение владельца):** 17 коммитов (батчи B+C+D+E + handoff'ы) — фаза 3 опубликована на GitHub.
 
 ### Коммиты этой сессии
 
-- `0db792f` test(server): e2e квиз-начислений — сходимость ledger↔табло, гейт quiz@1-пина (после rebase; до — `37b13ac`, amend `5296ea2`)
-- `917bea1` docs(sessions): сверка критериев выхода фазы 3 — все 8 критериев §7 подтверждены артефактами, вердикт: фаза закрыта (после rebase; до — `9fa02e0`)
-- (далее) docs(handoff): update for session 2026-09-23 — батч E исполнен, фаза 3 закрыта сверкой
+- (далее) docs(handoff): update for session 2026-09-23 — батч E слит в main и запушен, фаза 3 закрыта и опубликована
 
 ### Локальное состояние (не в git)
 
-- Worktree `.worktrees/rewards-lottery` на ветке `rewards-lottery` @ 917bea1; после мерджа батча E срез завершён — снятие worktree за владельцем. Docker/OrbStack запущен (29.4.0).
-- Леджер `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md` синхронен в обоих чекаутах: pre-flight батча E, rulings E-pre.1/E-13.1, отчёт/ревью Task 13, финальное целосрезовое ревью и триаж deferred. Workspace среза сознательно НЕ удалён (проектная конвенция: леджер — журнал rulings, на него ссылается HANDOFF).
-- Side-effects на внешние системы: нет (мердж и push не выполнялись).
+- Worktree `.worktrees/rewards-lottery` сохранён (ветка `rewards-lottery` @ 33e89ff == main до handoff-коммита этой сессии) — решение владельца при мердже; снятие отложено.
+- Леджер `.superpowers/sdd/2026-09-10-rewards-lottery-implementation-plan/progress.md` синхронен в обоих чекаутах (не в git; `git clean -fdx` уничтожит) — журнал rulings среза.
+- Side-effects на внешние системы: **push origin main выполнен** (вся фаза 3 на GitHub). Иных — нет.
 
 ### Осталось недоделанным
 
-- См. одноимённый раздел выше (мердж батча E + push — решения владельца; следующий срез — выбор владельца; 5 открытых вопросов ф.3; manual smoke OAuth; юрист).
+- См. одноимённый раздел выше (следующий срез — выбор владельца; 5 открытых вопросов ф.3; manual smoke OAuth; юрист; снятие worktree).
