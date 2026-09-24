@@ -1,11 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
+import { QUIZ_APP_ID } from '@mymozhem/app-quiz';
 import { ApiError } from '../../api/api-error';
+import { completeRoom } from '../../api/endpoints';
 import { ConnectionBanner } from '../../components/connection-banner';
+import { Winners } from '../../components/winners';
 import { SessionStore } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
+import { AwardsPanel } from './awards-panel';
 import { hostClient, hostSession } from './host-session';
+import { MembersPanel } from './members-panel';
+import { PrizesPanel } from './prizes-panel';
 import { QuizControls } from './quiz-controls';
 
 // UX-маппинг ошибок publish-команд — тот же стиль, что answerErrorText в
@@ -26,6 +33,7 @@ export function ConsolePage() {
   const [roomCode] = useState<string | null>(() => SessionStore.loadHostRoomCode());
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [completing, setCompleting] = useState(false);
 
   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
   // refresh и сам разведёт на console или setup.
@@ -36,11 +44,44 @@ export function ConsolePage() {
   const binding = useRoomBinding(roomId, hostSession);
   const feed = useRoomFeed(roomId, hostClient, binding.events);
 
+  // Пин приложения — из payload core.room.activated (REQ-RT-004: ACTIVE
+  // замораживает пару appId/manifestVersion). Парсим той же схемой, что ядро
+  // коммитит, — не слепым cast. Последний activated побеждает, как в
+  // deriveRoomStatus (переактивация невозможна, но fold-правило едино).
+  // useMemo до любых early return — хуки безусловны (гейта react-hooks нет).
+  const pinnedAppId = useMemo(() => {
+    let appId: string | null = null;
+    for (const e of binding.events) {
+      if (e.type === coreEventType('room.activated')) {
+        appId = CORE_EVENTS['room.activated'].schema.parse(e.payload).appId;
+      }
+    }
+    return appId;
+  }, [binding.events]);
+
+  // Терминальный статус: deriveRoomStatus уже отразил completed/cancelled из
+  // лога; панели в терминале глушим (сервер и так отказал бы, но зря не даём).
+  const terminal = feed.status === 'COMPLETED' || feed.status === 'CANCELLED';
+
   const runCommand = (type: string, payload: Record<string, unknown>) => {
     setCommandError(null);
     void binding
       .publish(type, payload)
       .catch((e: unknown) => setCommandError(commandErrorText(e)));
+  };
+
+  // «Завершить событие» (бриф Task 15): confirm() — переход терминален и
+  // необратим (REQ-RT-005), случайный клик не должен гасить событие. Статус
+  // COMPLETED приедет core.room.completed в лог — deriveRoomStatus поднимет его
+  // сам, локальный статус не выставляем.
+  const completeEvent = () => {
+    if (!roomId || terminal || completing) return;
+    if (!window.confirm('Завершить событие? Это действие необратимо.')) return;
+    setCompleting(true);
+    setCommandError(null);
+    void completeRoom(hostClient, roomId)
+      .catch((e: unknown) => setCommandError(commandErrorText(e)))
+      .finally(() => setCompleting(false));
   };
 
   const copyLink = (key: string, path: string) => {
@@ -90,13 +131,44 @@ export function ConsolePage() {
         </section>
       ) : null}
       {feed.status === 'CANCELLED' ? <p>Комната отменена.</p> : null}
-      <QuizControls
-        events={binding.events}
-        quiz={feed.quiz}
+      {feed.status === 'COMPLETED' ? <p>Событие завершено.</p> : null}
+      {feed.status === 'ACTIVE' ? (
+        <p>
+          <button type="button" disabled={completing} onClick={completeEvent}>
+            Завершить событие
+          </button>
+        </p>
+      ) : null}
+      {/* Пульт квиза — только в quiz-комнате: в lottery-комнате его команды
+          гарантированно отклонит модуль (pin из room.activated, та же
+          дисциплина, что у кнопки «Разыграть» в PrizesPanel). */}
+      {pinnedAppId === QUIZ_APP_ID ? (
+        <QuizControls
+          events={binding.events}
+          quiz={feed.quiz}
+          names={feed.names}
+          onCommand={runCommand}
+          commandError={commandError}
+        />
+      ) : null}
+      <MembersPanel
+        roomId={roomId}
+        members={feed.members}
         names={feed.names}
-        onCommand={runCommand}
-        commandError={commandError}
+        disabled={terminal}
+        onChanged={feed.refetchMembers}
       />
+      <PrizesPanel
+        roomId={roomId}
+        pinnedAppId={pinnedAppId}
+        disabled={terminal}
+        events={binding.events}
+        publish={binding.publish}
+      />
+      {/* Результат розыгрыша приезжает публичным draw.completed — та же
+          проекция, что на /screen; консоль только триггерит draw.run. */}
+      <Winners draws={feed.lottery.draws} names={feed.names} />
+      <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
     </main>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ProjectedEvent, RoomStatus, RosterEntry } from '@mymozhem/sdk';
 import type { LotteryState } from '@mymozhem/app-lottery';
 import type { QuizState } from '@mymozhem/app-quiz';
@@ -23,8 +23,20 @@ export function useRoomFeed(
   quiz: QuizState;
   lottery: LotteryState;
   status: RoomStatus;
+  // Ручной рефетч ростера (Task 15): exclude не эмитит публичных событий,
+  // событийный рефетч ниже его не увидит — консоль дёргает это после exclude.
+  refetchMembers: () => void;
 } {
   const [members, setMembers] = useState<RosterEntry[]>([]);
+
+  const refetchMembers = useCallback(() => {
+    if (!roomId) return;
+    listMembers(client, roomId)
+      .then((r) => setMembers(r.members))
+      // Best effort: имена дорисуются при следующем рефетче, состояние
+      // соединения и так показывает баннер.
+      .catch(() => {});
+  }, [roomId, client]);
 
   // Ростер: join не эмитит событий — первая загрузка на subscribe (Review Focus 2).
   useEffect(() => {
@@ -45,11 +57,9 @@ export function useRoomFeed(
   // …и событийный рефетч там, где имена появляются на экране (табло/победители).
   useEffect(() => {
     const last = events[events.length - 1];
-    if (!roomId || !last || !shouldRefetchRoster(last.type)) return;
-    listMembers(client, roomId)
-      .then((r) => setMembers(r.members))
-      .catch(() => {});
-  }, [events, roomId, client]);
+    if (!last || !shouldRefetchRoster(last.type)) return;
+    refetchMembers();
+  }, [events, refetchMembers]);
 
   const names = useMemo(() => rosterNames(members), [members]);
 
@@ -59,5 +69,5 @@ export function useRoomFeed(
   const lottery = useMemo(() => projectLottery(events, new Date().toISOString()), [events]);
   const status = useMemo(() => deriveRoomStatus(events), [events]);
 
-  return { members, names, quiz, lottery, status };
+  return { members, names, quiz, lottery, status, refetchMembers };
 }
