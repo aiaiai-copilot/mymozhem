@@ -6,6 +6,7 @@ import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
 import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
 import { AppModule } from './app.module';
+import { registerStaticWeb } from './static-web';
 
 async function bootstrap(): Promise<void> {
   // REQ-SEC-002: конфиг (включая JWT_SECRET) валидируется до создания приложения —
@@ -26,6 +27,12 @@ async function bootstrap(): Promise<void> {
   // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
   // HTTP-сервер передаём явно: Nest не инжектирует его в пользовательский адаптер.
   app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
+  // Явный init до раздачи статики: корневой not-found handler Nest встаёт в
+  // avvio-очередь при init, и SPA-fallback обязан встать позже него (static-web.ts).
+  await app.init();
+  // UI-срез (дизайн §2): same-origin раздача SPA при заданном WEB_STATIC_DIR;
+  // не задан → поведение прежнее (dev/test).
+  await registerStaticWeb(app, config);
   await app.listen(config.PORT, '0.0.0.0');
 }
 

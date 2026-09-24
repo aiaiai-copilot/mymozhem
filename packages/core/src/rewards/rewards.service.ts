@@ -120,6 +120,14 @@ export class RewardsService implements AwardEffectHandler {
     return this.prisma.award.findMany({ where: { roomId }, orderBy: { createdAt: 'asc' } });
   }
 
+  // Зеркало listAwards (UI-срез, GET /rooms/:id/prizes): консоли нужен prizeId и
+  // остаток фонда для розыгрыша — GET /rooms/:id/rewards отдаёт только awards.
+  // Статус комнаты так же сознательно не гейтится.
+  async listPrizes(roomId: string, actorId: string) {
+    await this.assertOrganizer(roomId, actorId);
+    return this.prisma.prize.findMany({ where: { roomId }, orderBy: { createdAt: 'asc' } });
+  }
+
   async fulfill(roomId: string, awardId: string, actorId: string) {
     return this.outbox.run(async (tx) => {
       await this.assertOrganizer(roomId, actorId);

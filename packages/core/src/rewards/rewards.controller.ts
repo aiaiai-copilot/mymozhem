@@ -3,9 +3,11 @@ import { z } from 'zod';
 import {
   awardResponseSchema,
   createPrizeRequestSchema,
+  listPrizesResponseSchema,
   listRewardsResponseSchema,
   prizeResponseSchema,
   type AwardResponse,
+  type ListPrizesResponse,
   type PrizeResponse,
 } from '@mymozhem/sdk';
 import type { Award, Prize } from '@prisma/client';
@@ -43,6 +45,15 @@ export class RewardsController {
     const parsedRoomId = z.uuid().parse(roomId);
     const awards = await this.rewards.listAwards(parsedRoomId, claims.sub);
     return listRewardsResponseSchema.parse({ awards: awards.map(toAwardResponse) });
+  }
+
+  // Список призов с остатком фонда (UI-срез): зеркало listRewards; organizer-only
+  // гейт — в домене (RewardsService.listPrizes).
+  @Get(':roomId/prizes')
+  async listPrizes(@Req() req: RequestLike, @Param('roomId') roomId: string): Promise<ListPrizesResponse> {
+    const claims = authenticate(req, this.tokens);
+    const prizes = await this.rewards.listPrizes(z.uuid().parse(roomId), claims.sub);
+    return listPrizesResponseSchema.parse({ prizes: prizes.map(toPrizeResponse) });
   }
 
   @Post(':roomId/awards/:awardId/fulfill')

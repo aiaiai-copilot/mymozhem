@@ -33,6 +33,13 @@ const STATUS_BY_WIRE_CODE = {
   OAUTH_EMAIL_CONFLICT: 409,
   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
   ROOM_ORGANIZER_NOT_REGISTERED: 403,
+  // UI-срез (lifecycle-контур, решение №9): остальные RoomError идут в wire 1:1
+  // (строковый паритет заложен в room.errors.ts). 409 — отказ из-за состояния
+  // комнаты (переход, заморозка, гонка), не из-за формы запроса.
+  ROOM_TRANSITION_INVALID: 409,
+  ROOM_CONFLICT: 409,
+  ROOM_NOT_CONFIGURED: 409,
+  ROOM_SETTINGS_FROZEN: 409,
   // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
   ROOM_NOT_ACTIVE: 409,
   PRIZE_UNKNOWN: 404,
@@ -82,9 +89,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
     if (exception instanceof AuthError) return 'SESSION_INVALID';
     if (exception instanceof OAuthError) return exception.code;
     if (exception instanceof RoomError) {
-      // Покрытие частичное (design §11): по HTTP в этом срезе достижим только
-      // ROOM_ORGANIZER_NOT_REGISTERED; прочие коды — INTERNAL_ERROR с error-логом.
-      return exception.code === 'ROOM_ORGANIZER_NOT_REGISTERED' ? exception.code : 'INTERNAL_ERROR';
+      // Покрытие полное (UI-срез, lifecycle-контур): все коды RoomError присутствуют
+      // в STATUS_BY_WIRE_CODE и идут наружу 1:1; неизвестный код — fail-closed в
+      // INTERNAL_ERROR с error-логом, как прежде.
+      return exception.code in STATUS_BY_WIRE_CODE ? (exception.code as WireCode) : 'INTERNAL_ERROR';
     }
     // Ошибки контракта с wire-паритетом кода (rewards ф.3 и далее): класс-
     // специфичные ветки выше сохраняют свои правила свёртки; сюда попадают

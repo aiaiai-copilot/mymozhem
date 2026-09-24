@@ -1,0 +1,24 @@
+/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
+   раскладке (дизайн §0.4). Дизайн-система — отдельная задача батча C. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
+   с привязкой к ширине зала (vw), варианты без маркеров. */
+.screen-question {
+  font-size: clamp(2rem, 6vw, 4rem);
+}
+
+.screen-options {
+  font-size: clamp(1.25rem, 3vw, 2rem);
+  list-style: none;
+  padding: 0;
+}

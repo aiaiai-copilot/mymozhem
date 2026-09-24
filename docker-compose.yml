@@ -24,6 +24,20 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      # OAuth-шов e2e-smoke (Task 16): dummy-креды Google. Start-эндпоинт только
+      # строит authorize-URL (обращения к Google нет), но без all-or-none тройки
+      # (superRefine в config.schema) /auth/google отвечал бы 503
+      # OAUTH_NOT_CONFIGURED и smoke не смог бы проверить 302-шов env↔UI.
+      # На боевой деплой эти значения не годятся — callback с ними не пройдёт.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-e2e-dummy-client-id}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-e2e-dummy-client-secret}
+      OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:-http://localhost:3000/auth/google/callback}
+      # REQ-ID-009: allowlist redirect'ов — exact match (z.array(z.url()));
+      # лендинг после OAuth шлёт ровно ${origin}/host.
+      OAUTH_REDIRECT_ALLOWLIST: ${OAUTH_REDIRECT_ALLOWLIST:-http://localhost:3000/host}
+      # UI-срез (дизайн §2): same-origin раздача собранного SPA из того же образа
+      # (build-стейдж Dockerfile собирает apps/web турбо-таской в /app/apps/web/dist).
+      WEB_STATIC_DIR: /app/apps/web/dist
       PORT: 3000
       NODE_ENV: production
     ports:

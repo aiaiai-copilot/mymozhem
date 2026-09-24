@@ -122,6 +122,25 @@ describe('defineApp', () => {
     expect(JSON.parse(JSON.stringify(manifest))).toEqual(manifest);
   });
 
+  it('defaulted settings key is optional in the registered artifact (io: input, C-9.1)', () => {
+    const manifest = defineApp({
+      appId: 'fixture-defaults',
+      manifestVersion: 1,
+      appSettings: z.strictObject({
+        mode: z.string().default('relaxed').meta({ 'x-visibility': 'public' }),
+        requiredKey: z.string().meta({ 'x-visibility': 'public' }),
+      }),
+      events: {},
+    });
+    const artifact = manifest.appSettings as {
+      required?: string[];
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(artifact.required).toEqual(['requiredKey']);
+    expect(artifact.properties.mode.default).toBe('relaxed');
+    expect(artifact.properties.mode['x-visibility']).toBe('public');
+  });
+
   it('refuses an app that would take the core namespace', () => {
     expect(() =>
       defineApp({ appId: 'core', manifestVersion: 1, appSettings: quizSettings, events: {} }),

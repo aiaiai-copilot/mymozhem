@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import Ajv2020 from 'ajv/dist/2020';
-import { ContractError, validManifests, invalidManifestCases } from '@mymozhem/sdk';
+import { ContractError, validManifests, invalidManifestCases, type AppManifest } from '@mymozhem/sdk';
 import { AppRegistryService } from './app-registry.service';
 import { AppRegistryModule } from './app-registry.module';
 import { AppManifestUnknownError, AppSettingsInvalidError } from './app-registry.errors';
@@ -70,6 +70,28 @@ describe('AppRegistryService.validateSettings (REQ-CORE-007)', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // Зарегистрированный артефакт в форме io:'input' (решение владельца C-9.1,
+  // REQ-RWD-014): defaulted ключ не входит в required, default задокументирован.
+  const fixtureManifestWithDefaultedSettings: AppManifest = {
+    appId: 'fixture-defaults',
+    manifestVersion: 1,
+    contractRange: '^1.0.0',
+    appSettings: {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        mode: { type: 'string', default: 'relaxed', 'x-visibility': 'public' },
+      },
+      additionalProperties: false,
+    },
+    events: {},
+  };
+
+  it('accepts {} when every settings key is defaulted (C-9.1 end-to-end на гейте)', () => {
+    const registry = new AppRegistryService([fixtureManifestWithDefaultedSettings]);
+    expect(() => registry.validateSettings('fixture-defaults', 1, {})).not.toThrow();
   });
 });
 

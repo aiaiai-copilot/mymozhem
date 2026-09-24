@@ -28,7 +28,7 @@ export type AppDefinition = {
   events: Record<string, { schema: z.ZodType; visibility: Visibility; clientInitiated: boolean }>;
 };
 
-type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
+type ZodInternals = { _zod?: { def?: { checks?: unknown[]; type?: string } } };
 type CheckInternals = { _zod?: { def?: { check?: string } } };
 
 // The allowlist of check kinds known to survive z.toJSONSchema intact. Ordinary
@@ -72,13 +72,29 @@ const findUnrepresentableCheckKind = (schema: unknown): string | undefined => {
   return undefined;
 };
 
+// io:'input' меняет поведение zod на pipe (.transform()/.pipe()): output-режим на
+// transform БРОСАЛ сам («Transforms cannot be represented»), input-режим молча
+// эмитит только входную сторону — сам transform и вся валидация ПОСЛЕ него
+// (.pipe(z.number().min(2))) исчезают из артефакта. Это тот же класс молчаливой
+// потери (ADR-008), что .refine(), только хуже: zod-parse модуля упадёт на данных,
+// которые гейт ядра принял. Отказ теперь — наша обязанность, не zod'а. Fail-closed:
+// отклоняется любой pipe, включая валидационную цепочку без transform — её
+// output-чеки в input-режиме теряются так же. Читает zod internal (_zod.def.type),
+// как и guard чеков выше: сломается при апгрейде zod — покраснеет фикстура
+// '.transform()' в define-app.fixtures.
+const isUnrepresentablePipe = (schema: unknown): boolean => {
+  const type = (schema as ZodInternals)?._zod?.def?.type;
+  return type === 'pipe' || type === 'transform';
+};
+
 // The conversion guard (design §6).
 //
-// z.toJSONSchema drops .refine()/.superRefine() and 'overwrite' checks (.trim(),
-// .toLowerCase(), …) SILENTLY while throwing on date/bigint/transform. Silent loss
-// is the defect class ADR-008 exists to prevent: the app is convinced the core
-// enforces its rule, and the core never received it. So a manifest carrying one is
-// refused outright.
+// z.toJSONSchema МОЛЧА теряет .refine()/.superRefine(), 'overwrite'-чеки (.trim(),
+// .toLowerCase(), …), а в io:'input' режиме — и pipe'ы (.transform()/.pipe(),
+// их отказывает isUnrepresentablePipe выше); на date/bigint zod бросает сам.
+// Молчаливая потеря — тот класс дефектов, для предотвращения которого существует
+// ADR-008: приложение уверено, что ядро принуждает его правило, а ядро его не
+// получало. Поэтому манифест с такой схемой отклоняется целиком.
 //
 // This reads a zod internal (_zod.def.checks) on purpose. The cure is the project's
 // own principle: the guard is covered by a fixture, so a zod upgrade that breaks
@@ -88,7 +104,16 @@ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
     // `override` is invoked for every subschema, so it walks the tree for us —
     // nested refinements and refinements inside arrays included.
     const json = z.toJSONSchema(schema, {
+      // input-режим (решение владельца C-9.1, REQ-RWD-014): defaulted ключи — необязательные
+      // на входе; дефолт применяет zod-parse в handler'е модуля, гейт ядра verdict-only.
+      io: 'input',
       override: (ctx) => {
+        if (isUnrepresentablePipe(ctx.zodSchema)) {
+          throw new ContractError(
+            'SCHEMA_NOT_REPRESENTABLE',
+            `.transform()/.pipe() cannot be represented in JSON Schema: in io:'input' mode zod emits only the pipe's input side — the transform and any post-transform validation would be dropped silently`,
+          );
+        }
         const unrepresentableKind = findUnrepresentableCheckKind(ctx.zodSchema);
         if (unrepresentableKind !== undefined) {
           throw new ContractError(
@@ -103,8 +128,9 @@ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
     if (err instanceof ContractError) {
       throw err;
     }
-    // date / bigint / transform: zod throws by itself — re-wrap as a typed code so
-    // nothing raw reaches the caller (REQ-SEC-006).
+    // date / bigint: zod бросает сам — перепаковываем в типизированный код, чтобы
+    // наружу не улетало ничего сырого (REQ-SEC-006). Transform zod в io:'input'
+    // больше не отклоняет — его отказывает isUnrepresentablePipe выше.
     throw new ContractError(
       'SCHEMA_NOT_REPRESENTABLE',
       err instanceof Error ? err.message : String(err),

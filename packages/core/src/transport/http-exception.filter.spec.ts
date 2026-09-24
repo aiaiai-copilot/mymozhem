@@ -13,7 +13,7 @@ import {
   TargetNotMemberError,
 } from '../membership/membership.errors';
 import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
-import { RoomOrganizerNotRegisteredError, RoomTransitionError } from '../room/room.errors';
+import { RoomConflictError, RoomNotConfiguredError, RoomOrganizerNotRegisteredError, RoomSettingsFrozenError, RoomTransitionError } from '../room/room.errors';
 import {
   ActorNotMemberError as RealtimeActorNotMemberError,
   EventTypeUnknownError,
@@ -68,10 +68,14 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
     ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
     ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
-    // POST /rooms (REQ-ID-005): покрытие RoomError частичное (design §11) — по HTTP
-    // достижим только ROOM_ORGANIZER_NOT_REGISTERED; прочие коды → INTERNAL_ERROR.
+    // RoomError — полное покрытие: ROOM_ORGANIZER_NOT_REGISTERED с POST /rooms
+    // (REQ-ID-005), остальные — с lifecycle-контура UI-среза (решение №9); коды в
+    // wire 1:1 (строковый паритет room.errors.ts), статус 409 — отказ из-за состояния.
     ['room organizer not registered', new RoomOrganizerNotRegisteredError('x'), 403, 'ROOM_ORGANIZER_NOT_REGISTERED'],
-    ['room transition (прочий RoomError)', new RoomTransitionError('x'), 500, 'INTERNAL_ERROR'],
+    ['room transition invalid', new RoomTransitionError('x'), 409, 'ROOM_TRANSITION_INVALID'],
+    ['room conflict', new RoomConflictError('x'), 409, 'ROOM_CONFLICT'],
+    ['room not configured', new RoomNotConfiguredError('x'), 409, 'ROOM_NOT_CONFIGURED'],
+    ['room settings frozen', new RoomSettingsFrozenError('x'), 409, 'ROOM_SETTINGS_FROZEN'],
     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
     // Кейсы кидают голый ContractError (не конкретные классы rewards): остальному

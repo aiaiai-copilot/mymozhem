@@ -51,6 +51,9 @@ export const configSchema = z.object({
         .map((o) => o.trim())
         .filter(Boolean),
     ),
+  // UI-срез (дизайн §2): same-origin раздача собранного SPA из того же
+  // Docker-артефакта. Не задан → статика не раздаётся, поведение прежнее (dev/test).
+  WEB_STATIC_DIR: z.string().min(1).optional(),
   // REQ-ID-015/009: Google OAuth — опциональная секция, all-or-none (superRefine ниже).
   // Без неё приложение бутится, эндпоинты /auth/google* отдают OAUTH_NOT_CONFIGURED.
   GOOGLE_CLIENT_ID: z.string().min(1).optional(),

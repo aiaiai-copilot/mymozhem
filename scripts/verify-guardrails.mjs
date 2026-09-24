@@ -4,10 +4,20 @@
 import { execSync } from 'node:child_process';
 import { writeFileSync, rmSync, mkdirSync } from 'node:fs';
 
-function expectFailure(label, cmd) {
+// expectOutput — обязательная проверка, ЧЕМ именно сработал enforcer: probe,
+// матчащий несколько правил (напр. apps/web → core ловится и web-only-through-sdk,
+// и apps-only-through-core-entrypoint), иначе проходит вакуумно — при удалении
+// целевого правила exit code остаётся ненулевым за счёт соседнего (review Task 6).
+function expectFailure(label, cmd, expectOutput) {
   try {
     execSync(cmd, { stdio: 'pipe' });
-  } catch {
+  } catch (err) {
+    const output = `${err.stdout?.toString() ?? ''}${err.stderr?.toString() ?? ''}`;
+    if (!output.includes(expectOutput)) {
+      console.error(`FAIL — guardrail fired, но без ожидаемого сигнала "${expectOutput}" on: ${label}`);
+      process.exitCode = 1;
+      return;
+    }
     console.log(`OK   — guardrail fired on: ${label}`);
     return;
   }
@@ -51,26 +61,72 @@ writeFileSync(
 const mathRandomProbe = 'packages/app-quiz/src/__probe-math-random.ts';
 writeFileSync(mathRandomProbe, 'export const x = Math.random();\n');
 
+// 6) Web-boundary probe: apps/web импортирует core напрямую (forbidden:
+// web-only-through-sdk-and-app-packages — web видит только контракт sdk и
+// чистые app-пакеты, ADR-002). Относительный импорт по прецеденту probes 1/3/4.
+const webCoreProbe = 'apps/web/src/__guardrail_probe__.ts';
+writeFileSync(
+  webCoreProbe,
+  "import '../../../packages/core/src/health/health.module';\nexport const probe = 1;\n",
+);
+
+// 7) Web-socket probe: socket.io-client вне apps/web/src/realtime (forbidden:
+// web-socketio-only-in-realtime — зеркало REQ-RT-006 на клиенте). Прямой
+// пакетный spec: правило матчится по node_modules-пути резолва.
+const webSocketProbe = 'apps/web/src/__probe-socket__.ts';
+writeFileSync(webSocketProbe, "import 'socket.io-client';\nexport const probe = 1;\n");
+
+// 8) Cross-app probe: apps/web импортирует apps/server (forbidden:
+// web-no-cross-app-imports — путь в core только через sdk, дизайн UI-среза §2).
+// Цель — apps/server/src/main.ts: не под ^packages/, поэтому импорт матчит
+// ТОЛЬКО новое правило и не может быть замаскирован соседним (web-only-through-sdk
+// ловит apps/web → packages/*, apps-only-through-core-entrypoint — apps/* → core/src).
+const crossAppProbe = 'apps/web/src/__probe-cross-app__.ts';
+writeFileSync(
+  crossAppProbe,
+  "import '../../server/src/main';\nexport const probe = 1;\n",
+);
+
 try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
     `pnpm exec depcruise ${boundaryProbe} --config .dependency-cruiser.cjs`,
+    'sdk-is-leaf',
   );
   expectFailure(
     'module-level mutable export (eslint)',
     `pnpm exec eslint ${mutableProbe} --no-ignore`,
+    'REQ-CORE-004',
   );
   expectFailure(
     'apps → core src-internals import (dependency-cruiser)',
     `pnpm exec depcruise ${appsProbe} --config .dependency-cruiser.cjs`,
+    'apps-only-through-core-entrypoint',
   );
   expectFailure(
     'core domain → rewards import (dependency-cruiser)',
     `pnpm exec depcruise ${rewardsProbe} --config .dependency-cruiser.cjs`,
+    'rewards-only-through-di-tokens',
   );
   expectFailure(
     'Math.random in app module (eslint)',
     `pnpm exec eslint ${mathRandomProbe}`,
+    'REQ-RWD-011',
+  );
+  expectFailure(
+    'web → core import (dependency-cruiser)',
+    `pnpm exec depcruise ${webCoreProbe} --config .dependency-cruiser.cjs`,
+    'web-only-through-sdk-and-app-packages',
+  );
+  expectFailure(
+    'socket.io-client outside web/src/realtime (dependency-cruiser)',
+    `pnpm exec depcruise ${webSocketProbe} --config .dependency-cruiser.cjs`,
+    'web-socketio-only-in-realtime',
+  );
+  expectFailure(
+    'web → other apps/* import (dependency-cruiser)',
+    `pnpm exec depcruise ${crossAppProbe} --config .dependency-cruiser.cjs`,
+    'web-no-cross-app-imports',
   );
 } finally {
   rmSync(boundaryProbe, { force: true });
@@ -78,6 +134,9 @@ try {
   rmSync(appsProbe, { force: true });
   rmSync(rewardsProbe, { force: true });
   rmSync(mathRandomProbe, { force: true });
+  rmSync(webCoreProbe, { force: true });
+  rmSync(webSocketProbe, { force: true });
+  rmSync(crossAppProbe, { force: true });
 }
 
 if (process.exitCode) {
