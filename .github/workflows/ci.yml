@@ -72,7 +72,10 @@ jobs:
           echo "server did not become live" >&2
           docker compose logs server
           exit 1
-      - run: pnpm exec playwright install --with-deps chromium
+      # Бинарь playwright живёт только в apps/web (devDependency @mymozhem/web);
+      # из корня workspace `pnpm exec playwright` его не видит — без --filter
+      # шаг падает с "Command not found".
+      - run: pnpm --filter @mymozhem/web exec playwright install --with-deps chromium
       - name: Seed REGISTERED-сессии организатора
         run: |
           TOKEN=$(docker compose exec -T server node apps/server/scripts/e2e-web-seed.mjs --email=e2e@example.com | jq -r .refreshToken)
