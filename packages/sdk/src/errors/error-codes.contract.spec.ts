@@ -49,6 +49,7 @@ describe('contract errors', () => {
       'DRAW_POOL_EMPTY',
       'AWARD_UNKNOWN',
       'REWARD_ALREADY_RESOLVED',
+      'IDENTITY_ANONYMIZED',
       'INTERNAL_ERROR',
     ]);
   });
@@ -74,6 +75,10 @@ describe('contract errors', () => {
     'AWARD_UNKNOWN',
     'REWARD_ALREADY_RESOLVED',
   ] as const)('accepts phase-3 code %s', (code) => {
+    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+  });
+
+  it.each(['IDENTITY_ANONYMIZED'] as const)('accepts phase-4 code %s', (code) => {
     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
   });
 
