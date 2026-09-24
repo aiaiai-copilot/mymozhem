@@ -16,6 +16,10 @@ export const decodeAccessClaims = (
 
 const GUEST_KEY = 'mm.guest.session';
 const HOST_ROOM_KEY = 'mm.host.roomId';
+// Код комнаты хранится рядом с roomId: HTTP-контракт не отдаёт code по roomId
+// (есть только createRoom-ответ), а консоль обязана показывать код и ссылки
+// /play/<code>, /screen/<code> после перезагрузки.
+const HOST_ROOM_CODE_KEY = 'mm.host.roomCode';
 
 export interface GuestSession {
   code: string;
@@ -67,5 +71,13 @@ export class SessionStore implements TokenProvider {
 
   static saveHostRoomId(id: string): void {
     localStorage.setItem(HOST_ROOM_KEY, id);
+  }
+
+  static loadHostRoomCode(): string | null {
+    return localStorage.getItem(HOST_ROOM_CODE_KEY);
+  }
+
+  static saveHostRoomCode(code: string): void {
+    localStorage.setItem(HOST_ROOM_CODE_KEY, code);
   }
 }

@@ -63,6 +63,9 @@ export function SetupPage() {
     createRoom(hostClient, { joinPolicy: 'guests' })
       .then((r) => {
         SessionStore.saveHostRoomId(r.roomId);
+        // Код — единственный момент, когда он доступен (HTTP не отдаёт code по
+        // roomId); консоль строит из него ссылки /play/<code> и /screen/<code>.
+        SessionStore.saveHostRoomCode(r.code);
         setRoomId(r.roomId);
       })
       .catch(() => setRoomError('Не удалось создать комнату. Обновите страницу.'));
