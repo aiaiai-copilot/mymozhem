@@ -16,9 +16,11 @@ export const decodeAccessClaims = (
 
 const GUEST_KEY = 'mm.guest.session';
 const HOST_ROOM_KEY = 'mm.host.roomId';
-// Код комнаты хранится рядом с roomId: HTTP-контракт не отдаёт code по roomId
-// (есть только createRoom-ответ), а консоль обязана показывать код и ссылки
-// /play/<code>, /screen/<code> после перезагрузки.
+// Код комнаты хранится рядом с roomId: код приезжает в createRoom-ответе и в
+// ответах lifecycle (configure/activate/complete/cancel — toRoomResponse), но
+// endpoint'а «прочитать комнату по roomId» нет — после перезагрузки консоли
+// код взять неоткуда, а она обязана показывать код и ссылки /play/<code>,
+// /screen/<code>.
 const HOST_ROOM_CODE_KEY = 'mm.host.roomCode';
 
 export interface GuestSession {

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { ProjectedEvent } from '@mymozhem/sdk';
-import { gameFinishedPayload, type QuizState } from '@mymozhem/app-quiz';
+import { gameFinishedPayload, quizSettingsSchema, type QuizState } from '@mymozhem/app-quiz';
 import { Standings } from '../../components/standings';
 import { projectAnsweredActors } from '../../state/projections';
 
@@ -20,6 +20,12 @@ interface QuizControlsProps {
   events: ProjectedEvent[];
   quiz: QuizState;
   names: Map<string, string>;
+  // Публичная проекция appSettings из snapshot (REQ-CORE-008): нужна для
+  // длины колоды — кнопку «Открыть вопрос» глушим, когда вопросы кончились.
+  appSettings: Record<string, unknown>;
+  // Терминальный статус комнаты: сервер отклонит любую команду в не-ACTIVE
+  // комнате — отсекаем заранее (та же дисциплина, что у Members/Prizes).
+  disabled: boolean;
   // Команды ведущего (clientInitiated по манифесту): quiz.question.opened /
   // quiz.question.closed / quiz.game.finish. Ошибку publish показывает страница.
   onCommand: (type: string, payload: Record<string, unknown>) => void;
@@ -29,9 +35,28 @@ interface QuizControlsProps {
 // Пульт ведущего квиза (бриф Task 14): open/close/finish + счётчик ответов +
 // табло. Кнопок reveal нет — question.revealed и game.finished коммитит модуль
 // после close/finish, консоль только потребляет публичные события.
-export function QuizControls({ events, quiz, names, onCommand, commandError }: QuizControlsProps) {
+export function QuizControls({
+  events,
+  quiz,
+  names,
+  appSettings,
+  disabled,
+  onCommand,
+  commandError,
+}: QuizControlsProps) {
   const current = quiz.currentQuestion;
   const next = nextQuestionIndex(quiz);
+
+  // Длина колоды — из публичной проекции appSettings: тот же safeParse по ключу
+  // questions, что на play-page (correctAnswers сюда структурно не доезжают).
+  // Хук до early return ниже — хуки безусловны.
+  const questions = useMemo(() => {
+    const parsed = quizSettingsSchema.shape.questions.safeParse(appSettings.questions);
+    return parsed.success ? parsed.data : [];
+  }, [appSettings]);
+  // Колоды хватило: следующего вопроса нет — open глушим, модуль всё равно
+  // отклонил бы индекс вне диапазона.
+  const deckExhausted = next >= questions.length;
 
   // Reveal текущего вопроса: revealed-событие позже close для того же индекса
   // (тот же критерий, что в play/screen).
@@ -81,24 +106,37 @@ export function QuizControls({ events, quiz, names, onCommand, commandError }: Q
       ) : null}
       <p>
         {/* disabled, пока accepting: второй open до close модуль отклонит,
-            но и не даём ведущему нажать его зря. */}
+            но и не даём ведущему нажать его зря; deckExhausted — вопросы
+            кончились. Подпись 1-based для ведущего (как статус-строка выше),
+            а payload остаётся 0-based (questionIndex: next) — так ждёт модуль. */}
         <button
           type="button"
-          disabled={quiz.accepting}
+          disabled={disabled || quiz.accepting || deckExhausted}
           onClick={() => onCommand('quiz.question.opened', { questionIndex: next })}
         >
-          Открыть вопрос {next}
+          Открыть вопрос {next + 1}
         </button>{' '}
         <button
           type="button"
-          disabled={!quiz.accepting || current === null}
+          disabled={disabled || !quiz.accepting || current === null}
           onClick={() => {
             if (current !== null) onCommand('quiz.question.closed', { questionIndex: current });
           }}
         >
           Закрыть вопрос
         </button>{' '}
-        <button type="button" onClick={() => onCommand('quiz.game.finish', {})}>
+        {/* confirm(): game.finish необратим на сервере (модуль коммитит
+            game.finished) — случайный клик не должен гасить квиз; та же
+            дисциплина, что у «Завершить событие» на console-page. */}
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => {
+            if (window.confirm('Завершить квиз? Это действие необратимо.')) {
+              onCommand('quiz.game.finish', {});
+            }
+          }}
+        >
           Завершить квиз
         </button>
       </p>

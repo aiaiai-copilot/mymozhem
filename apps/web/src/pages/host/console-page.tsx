@@ -147,6 +147,8 @@ export function ConsolePage() {
           events={binding.events}
           quiz={feed.quiz}
           names={feed.names}
+          appSettings={binding.appSettings}
+          disabled={terminal}
           onCommand={runCommand}
           commandError={commandError}
         />

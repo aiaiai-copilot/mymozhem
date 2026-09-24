@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { PrizeResponse } from '@mymozhem/sdk';
-import { isDrawable, startDrawAttempt, type DrawAttempt } from './prizes-panel';
+import {
+  DRAW_ID_GENERATION_FAILED,
+  isDrawable,
+  startDrawAttempt,
+  tryStartDrawAttempt,
+  type DrawAttempt,
+} from './prizes-panel';
 
 const ROOM = '11111111-1111-4111-8111-111111111111';
 
@@ -61,5 +67,42 @@ describe('startDrawAttempt', () => {
     });
     expect(attempt).toBeNull();
     expect(generated).toBe(0);
+  });
+});
+
+// Синхронный бросок генератора drawId (crypto.randomUUID() вне secure context —
+// plain-HTTP в LAN) обязан всплывать текстом ошибки панели, а не умирать в
+// onClick: иначе ведущий не понимает, почему розыгрыш не пошёл, а pending при
+// этом остался бы висеть (фолбэк-генератор запрещён глобальным констрейнтом).
+describe('tryStartDrawAttempt', () => {
+  it('генератор бросает → ошибка всплывает, попытка НЕ создана (pending не залипнет)', () => {
+    const result = tryStartDrawAttempt(prize(1), null, () => {
+      throw new TypeError('crypto.randomUUID is not a function');
+    });
+    expect(result.attempt).toBeNull();
+    expect(result.error).toBe(DRAW_ID_GENERATION_FAILED);
+  });
+
+  it('генератор бросает при УЖЕ pending-попытке → броска нет, генератор не вызывается повторно', () => {
+    const pending: DrawAttempt = {
+      drawId: '77777777-7777-4777-8777-777777777777',
+      prizeId: prize(1).id,
+    };
+    let generated = 0;
+    const result = tryStartDrawAttempt(prize(1), pending, () => {
+      generated += 1;
+      throw new TypeError('crypto.randomUUID is not a function');
+    });
+    expect(result).toEqual({ attempt: null, error: null });
+    expect(generated).toBe(0);
+  });
+
+  it('успешная генерация → попытка без ошибки (прозрачный pass-through)', () => {
+    const p = prize(1);
+    const result = tryStartDrawAttempt(p, null, () => '88888888-8888-4888-8888-888888888888');
+    expect(result).toEqual({
+      attempt: { drawId: '88888888-8888-4888-8888-888888888888', prizeId: p.id },
+      error: null,
+    });
   });
 });

@@ -63,8 +63,10 @@ export function SetupPage() {
     createRoom(hostClient, { joinPolicy: 'guests' })
       .then((r) => {
         SessionStore.saveHostRoomId(r.roomId);
-        // Код — единственный момент, когда он доступен (HTTP не отдаёт code по
-        // roomId); консоль строит из него ссылки /play/<code> и /screen/<code>.
+        // Код приезжает также в ответах configure/activate (toRoomResponse), но
+        // после перезагрузки консоли перечитать его неоткуда (endpoint'а
+        // «room по roomId» нет); консоль строит из него ссылки /play/<code> и
+        // /screen/<code> — сохраняем сразу.
         SessionStore.saveHostRoomCode(r.code);
         setRoomId(r.roomId);
       })

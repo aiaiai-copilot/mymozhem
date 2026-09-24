@@ -26,6 +26,28 @@ export const startDrawAttempt = (
   return { drawId: makeDrawId(), prizeId: prize.id };
 };
 
+// Текст для синхронного отказа генератора drawId (см. tryStartDrawAttempt).
+export const DRAW_ID_GENERATION_FAILED =
+  'Действие не выполнено: браузер не даёт сгенерировать идентификатор розыгрыша (нужен HTTPS или localhost).';
+
+// crypto.randomUUID() бросает СИНХРОННО вне secure context (plain-HTTP в LAN) —
+// без перехвата onClick умирал бы молча, и ведущий не понял бы, почему розыгрыш
+// не пошёл. Бросок превращаем в текст ошибки панели; попытка при этом не
+// создаётся и pending не ставится. Фолбэк-генератор НЕ заводим: единственный
+// разрешённый источник drawId — crypto.randomUUID() (глобальный констрейнт),
+// замена потребовала бы решения владельца.
+export const tryStartDrawAttempt = (
+  prize: PrizeResponse,
+  pending: DrawAttempt | null,
+  makeDrawId: () => string,
+): { attempt: DrawAttempt | null; error: string | null } => {
+  try {
+    return { attempt: startDrawAttempt(prize, pending, makeDrawId), error: null };
+  } catch {
+    return { attempt: null, error: DRAW_ID_GENERATION_FAILED };
+  }
+};
+
 // UX-маппинг ошибок REST/publish панели — тот же стиль, что commandErrorText
 // на console-page: человеческий глагол + честный код (REQ-SEC-006).
 const panelErrorText = (e: unknown): string => {
@@ -114,7 +136,15 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: 
   };
 
   const runDraw = (prize: PrizeResponse) => {
-    const attempt = startDrawAttempt(prize, pendingDraw, () => crypto.randomUUID());
+    const { attempt, error: startError } = tryStartDrawAttempt(prize, pendingDraw, () =>
+      crypto.randomUUID(),
+    );
+    // Синхронный отказ генератора drawId (вне secure context) — в текст панели;
+    // pending не тронут, попытки не было.
+    if (startError) {
+      setError(startError);
+      return;
+    }
     if (!attempt) return; // повторный клик до ack — не попытка (идемпотентность)
     setPendingDraw(attempt);
     setError(null);

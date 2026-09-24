@@ -11,7 +11,9 @@ export function LandingPage() {
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const trimmed = code.trim();
-    if (trimmed) navigate(`/play/${trimmed}`);
+    // encodeURIComponent: код попадает в path-параметр, посторонние символы
+    // (/, ?, #) не должны ломать маршрут.
+    if (trimmed) navigate(`/play/${encodeURIComponent(trimmed)}`);
   };
 
   return (
@@ -21,7 +23,17 @@ export function LandingPage() {
       <section>
         <h2>Я организатор</h2>
         <p>
-          <a href={'/auth/google?redirect=' + encodeURIComponent('/host')}>
+          {/* redirect обязан быть АБСОЛЮТНЫМ URL: серверный allowlist
+              (OAUTH_REDIRECT_ALLOWLIST, REQ-ID-009) парсится как z.url() и
+              сверяется точным совпадением строки (OAuthService.validateRedirect)
+              — относительный '/host' не пройдёт ни при одной конфигурации.
+              Same-origin по дизайну §0.3, поэтому origin берём из location. */}
+          <a
+            href={
+              '/auth/google?redirect=' +
+              encodeURIComponent(`${window.location.origin}/host`)
+            }
+          >
             Войти через Google
           </a>
         </p>
