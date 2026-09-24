@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Global, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { Prisma } from '@prisma/client';
 import type { AppEffect } from '@mymozhem/sdk';
 import { AppRegistryModule } from '../app-registry/app-registry.module';
 import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
@@ -10,6 +11,7 @@ import { ConfigModule } from '../config/config.module';
 import { APP_CONFIG } from '../config/config.tokens';
 import { MembershipModule } from '../membership/membership.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { PrismaService } from '../prisma/prisma.service';
 import { EventOutbox } from '../realtime/event-outbox';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { RewardsAnonymizationGuard } from '../rewards/rewards-anonymization.guard';
@@ -239,5 +241,106 @@ describe('GuestSweepService — приостановка при открытой
     expect(await sweep.sweepExpiredGuests()).toBe(1);
     after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
     expect(after.deletedAt).not.toBeNull();
+  });
+});
+
+describe('GuestSweepService — окно гонки C-8.1: re-check откатывает свип', () => {
+  const RACE_TARGET = Symbol('RACE_TARGET');
+  type RaceTarget = { winnerId: string; roomId: string; prizeId: string };
+
+  class RacingGuard implements AnonymizationGuard {
+    private calls = 0;
+    constructor(
+      private readonly prisma: PrismaService,
+      private readonly real: RewardsAnonymizationGuard,
+      private readonly target: RaceTarget,
+    ) {}
+    async hasOpenAwards(tx: Prisma.TransactionClient, ids: readonly string[]): Promise<Set<string>> {
+      this.calls += 1;
+      if (this.calls === 1) {
+        // «Конкурирующий» award — своим соединением, до блокировок свипа.
+        await this.prisma.award.create({
+          data: {
+            roomId: this.target.roomId,
+            prizeId: this.target.prizeId,
+            winnerId: this.target.winnerId,
+            status: 'AWARDED',
+            sourceAppId: 'lottery',
+          },
+        });
+        return new Set();
+      }
+      return this.real.hasOpenAwards(tx, ids);
+    }
+  }
+
+  let db: TestDb;
+  let sweep: GuestSweepService;
+  let target: RaceTarget;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
+    const room = await db.prisma.room.create({
+      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+    });
+    const prize = await db.prisma.prize.create({
+      data: { roomId: room.id, name: 'Приз гонки', quantityTotal: 1, quantity: 1 },
+    });
+    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
+    target = { winnerId: guest.id, roomId: room.id, prizeId: prize.id };
+
+    const RACE_TOKEN = RACE_TARGET;
+    @Global()
+    @Module({
+      // PrismaModule нужен прямо: он не @Global, а RewardsModule не ре-экспортирует
+      // PrismaService — без imports фабрика не разрешит PrismaService в этом скоупе.
+      imports: [RewardsModule, PrismaModule],
+      providers: [
+        { provide: RACE_TOKEN, useValue: target },
+        {
+          provide: ANONYMIZATION_GUARDS,
+          useFactory: (prisma: PrismaService, real: RewardsAnonymizationGuard, t: RaceTarget): AnonymizationGuard[] => [
+            new RacingGuard(prisma, real, t),
+          ],
+          inject: [PrismaService, RewardsAnonymizationGuard, RACE_TOKEN],
+        },
+      ],
+      exports: [ANONYMIZATION_GUARDS],
+    })
+    class TestRaceWiringModule {}
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ConfigModule,
+        PrismaModule,
+        AppRegistryModule.register([]),
+        AppRuntimeModule.register([]),
+        MembershipModule,
+        RealtimeModule,
+        RewardsModule,
+        IdentityModule,
+        TestRaceWiringModule,
+      ],
+    })
+      .overrideProvider(APP_CONFIG)
+      .useValue(TEST_CONFIG)
+      .compile();
+    await moduleRef.init();
+    sweep = moduleRef.get(GuestSweepService);
+  }, 120_000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  it('award, закоммиченный между гард-чеком и коммитом, откатывает анонимизацию (0, identity не тронута)', async () => {
+    const anonymized = await sweep.sweepExpiredGuests();
+    expect(anonymized).toBe(0);
+    const after = await db.prisma.identity.findUniqueOrThrow({ where: { id: target.winnerId } });
+    expect(after.deletedAt).toBeNull(); // свип откачен — REQ-RWD-013 победил
+    const award = await db.prisma.award.findFirst({ where: { winnerId: target.winnerId, status: 'AWARDED' } });
+    expect(award).not.toBeNull(); // «конкурирующая» награда — на месте
   });
 });
