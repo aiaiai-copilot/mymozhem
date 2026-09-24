@@ -228,7 +228,7 @@
 ### Локальное состояние (не в git)
 
 - **`.env` в корне репозитория** (gitignored): `JWT_SECRET` (сгенерирован openssl) + **реальные `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`** клиента `mymozhem-local-test`. Compose читает его автоматически. Не коммитить; при потере — client перевыпускается в Google Cloud Console (Reset secret).
-- **Compose-стенд оставлен поднятым** (`mymozhem-server-1` + `mymozhem-postgres-1`, http://localhost:3000): в БД — 2 тестовые комнаты, созданные владельцем в ходе прогона (коды `kxr2yqgu`, `qyg69tzk`). Остановка/очистка: `docker compose down -v`.
+- **Compose-стенд снесён** (`docker compose down -v` в конце сессии — контейнеры, network, volumes удалены; тестовые комнаты `kxr2yqgu`/`qyg69tzk` смыты вместе с БД). Поднять заново: `docker compose up -d --build` из корня (`.env` на месте, креды подхватятся).
 - Worktree `.worktrees/rewards-lottery` не тронут (снятие — отложенное решение владельца). Леджеры SDD `.superpowers/sdd/*` — по-прежнему только локально.
 - Side-effects на внешние системы: **создан реальный OAuth client в Google Cloud** (project `first-vision-468214-h9`, владелец — аккаунт владельца) — живёт после сессии, удаление/ротация — действие владельца в консоли. Push на origin не выполнялся.
 
