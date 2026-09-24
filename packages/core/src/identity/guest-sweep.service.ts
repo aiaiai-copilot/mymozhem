@@ -29,13 +29,16 @@ export class GuestSweepService {
   ) {}
 
   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
-  // свипа; C-8.1 (ф.4) закрыто re-check'ом: гард опрашивается дважды ВНУТРИ tx —
-  // до анонимизации и после updateMany. READ COMMITTED делает видимым любой award,
-  // закоммитившийся до перепроверки (включая тот, чей INSERT ждал нашей
-  // FOR NO KEY UPDATE блокировки на identity — FK-проверка Award берёт FOR KEY
-  // SHARE, блокировки конфликтуют) → throw откатывает всю tx. Остаточное
-  // направление «анонимизирован → награждён» (award коммитится после COMMIT
-  // свипа) закрыто гардой identity.deletedAt в RewardsService.awardPrize.
+  // свипа; C-8.1 (ф.4, амендмент 2026-09-25) закрыто re-check'ом: гард опрашивается
+  // дважды ВНУТРИ tx — до анонимизации и после updateMany. READ COMMITTED делает
+  // видимым любой award, закоммитившийся до перепроверки → throw откатывает всю tx.
+  // С параллельным награждением пути сериализует блокирующее чтение award-гарды
+  // (RewardsService.awardPrize): FOR NO KEY UPDATE — тот же режим, что у updateMany
+  // свипа, а режим конфликтует сам с собой на строке identity → кто первым взял
+  // блокировку, тот выиграл; проигравший после ожидания перечитывает строку (EPQ).
+  // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY UPDATE
+  // она не конфликтует. Остаточное направление «анонимизирован → награждён»
+  // закрыто той же гардой identity.deletedAt.
   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
     try {
@@ -53,9 +56,15 @@ export class GuestSweepService {
         const sweepIds = ids.filter((id) => !suspended.has(id));
         if (sweepIds.length === 0) return 0;
         const anonymized = await tx.identity.updateMany({
+          // deletedAt: null в where — вторая линия защиты от гонки с ручным
+          // исключением: concurrent exclusion мог успеть soft-delete'нуть
+          // identity между выборкой кандидатов и этим updateMany.
           where: { id: { in: sweepIds }, deletedAt: null },
           data: { displayName: null, email: null, deletedAt: now },
         });
+        // Отзыв живых сессий гостя — по прецеденту среза исключения
+        // (membership.service.ts:147-153). Сессия гостя под приостановкой
+        // истекает по своему капу как обычно (design §5) — здесь её нет.
         await tx.session.updateMany({
           where: { identityId: { in: sweepIds }, revokedAt: null },
           data: { revokedAt: now },
