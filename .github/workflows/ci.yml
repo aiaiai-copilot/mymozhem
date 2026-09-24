@@ -36,3 +36,49 @@ jobs:
       - run: pnpm run build
       - run: pnpm run boundary-check
       - run: pnpm run guardrails
+
+  # e2e-smoke UI-среза (Task 16): Playwright против ЛОКАЛЬНОГО compose-стенда,
+  # собранного из этого же чекаута. Никогда не против production — baseURL
+  # зашит в e2e/playwright.config.ts, а стенд живёт только внутри раннера.
+  e2e-web:
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      # Фиктивный тестовый секрет (REQ-SEC-002 требует >=32 байта): стенд
+      # эфемерен и не покидает раннер. Job-level, потому что compose-CLI
+      # интерполирует окружение файла в каждом шаге (up/exec/down), а compose
+      # помечает JWT_SECRET как обязательный (:? — fail-closed).
+      JWT_SECRET: ci-e2e-dummy-jwt-secret-0123456789abcdef0123456789abcdef
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # node_modules нужны только для @playwright/test и запуска теста;
+      # сам стенд собирается docker'ом из исходников чекаута.
+      - run: pnpm install --frozen-lockfile
+      - name: Поднять compose-стенд (postgres + server с SPA)
+        run: docker compose up -d --build
+      - name: Дождаться живости сервера
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3000/health/live > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo "server did not become live" >&2
+          docker compose logs server
+          exit 1
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Seed REGISTERED-сессии организатора
+        run: |
+          TOKEN=$(docker compose exec -T server node apps/server/scripts/e2e-web-seed.mjs --email=e2e@example.com | jq -r .refreshToken)
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          echo "E2E_REFRESH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - run: pnpm --filter @mymozhem/web test:e2e
+      - name: Погасить стенд
+        if: always()
+        run: docker compose down -v
