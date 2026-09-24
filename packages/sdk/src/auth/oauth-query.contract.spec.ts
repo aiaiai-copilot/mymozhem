@@ -21,9 +21,18 @@ describe('oauthCallbackQuery contract (REQ-ID-009)', () => {
     { code: 'auth-code', state: 'csrf-state' },
     { error: 'access_denied' },
     {},
+    // Google дописывает свои параметры в callback-URL (scope/authuser/prompt и т.п.) —
+    // strict-отказ дал бы 400 REQUEST_INVALID на штатном входе (manual smoke 2026-09-24).
+    {
+      code: 'auth-code',
+      state: 'csrf-state',
+      scope: 'openid email profile',
+      authuser: '0',
+      prompt: 'consent',
+    },
   ];
   const invalid: unknown[] = [
-    { code: 'auth-code', extra: true }, // strictObject
+    // extra-ключи больше не отклоняются: схема strip'ит неизвестное (Google дописывает своё).
     { code: 42 },
     'not-an-object',
   ];
