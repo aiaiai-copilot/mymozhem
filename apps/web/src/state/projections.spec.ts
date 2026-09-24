@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { coreEventType, type ProjectedEvent } from '@mymozhem/sdk';
 import {
   deriveRoomStatus,
+  projectAnsweredActors,
   projectLottery,
   projectQuiz,
   toAppLogEvent,
@@ -82,8 +83,47 @@ describe('toAppLogEvent', () => {
   });
 });
 
-describe('deriveRoomStatus', () => {
-  const ev = (type: string): ProjectedEvent => ({ type, payload: {}, actorId: null });
+describe('projectAnsweredActors', () => {
+  const accept = (questionIndex: number, actorId: string): ProjectedEvent => ({
+    type: 'quiz.answer.accepted',
+    payload: { questionIndex, actorId },
+    actorId: null,
+  });
+
+  it('фолдит публичные quiz.answer.accepted вопроса в множество ответивших', () => {
+    const events = [accept(0, PLAYER_1), accept(0, PLAYER_2)];
+
+    const answered = projectAnsweredActors(events, 0);
+    expect(answered.has(PLAYER_1)).toBe(true);
+    expect(answered.has(PLAYER_2)).toBe(true);
+    expect(answered.size).toBe(2);
+  });
+
+  it('игнорирует accept других вопросов, не-accept события и чужие префиксы appId', () => {
+    const events: ProjectedEvent[] = [
+      accept(1, PLAYER_1),
+      { type: 'quiz.question.opened', payload: { questionIndex: 0 }, actorId: null },
+      // answer.submitted — module-private, до участника не доезжает; даже если бы
+      // доехал, verdict обязан строиться только по публичному accept.
+      { type: 'quiz.answer.submitted', payload: { questionIndex: 0, optionIndex: 1 }, actorId: PLAYER_2 },
+      { type: 'lottery.answer.accepted', payload: { questionIndex: 0, actorId: PLAYER_2 }, actorId: null },
+    ];
+
+    expect(projectAnsweredActors(events, 0).size).toBe(0);
+    const first = projectAnsweredActors(events, 1);
+    expect(first.has(PLAYER_1)).toBe(true);
+    expect(first.size).toBe(1);
+  });
+
+  it('переживает перефолд: accept из snapshot попадает в проекцию (reload не теряет факт ответа)', () => {
+    // После reload events строятся заново из snapshot — answered-set выводится
+    // из того же лога, отдельного локального состояния у проекции нет.
+    const snapshotEvents = [accept(0, PLAYER_1)];
+    expect(projectAnsweredActors(snapshotEvents, 0).has(PLAYER_1)).toBe(true);
+  });
+});
+
+describe('deriveRoomStatus', () => {  const ev = (type: string): ProjectedEvent => ({ type, payload: {}, actorId: null });
 
   it('пусто → DRAFT; activated → ACTIVE; completed позже → COMPLETED', () => {
     expect(deriveRoomStatus([])).toBe('DRAFT');

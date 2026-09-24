@@ -6,6 +6,7 @@ import { REALTIME_MESSAGES } from '@mymozhem/sdk';
 // спеки работают с интерфейсом, а не с Socket из библиотеки.
 export interface SocketLike {
   onConnect(cb: () => void): void;
+  onConnectError(cb: (err: Error) => void): void;
   onDisconnect(cb: () => void): void;
   onEvent(cb: (payload: unknown) => void): void;
   emitWithAck(event: string, payload: unknown): Promise<unknown>;
@@ -20,6 +21,9 @@ export const createSocket = (getAccessToken: () => string | null): SocketLike =>
   });
   return {
     onConnect: (cb) => socket.on('connect', cb),
+    // Отказ handshake (gateway auth-middleware отвечает SESSION_INVALID) приходит
+    // именно сюда, а не в disconnect: socket.io молча ретраит, 'connect' не наступает.
+    onConnectError: (cb) => socket.on('connect_error', cb),
     onDisconnect: (cb) => socket.on('disconnect', cb),
     onEvent: (cb) => socket.on(REALTIME_MESSAGES.EVENT, cb),
     emitWithAck: (event, payload) => socket.emitWithAck(event, payload),

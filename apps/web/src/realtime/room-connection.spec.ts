@@ -17,6 +17,7 @@ class FakeSocket implements SocketLike {
   readonly calls: Array<{ event: string; payload: unknown }> = [];
   private readonly ackQueue = new Map<string, unknown[]>();
   private readonly connectCbs: Array<() => void> = [];
+  private readonly connectErrorCbs: Array<(err: Error) => void> = [];
   private readonly disconnectCbs: Array<() => void> = [];
   private readonly eventCbs: Array<(payload: unknown) => void> = [];
   disconnected = false;
@@ -29,6 +30,9 @@ class FakeSocket implements SocketLike {
 
   onConnect(cb: () => void): void {
     this.connectCbs.push(cb);
+  }
+  onConnectError(cb: (err: Error) => void): void {
+    this.connectErrorCbs.push(cb);
   }
   onDisconnect(cb: () => void): void {
     this.disconnectCbs.push(cb);
@@ -50,6 +54,9 @@ class FakeSocket implements SocketLike {
 
   triggerConnect(): void {
     this.connectCbs.forEach((cb) => cb());
+  }
+  triggerConnectError(err: Error = new Error('SESSION_INVALID')): void {
+    this.connectErrorCbs.forEach((cb) => cb(err));
   }
   triggerDisconnect(): void {
     this.disconnectCbs.forEach((cb) => cb());
@@ -195,5 +202,103 @@ describe('RoomConnection', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).code).toBe('ROUND_NOT_OPEN');
     expect((err as ApiError).status).toBe(0);
+  });
+
+  it('connect_error после join → ровно один refresh на стрик обрыва (не на каждый retry)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let refreshes = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, () => {
+      refreshes += 1;
+      return Promise.resolve();
+    });
+    await conn.join();
+
+    // Телефон проспал TTL access-токена: socket.io ретраит handshake со старым
+    // токеном, gateway отвечает SESSION_INVALID на каждый retry — refresh
+    // обязан уйти один раз, иначе retry-шторм превратился бы в refresh-шторм.
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+    socket.triggerConnectError();
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    expect(refreshes).toBe(1);
+  });
+
+  it('успешный reconnect закрывает стрик: новая серия connect_error снова тянет refresh', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let refreshes = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, () => {
+      refreshes += 1;
+      return Promise.resolve();
+    });
+    await conn.join();
+
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    expect(refreshes).toBe(1);
+
+    // Refresh успел обновить токен → очередной retry handshake прошёл.
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    socket.triggerConnect();
+    await flushMicrotasks();
+
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    expect(refreshes).toBe(2);
+  });
+
+  it('connect_error до join (первый handshake) — refresh не вызывается', async () => {
+    const socket = new FakeSocket();
+    let refreshes = 0;
+    new RoomConnection(socket, ROOM_ID, () => {
+      refreshes += 1;
+      return Promise.resolve();
+    });
+
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(refreshes).toBe(0);
+  });
+
+  it('упавший refresh (мёртвая refresh-кука) → явный "disconnected", повторных попыток нет', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let refreshes = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, () => {
+      refreshes += 1;
+      return Promise.reject(new Error('refresh cookie expired'));
+    });
+    const states: ConnectionState[] = [];
+    conn.onStateChange((s) => states.push(s));
+    await conn.join();
+
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(refreshes).toBe(1);
+    // 'disconnected' от самого обрыва + явный 'disconnected' после провала refresh
+    // (тот же контракт, что у упавшего re-subscribe): retry — забота потребителя.
+    expect(states).toEqual(['live', 'disconnected', 'disconnected']);
+  });
+
+  it('без refresh-хука connect_error — no-op: ни состояния, ни исключений', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    const states: ConnectionState[] = [];
+    conn.onStateChange((s) => states.push(s));
+    await conn.join();
+
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(states).toEqual(['live']);
   });
 });

@@ -1,5 +1,10 @@
 import { coreEventType, type AppLogEvent, type ProjectedEvent, type RoomStatus } from '@mymozhem/sdk';
-import { initialQuizState, reduceQuiz, type QuizState } from '@mymozhem/app-quiz';
+import {
+  answerAcceptedPayload,
+  initialQuizState,
+  reduceQuiz,
+  type QuizState,
+} from '@mymozhem/app-quiz';
 import { initialLotteryState, reduceLottery, type LotteryState } from '@mymozhem/app-lottery';
 
 // Адаптер wire → AppLogEvent (дизайн §3): wire несёт '<appId>.<short>' без seq/recordedAt
@@ -33,6 +38,28 @@ export const projectQuiz = (events: ProjectedEvent[], recordedAt: string): QuizS
   foldApp('quiz', events, initialQuizState, reduceQuiz, recordedAt);
 export const projectLottery = (events: ProjectedEvent[], recordedAt: string): LotteryState =>
   foldApp('lottery', events, initialLotteryState, reduceLottery, recordedAt);
+
+// Ответившие на вопрос — из публичных quiz.answer.accepted (payload
+// {questionIndex, actorId}). answer.submitted коммитится с visibility
+// module-private (решение ф.2) и до участников не доезжает, поэтому
+// quiz.answers на клиенте всегда пуст: verdict reveal и «ответ уже отправлен»
+// строятся только по публичным сигналам провода. Shared reduceQuiz осознанно
+// игнорирует accept (в payload нет optionIndex — редьюсеру он не нужен),
+// поэтому это отдельная клиентская проекция, а не изменение редьюсера.
+// Отдельного состояния у проекции нет — она выводится из лога и переживает
+// перефолд/reload (accept едет в snapshot).
+export const projectAnsweredActors = (
+  events: ProjectedEvent[],
+  questionIndex: number,
+): ReadonlySet<string> => {
+  const answered = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'quiz.answer.accepted') continue;
+    const p = answerAcceptedPayload.parse(e.payload);
+    if (p.questionIndex === questionIndex) answered.add(p.actorId);
+  }
+  return answered;
+};
 
 // Статус комнаты — из lifecycle-событий лога (REQ-RT-010); последнее побеждает.
 export const deriveRoomStatus = (events: ProjectedEvent[]): RoomStatus => {

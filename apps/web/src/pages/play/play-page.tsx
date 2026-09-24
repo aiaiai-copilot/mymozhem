@@ -13,7 +13,7 @@ import { ConnectionBanner } from '../../components/connection-banner';
 import { rosterNames } from '../../components/roster-names';
 import { Standings } from '../../components/standings';
 import { Winners } from '../../components/winners';
-import { deriveRoomStatus, projectLottery, projectQuiz } from '../../state/projections';
+import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
 import { shouldRefetchRoster } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
@@ -206,8 +206,18 @@ export function PlayPage() {
     );
   }
 
-  const myAnswer = myId ? quiz.answers[myId] : undefined;
-  const answered = answerAck || myAnswer !== undefined;
+  // quiz.answers на клиенте ВСЕГДА пуст (answer.submitted — module-private),
+  // поэтому факт «я ответил» выводим из публичных quiz.answer.accepted —
+  // проекция переживает перефолд/reload (accept едет в snapshot).
+  const answeredActors = useMemo(
+    () =>
+      currentQuestion !== null
+        ? projectAnsweredActors(events, currentQuestion)
+        : new Set<string>(),
+    [events, currentQuestion],
+  );
+  const myAnswered = myId !== null && answeredActors.has(myId);
+  const answered = answerAck || myAnswered;
 
   let view;
   if (quiz.finished || status === 'COMPLETED') {
@@ -256,11 +266,13 @@ export function PlayPage() {
     const myPoints = myId
       ? (reveal.awarded.find((a) => a.actorId === myId)?.points ?? 0)
       : 0;
-    const verdict = !myAnswer
+    const verdict = !answered
       ? 'Вы не успели ответить.'
       : reveal.correctIndex === undefined
         ? 'Ответ принят.'
-        : myAnswer.optionIndex === reveal.correctIndex
+        : // Верно ⇔ актор в awarded (баллы начисляются только за правильный
+          // ответ); optionIndex на клиенте недоступен — сравнивать нечего.
+          myId !== null && reveal.awarded.some((a) => a.actorId === myId)
           ? 'Верно!'
           : 'Неверно.';
     const correctOption =

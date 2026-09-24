@@ -22,16 +22,24 @@ export type ConnectionState = 'connecting' | 'live' | 'disconnected';
 // HTTP-статуса нет).
 export class RoomConnection {
   private joined = false;
+  private refreshAttempted = false;
   private resyncCb: ((s: RoomSnapshot) => void) | null = null;
   private stateCb: ((s: ConnectionState) => void) | null = null;
 
   constructor(
     private readonly socket: SocketLike,
     private readonly roomId: string,
+    // Refresh access-токена при отказе handshake (протухший TTL): инжектируется,
+    // чтобы спека управляла успехом/провалом без реальной сети. Опционально —
+    // без хука connect_error остаётся no-op'ом, как раньше.
+    private readonly refreshAccessToken?: () => Promise<void>,
   ) {
     // Reconnect → re-subscribe → свежий snapshot в onResync (полный перефолд, дизайн §3).
     // Первый connect приходит до join() → joined=false → no-op (только состояние).
     this.socket.onConnect(() => {
+      // Успешный handshake закрывает стрик обрыва: следующая серия отказов
+      // снова имеет право на один refresh.
+      this.refreshAttempted = false;
       this.stateCb?.(this.joined ? 'live' : 'connecting');
       if (this.joined) {
         // При ошибке subscribe gateway зачищает серверную подписку (registry.remove
@@ -43,6 +51,22 @@ export class RoomConnection {
           .then((s) => this.resyncCb?.(s))
           .catch(() => this.stateCb?.('disconnected'));
       }
+    });
+    this.socket.onConnectError(() => {
+      // Handshake-отказ при ранее присоединённой комнате: типовой случай —
+      // протухший за время сна телефона access-токен (gateway на любой
+      // auth-отказ отвечает одинаковым SESSION_INVALID, причины на клиенте не
+      // различить надёжно, поэтому не фильтруем по err). Без refresh socket.io
+      // ретраил бы handshake со старым токеном бесконечно, а REST-401 (единственный
+      // иной триггер refresh) никогда не наступил бы — вечный «Переподключаемся…».
+      // Refresh — ровно один на стрик обрыва, иначе retry-шторм превратился бы
+      // в refresh-шторм; после успешного refresh очередной retry socket.io
+      // перечитает свежий токен через auth-колбэк сам. Провал refresh (мёртвая
+      // refresh-кука) — явный 'disconnected', тот же контракт, что у упавшего
+      // re-subscribe: дальше — re-join путь страницы.
+      if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
+      this.refreshAttempted = true;
+      void this.refreshAccessToken().catch(() => this.stateCb?.('disconnected'));
     });
     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));
   }

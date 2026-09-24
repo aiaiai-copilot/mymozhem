@@ -27,7 +27,14 @@ export function useRoomBinding(
   useEffect(() => {
     if (!roomId) return;
     const store = new LogStore();
-    const conn = new RoomConnection(createSocket(() => tokens.getAccessToken()), roomId);
+    // Refresh-хук: протухший access-токен — единственная самовосстанавливающаяся
+    // причина handshake-отказов (refresh-кука живёт дольше); RoomConnection сам
+    // дозирует — один вызов на стрик обрыва.
+    const conn = new RoomConnection(
+      createSocket(() => tokens.getAccessToken()),
+      roomId,
+      () => tokens.refresh(),
+    );
     connRef.current = conn;
     conn.onEvent((e) => {
       store.pushLive(e);
