@@ -25,3 +25,11 @@ export class RewardAlreadyResolvedError extends ContractError {
     super('REWARD_ALREADY_RESOLVED', `award ${awardId} is already ${status}`);
   }
 }
+
+// C-8.1 (ф.4): награждение анонимизированной (свип) или неизвестной identity
+// отклонено — приз осиротел бы (displayName уже NULL, вручать некому).
+export class IdentityAnonymizedError extends ContractError {
+  constructor(identityId: string) {
+    super('IDENTITY_ANONYMIZED', `identity ${identityId} is anonymized or unknown — prize would be orphaned`);
+  }
+}

@@ -46,6 +46,8 @@ const STATUS_BY_WIRE_CODE = {
   AWARD_UNKNOWN: 404,
   PRIZE_FUND_EXHAUSTED: 409,
   REWARD_ALREADY_RESOLVED: 409,
+  // Фаза 4 (C-8.1): гонка свип/розыгрыш проиграна награждением — как прочие 409 конфликта состояния.
+  IDENTITY_ANONYMIZED: 409,
   INTERNAL_ERROR: 500,
 } as const;
 

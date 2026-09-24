@@ -84,6 +84,8 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
     ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
     ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
+    // Фаза 4 (C-8.1): награждение анонимизированной identity — конфликт состояния.
+    ['identity anonymized', new ContractError('IDENTITY_ANONYMIZED', 'x'), 409, 'IDENTITY_ANONYMIZED'],
     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
     // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
     ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],

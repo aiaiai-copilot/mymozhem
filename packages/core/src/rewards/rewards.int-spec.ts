@@ -102,6 +102,21 @@ describe('RewardsService (int)', () => {
     expect(log[0].payload).not.toHaveProperty('displayName'); // REQ-SEC-009
   });
 
+  it('award.prize по анонимизированному гостю отклоняется IDENTITY_ANONYMIZED; фонд и таблица не тронуты (C-8.1)', async () => {
+    const { room, prize } = await seedPrize(1);
+    const swept = await guest();
+    await db.prisma.identity.update({ where: { id: swept.id }, data: { deletedAt: new Date() } });
+
+    await expect(
+      outbox.run((tx) =>
+        rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, swept.id)]),
+      ),
+    ).rejects.toMatchObject({ code: 'IDENTITY_ANONYMIZED' });
+
+    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
+    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
+  });
+
   it('K > quantity конкурентных награждений разным identity → ровно quantity успехов, без минуса (REQ-RWD-010)', async () => {
     const { room, prize } = await seedPrize(2);
     const winners = await Promise.all(Array.from({ length: 5 }, () => guest()));
