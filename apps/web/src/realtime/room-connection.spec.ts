@@ -129,6 +129,28 @@ describe('RoomConnection', () => {
     expect(socket.calls[1]?.payload).toEqual({ roomId: ROOM_ID });
   });
 
+  it('re-subscribe при reconnect упал (error-ack) → явный "disconnected", а не тихий мёртвый "live"', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    const states: ConnectionState[] = [];
+    conn.onStateChange((s) => states.push(s));
+    await conn.join();
+
+    // Gateway при ошибке subscribe зачищает серверную подписку (registry.remove +
+    // socket.leave), но соединение НЕ разрывает: без явного состояния клиент
+    // навсегда остался бы "мёртвым live" с unhandled rejection.
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { code: 'INTERNAL_ERROR' });
+    const resynced: RoomSnapshot[] = [];
+    conn.onResync((s) => resynced.push(s));
+
+    socket.triggerConnect();
+    await flushMicrotasks();
+
+    expect(states).toEqual(['live', 'live', 'disconnected']);
+    expect(resynced).toEqual([]);
+  });
+
   it('state: join → "live"; disconnect → "disconnected"; reconnect после join → "live"', async () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });

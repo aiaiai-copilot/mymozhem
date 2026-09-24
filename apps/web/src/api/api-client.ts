@@ -17,7 +17,12 @@ export class ApiClient {
   constructor(private readonly tokens: TokenProvider) {}
 
   async call<S extends z.ZodType>(req: ApiRequest<S>, allowRetry = true): Promise<z.output<S>> {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const headers: Record<string, string> = {};
+    // content-type: application/json — только при теле: fastify отвечает 400
+    // (FST_ERR_CTP_EMPTY_JSON_BODY) на запрос с этим content-type и пустым телом,
+    // поэтому body-less POST'ы (refresh, activate/complete/cancel, fulfill/revoke,
+    // exclude без reason) обязаны уходить БЕЗ content-type.
+    if (req.body !== undefined) headers['content-type'] = 'application/json';
     const token = this.tokens.getAccessToken();
     if (req.auth !== false && token) headers.authorization = `Bearer ${token}`;
     const res = await fetch(req.path, {

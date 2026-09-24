@@ -172,8 +172,26 @@ describe('ApiClient', () => {
     expect((err2 as ApiError).code).toBe('SOME_FUTURE_CODE');
   });
 
-  it('auth:false не шлёт authorization и не делает refresh при 401', async () => {
-    const tokens = new FakeTokens('token-1');
+  it('content-type только при теле: body-less POST уходит без него (fastify: пустой JSON body → 400)', async () => {
+    const client = new ApiClient(new FakeTokens('token-1'));
+    const calls = stubFetch(
+      jsonResponse(200, { members: [] }),
+      jsonResponse(200, { members: [] }),
+    );
+
+    // POST без body: fastify отвечает 400 FST_ERR_CTP_EMPTY_JSON_BODY, если
+    // content-type: application/json выставлен при пустом теле — не выставляем.
+    await client.call({ method: 'POST', path: '/auth/refresh', schema: rosterResponseSchema, auth: false });
+    // POST с body: content-type обязателен, иначе сервер не распарсит JSON.
+    await client.call({ method: 'POST', path: '/rooms', body: { joinPolicy: 'guests' }, schema: rosterResponseSchema });
+
+    expect(calls[0]?.init?.body).toBeUndefined();
+    expect((calls[0]?.init?.headers as Record<string, string>)['content-type']).toBeUndefined();
+    expect(calls[1]?.init?.body).toBe('{"joinPolicy":"guests"}');
+    expect((calls[1]?.init?.headers as Record<string, string>)['content-type']).toBe('application/json');
+  });
+
+  it('auth:false не шлёт authorization и не делает refresh при 401', async () => {    const tokens = new FakeTokens('token-1');
     const client = new ApiClient(tokens);
     const calls = stubFetch(jsonResponse(401, { code: 'ROOM_JOIN_DENIED' }));
 

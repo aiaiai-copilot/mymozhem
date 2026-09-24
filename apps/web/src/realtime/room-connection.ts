@@ -34,7 +34,14 @@ export class RoomConnection {
     this.socket.onConnect(() => {
       this.stateCb?.(this.joined ? 'live' : 'connecting');
       if (this.joined) {
-        void this.subscribeOnce().then((s) => this.resyncCb?.(s));
+        // При ошибке subscribe gateway зачищает серверную подписку (registry.remove
+        // + socket.leave), но НЕ разрывает соединение: без .catch состояние навсегда
+        // осталось бы 'live' при мёртвой подписке и unhandled rejection. Поэтому
+        // падение re-subscribe переводим в явный 'disconnected' (обрыв — явный
+        // индикатор, дизайн §5); retry — забота потребителя по этому состоянию.
+        void this.subscribeOnce()
+          .then((s) => this.resyncCb?.(s))
+          .catch(() => this.stateCb?.('disconnected'));
       }
     });
     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));
