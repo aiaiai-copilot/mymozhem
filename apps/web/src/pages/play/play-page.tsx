@@ -181,6 +181,17 @@ export function PlayPage() {
     setAnswerError(null);
   }, [currentQuestion]);
 
+  // quiz.answers на клиенте ВСЕГДА пуст (answer.submitted — module-private),
+  // поэтому факт «я ответил» выводим из публичных quiz.answer.accepted —
+  // проекция переживает перефолд/reload (accept едет в snapshot).
+  const answeredActors = useMemo(
+    () =>
+      currentQuestion !== null
+        ? projectAnsweredActors(events, currentQuestion)
+        : new Set<string>(),
+    [events, currentQuestion],
+  );
+
   const submitAnswer = (optionIndex: number) => {
     if (currentQuestion === null) return;
     setAnswerError(null);
@@ -206,16 +217,6 @@ export function PlayPage() {
     );
   }
 
-  // quiz.answers на клиенте ВСЕГДА пуст (answer.submitted — module-private),
-  // поэтому факт «я ответил» выводим из публичных quiz.answer.accepted —
-  // проекция переживает перефолд/reload (accept едет в snapshot).
-  const answeredActors = useMemo(
-    () =>
-      currentQuestion !== null
-        ? projectAnsweredActors(events, currentQuestion)
-        : new Set<string>(),
-    [events, currentQuestion],
-  );
   const myAnswered = myId !== null && answeredActors.has(myId);
   const answered = answerAck || myAnswered;
 
