@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
+import type { Prisma } from '@prisma/client';
 import type { AppEffect } from '@mymozhem/sdk';
 import { AppRegistryModule } from '../app-registry/app-registry.module';
 import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
@@ -115,6 +116,76 @@ describe('RewardsService (int)', () => {
 
     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
+  });
+
+  // C-8.1 (амендмент 2026-09-25): остаточное чередование «гард прочитал до
+  // коммита свипа, INSERT после» — детерминированно, без sleep'ов (барьеры на
+  // промисах). tx-«свип» — подмножество GuestSweepService: анонимизирует гостя
+  // и ДЕРЖИТ блокировку FOR NO KEY UPDATE на строке identity до разрешения
+  // барьера. Контакт с гардой ловит tx-прокси: неблокирующий findUnique
+  // сигналит ПОСЛЕ чтения (stale-чтение deletedAt NULL захвачено, пока «свип»
+  // на барьере, — на таком коде тест обязан быть КРАСНЫМ: дальше путь award
+  // ни с чем не конфликтует и коммитится), блокирующий $queryRaw …
+  // FOR NO KEY UPDATE сигналит ДО вызова (дальше чтение реально ждёт коммита
+  // «свипа» в Postgres и перечитывает строку — READ COMMITTED, EPQ).
+  it('гонка: «свип» держит блокировку identity — гард ждёт его коммита и отклоняет award; фонд не тронут (C-8.1)', async () => {
+    const { room, prize } = await seedPrize(1);
+    const winner = await guest();
+
+    let markAnonymized!: () => void;
+    const anonymizedInTx = new Promise<void>((res) => (markAnonymized = res));
+    let releaseSweep!: () => void;
+    const sweepBarrier = new Promise<void>((res) => (releaseSweep = res));
+    const sweepTx = db.prisma.$transaction(async (tx) => {
+      await tx.identity.update({ where: { id: winner.id }, data: { deletedAt: new Date() } });
+      markAnonymized();
+      await sweepBarrier;
+    });
+    await anonymizedInTx;
+
+    let markGuardContact!: () => void;
+    const guardContact = new Promise<void>((res) => (markGuardContact = res));
+    let releaseGuard!: () => void;
+    const guardGate = new Promise<void>((res) => (releaseGuard = res));
+    const gateTx = (tx: Prisma.TransactionClient): Prisma.TransactionClient =>
+      new Proxy(tx, {
+        get(target, prop) {
+          if (prop === 'identity') {
+            return new Proxy(target.identity, {
+              get(t, p) {
+                const orig = Reflect.get(t, p) as (...a: unknown[]) => Promise<unknown>;
+                if (p !== 'findUnique') return orig;
+                return async (...args: unknown[]) => {
+                  const row = await orig.call(t, ...args);
+                  markGuardContact();
+                  await guardGate;
+                  return row;
+                };
+              },
+            });
+          }
+          if (prop === '$queryRaw') {
+            const orig = Reflect.get(target, prop) as (...a: unknown[]) => Promise<unknown>;
+            return (...args: unknown[]) => {
+              markGuardContact();
+              return orig.call(target, ...args);
+            };
+          }
+          return Reflect.get(target, prop);
+        },
+      });
+
+    const awardRun = outbox.run((tx) =>
+      rewards.executeEffects(gateTx(tx), room.id, 'lottery', [prizeEffect(prize.id, winner.id)]),
+    );
+    await guardContact; // гард вступил в контакт со строкой identity, «свип» ещё на барьере
+    releaseGuard();
+    releaseSweep(); // «свип» коммитится; блокирующий гард перечитывает строку (EPQ)
+
+    await expect(awardRun).rejects.toMatchObject({ code: 'IDENTITY_ANONYMIZED' });
+    await sweepTx;
+    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
+    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
   });
 
   it('K > quantity конкурентных награждений разным identity → ровно quantity успехов, без минуса (REQ-RWD-010)', async () => {
