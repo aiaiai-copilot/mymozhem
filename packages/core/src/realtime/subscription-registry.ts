@@ -28,12 +28,16 @@ export class SubscriptionRegistry {
   }
 
   add(sub: Subscription): void {
+    // Re-add того же socketId (идемпотентный re-subscribe в ту же комнату, контракт
+    // gateway) — перезапись, а не новое соединение: gauge не двигаем, иначе инкремент
+    // остался бы без парного декремента (Review Focus 1).
+    const isNew = !this.bySocket.has(sub.socketId);
     this.bySocket.set(sub.socketId, sub);
     const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
     const set = this.socketsByMembership.get(key) ?? new Set<string>();
     set.add(sub.socketId);
     this.socketsByMembership.set(key, set);
-    this.metrics.connectionAdded(sub.roomId);
+    if (isNew) this.metrics.connectionAdded(sub.roomId);
   }
 
   get(socketId: string): Subscription | undefined {

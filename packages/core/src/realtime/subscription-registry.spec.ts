@@ -55,4 +55,15 @@ describe('SubscriptionRegistry', () => {
     registry.remove('s1'); // повтор — без декремента
     expect((metrics.connectionRemoved as jest.Mock).mock.calls).toHaveLength(1);
   });
+
+  it('re-add той же подписки (тот же socketId) не двигает gauge (Review Focus 1)', () => {
+    const metrics = makeMetrics();
+    const registry = new SubscriptionRegistry(metrics);
+    const sub = { socketId: 's1', identityId: 'i1', roomId: 'r1', level: 'public' as const };
+    registry.add(sub);
+    registry.add(sub); // re-subscribe в ту же комнату — идемпотентен, без второго инкремента
+    expect((metrics.connectionAdded as jest.Mock).mock.calls).toHaveLength(1);
+    registry.remove('s1');
+    expect((metrics.connectionRemoved as jest.Mock).mock.calls).toHaveLength(1);
+  });
 });
