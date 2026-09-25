@@ -73,6 +73,37 @@ module.exports = {
       to: { path: '^packages/core/src/rewards' },
     },
     {
+      name: 'observability-is-leaf',
+      comment:
+        'core/observability — лист: не импортирует доменные модули ядра ' +
+        '(REQ-OPS-004, дизайн ф.4 §6; доменные импортируют его, не наоборот). ' +
+        'config — инфраструктурное исключение (APP_CONFIG для pino-фабрики).',
+      severity: 'error',
+      // int-spec — миниатюра composition root (прецедент rewards-only-through-di-tokens):
+      // спека собирает реальный ConfigModule/TEST_CONFIG; правило про продакшн-код.
+      from: { path: '^packages/core/src/observability', pathNot: ['[.]spec[.]ts$', '[.]int-spec[.]ts$'] },
+      to: {
+        path: '^packages/core/src',
+        pathNot: ['^packages/core/src/observability', '^packages/core/src/config'],
+      },
+    },
+    {
+      name: 'observability-libs-contained',
+      comment:
+        'Библиотеки наблюдаемости (nestjs-pino/pino/pino-http/prom-client) импортируются ' +
+        'только в core/observability, barrel core и bootstrap apps/server (дизайн ф.4 §6).',
+      severity: 'error',
+      from: {
+        pathNot: [
+          '^packages/core/src/observability',
+          '^packages/core/src/index[.]ts$',
+          '^apps/server/src/main[.]ts$',
+          '[/\\\\]dist[/\\\\]',
+        ],
+      },
+      to: { path: 'node_modules/(nestjs-pino|pino-http|prom-client|pino)[/\\\\]' },
+    },
+    {
       name: 'no-circular',
       comment: 'Циклические зависимости запрещены.',
       severity: 'error',
