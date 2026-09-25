@@ -1,11 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable } from '@nestjs/common';
-import { ContractError } from '@mymozhem/sdk';
 import { Prisma, type LogEvent } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsService } from '../observability/metrics.service';
 import { RealtimeBus } from './realtime-bus';
-import { RealtimeError } from './realtime.errors';
 
 // Внутренние ошибки механизма (design §5): обе означают баг вызывающего, на провод
 // не маппятся (через gateway-фильтр уйдут как INTERNAL_ERROR).
@@ -23,9 +21,20 @@ export class EventOutboxNestedRunError extends Error {
   }
 }
 
-// Label счётчика ошибок фиксации: P-код Prisma (ограниченное множество) либо UNKNOWN.
-function commitErrorLabel(err: unknown): string {
-  return err instanceof Prisma.PrismaClientKnownRequestError ? err.code : 'UNKNOWN';
+// Label счётчика ошибок фиксации; undefined — не считать (типизированный отказ).
+// Конвенция кодабазы: типизированная доменная ошибка несёт строковый `code`
+// (ContractError, RealtimeError, RoomError, MembershipError, AppRegistryError,
+// IdentityError, AuthError и будущие иерархии) — её rollback штатный (дизайн
+// ф.4 §3), счётчик не трогаем. Структурный предикат, а не instanceof: realtime не
+// импортирует доменные иерархии (Ruling B-F.1). Порядок важен:
+// PrismaClientKnownRequestError тоже несёт строковый code — ветка Prisma ДО
+// структурной проверки (label = P-код, ограниченное множество). Принятый промах:
+// Node/system-ошибки со строковым code (ENOENT и т.п.) вне обёртки Prisma тоже
+// исключаются; сбои БД adapter-pg оборачивает в P2010 — теряем мало.
+function commitErrorLabel(err: unknown): string | undefined {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) return err.code;
+  if (typeof (err as { code?: unknown } | null)?.code === 'string') return undefined;
+  return 'UNKNOWN';
 }
 
 // Tx-scoped outbox (design §5, подход A): commit*Event складывает событие в
@@ -52,10 +61,11 @@ export class EventOutbox {
       result = await this.prisma.$transaction((tx) => this.als.run(store, () => fn(tx)));
     } catch (err) {
       // REQ-OPS-004: откат tx по СБОЮ фиксации (БД, баг) — считаем. Типизированные
-      // отказы домена (ContractError/RealtimeError) — штатные отказы гейтов, их
-      // rollback — не сбой: не считаем (дизайн ф.4 §3).
-      if (!(err instanceof ContractError) && !(err instanceof RealtimeError)) {
-        this.metrics.incCommitError(commitErrorLabel(err));
+      // отказы домена (string code, см. commitErrorLabel) — штатные отказы гейтов,
+      // их rollback — не сбой: не считаем (дизайн ф.4 §3).
+      const label = commitErrorLabel(err);
+      if (label !== undefined) {
+        this.metrics.incCommitError(label);
       }
       throw err;
     }

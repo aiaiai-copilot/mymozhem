@@ -10,6 +10,7 @@ import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
 import { MetricsService } from '../observability/metrics.service';
+import { RoomConflictError } from '../room/room.errors';
 import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
@@ -156,6 +157,15 @@ describe('EventOutbox', () => {
     // prom-client рендерит HELP/TYPE даже для пустого счётчика — отсутствие серий
     // проверяем по '{': ни одной серии быть не должно (бриф-assert по имени метрики
     // неосуществим: HELP-строка содержит имя всегда).
+    expect(await localMetrics.render()).not.toContain('mymozhem_event_commit_errors_total{');
+  });
+
+  it('типизированный отказ домена ядра (RoomError, string code) — тоже штатный отказ гейта, счётчик не трогаем (Ruling B-F.1)', async () => {
+    const localMetrics = new MetricsService();
+    const localOutbox = new EventOutbox(db.prisma, bus, localMetrics);
+    await expect(
+      localOutbox.run(() => Promise.reject(new RoomConflictError('changed concurrently'))),
+    ).rejects.toMatchObject({ code: 'ROOM_CONFLICT' });
     expect(await localMetrics.render()).not.toContain('mymozhem_event_commit_errors_total{');
   });
 
