@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ConfigModule } from '../config/config.module';
+import { PinoLoggerModule } from '../observability/pino-logger.module';
 import { IdentityService } from './identity.service';
 import { GuestSweepService } from './guest-sweep.service';
 
@@ -8,7 +9,7 @@ import { GuestSweepService } from './guest-sweep.service';
 // AuthModule (TokenService). ConfigModule — статический синглтон по метатипу:
 // повторный импорт в модулях-потребителях не плодит провайдер.
 @Module({
-  imports: [PrismaModule, ConfigModule],
+  imports: [PrismaModule, ConfigModule, PinoLoggerModule],
   providers: [IdentityService, GuestSweepService],
   exports: [IdentityService, GuestSweepService],
 })

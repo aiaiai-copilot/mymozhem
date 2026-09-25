@@ -1,7 +1,8 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
+import { PinoLogger } from '../observability/pino-logger.module';
 import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
 
 // Свип анонимизации гостей (REQ-ID-003/014, догон фазы 3): истечение guest_ttl
@@ -20,13 +21,14 @@ class SweepSuspensionRaceError extends Error {
 
 @Injectable()
 export class GuestSweepService {
-  private readonly logger = new Logger(GuestSweepService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(GuestSweepService.name);
+  }
 
   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
   // свипа; C-8.1 (ф.4, амендмент 2026-09-25) закрыто re-check'ом: гард опрашивается
@@ -77,14 +79,14 @@ export class GuestSweepService {
           for (const id of await guard.hasOpenAwards(tx, sweepIds)) raced.add(id);
         }
         if (raced.size > 0) throw new SweepSuspensionRaceError(raced.size);
-        this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
+        this.logger.info({ anonymized: anonymized.count, suspended: suspended.size }, 'guest sweep');
         return anonymized.count;
       });
     } catch (err) {
       if (err instanceof SweepSuspensionRaceError) {
         // Ожидаемый исход гонки, не алерт: следующий тик CLEANUP_INTERVAL
         // обработает гостя как приостановленного (award уже виден первому чеку).
-        this.logger.warn(`guest sweep rolled back: concurrent award for ${err.racedCount} identit(ies) (C-8.1)`);
+        this.logger.warn({ raced: err.racedCount }, 'guest sweep rolled back: concurrent award (C-8.1)');
         return 0;
       }
       throw err;

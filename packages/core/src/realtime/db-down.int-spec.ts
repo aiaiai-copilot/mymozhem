@@ -2,7 +2,7 @@ import type { AppManifest } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import type { PrismaService } from '../prisma/prisma.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
@@ -83,6 +83,7 @@ describe('Fail-closed при недоступной БД (REQ-DEV-008)', () => {
       new IdentityService(p),
       new JoinRateLimiter(1000),
       TEST_CONFIG,
+      fakeLogger,
     );
     const rooms = new RoomService(p, eventLog, outbox, registry, membership, TEST_CONFIG);
     return { registry, outbox, eventLog, membership, rooms };

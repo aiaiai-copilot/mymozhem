@@ -1,6 +1,6 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
@@ -37,6 +37,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       new IdentityService(db.prisma),
       new JoinRateLimiter(overrides.rateLimit ?? 1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+      fakeLogger,
     );
 
   beforeAll(async () => {
@@ -59,6 +60,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -367,6 +369,7 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
       new IdentityService(db2.prisma),
       new JoinRateLimiter(1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+      fakeLogger,
     );
 
   beforeAll(async () => {
@@ -378,7 +381,7 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
       outbox,
       new AppRegistryService([]),
-      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
       TEST_CONFIG,
     );
   }, 120000);

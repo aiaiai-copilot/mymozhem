@@ -1,8 +1,9 @@
-import { Inject, Injectable, Logger, Module, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Module, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { ConfigModule } from '../config/config.module';
+import { PinoLogger, PinoLoggerModule } from '../observability/pino-logger.module';
 import { IdentityModule } from './identity.module';
 import { GuestSweepService } from './guest-sweep.service';
 
@@ -12,19 +13,20 @@ import { GuestSweepService } from './guest-sweep.service';
 // (глобальный после forRoot). Одна реплика (REQ-OPS-005) — дублей джобы нет.
 @Injectable()
 class GuestSweepScheduler implements OnApplicationBootstrap, OnApplicationShutdown {
-  private readonly logger = new Logger(GuestSweepScheduler.name);
-
   constructor(
     private readonly sweep: GuestSweepService,
     private readonly registry: SchedulerRegistry,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(GuestSweepScheduler.name);
+  }
 
   onApplicationBootstrap(): void {
     const interval = setInterval(() => {
       this.sweep.sweepExpiredGuests().catch((err) => {
         // Отказ прохода — error-лог, следующий проход повторит; джоба не роняет процесс.
-        this.logger.error('guest sweep failed', err);
+        this.logger.error({ err }, 'guest sweep failed');
       });
     }, this.config.CLEANUP_INTERVAL * 1000);
     this.registry.addInterval('guest-sweep', interval);
@@ -41,7 +43,7 @@ class GuestSweepScheduler implements OnApplicationBootstrap, OnApplicationShutdo
 }
 
 @Module({
-  imports: [ConfigModule, IdentityModule],
+  imports: [ConfigModule, IdentityModule, PinoLoggerModule],
   providers: [GuestSweepScheduler],
 })
 export class IdentitySweepModule {}

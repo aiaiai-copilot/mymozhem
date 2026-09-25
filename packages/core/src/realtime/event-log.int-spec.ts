@@ -3,7 +3,7 @@ import { ContractError, validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -42,6 +42,7 @@ describe('EventLogService.commitCoreEvent', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );

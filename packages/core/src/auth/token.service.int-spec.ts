@@ -1,6 +1,6 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
@@ -39,6 +39,7 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
       new IdentityService(db.prisma),
       new JoinRateLimiter(1000),
       TEST_CONFIG,
+      fakeLogger,
     );
     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(

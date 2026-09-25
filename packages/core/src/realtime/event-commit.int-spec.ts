@@ -2,7 +2,7 @@ import type { AppManifest } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -86,6 +86,7 @@ describe('EventLogService.commitAppEvent', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -320,6 +321,7 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -406,6 +408,7 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );

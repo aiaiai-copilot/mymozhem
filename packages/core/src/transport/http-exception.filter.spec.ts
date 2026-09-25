@@ -1,4 +1,4 @@
-import { ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import { ArgumentsHost, HttpException, HttpStatus } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 import { ContractError } from '@mymozhem/sdk';
@@ -24,28 +24,20 @@ import { HttpExceptionFilter } from './http-exception.filter';
 type ReplyMock = { status: jest.Mock; send: jest.Mock };
 
 const makeFilter = () => {
-  const filter = new HttpExceptionFilter();
+  // Структурный фейк PinoLogger (REQ-OPS-004): фильтр логирует через инжектированный
+  // логгер с корреляцией requestId — ассерты идут по этим мокам.
+  const logger = { setContext: jest.fn(), error: jest.fn(), warn: jest.fn() };
+  const filter = new HttpExceptionFilter(logger as never);
   const reply: ReplyMock = { status: jest.fn().mockReturnThis(), send: jest.fn() };
-  return { filter, reply };
+  return { filter, reply, logger };
 };
 
-// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую.
+// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую;
+// request несёт id, который pino-http кладёт в req.id (requestId корреляции).
 const makeHost = (reply: ReplyMock): ArgumentsHost =>
-  ({ switchToHttp: () => ({ getResponse: () => reply }) }) as unknown as ArgumentsHost;
+  ({ switchToHttp: () => ({ getResponse: () => reply, getRequest: () => ({ id: 'req-1' }) }) }) as unknown as ArgumentsHost;
 
 describe('HttpExceptionFilter (REQ-SEC-006)', () => {
-  // Глушим серверный лог на всём сьюте: 5xx-кейсы иначе печатают исключение в консоль jest.
-  let errorSpy: jest.SpyInstance;
-  let warnSpy: jest.SpyInstance;
-  beforeEach(() => {
-    errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
-    warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
-  });
-  afterEach(() => {
-    errorSpy.mockRestore();
-    warnSpy.mockRestore();
-  });
-
   // Полная таблица маппинга design §5 + инвариант REQ-SEC-006: наружу ровно {code}.
   const cases: Array<[string, unknown, number, string]> = [
     ['join denied', new RoomJoinDeniedError('no room for code'), 403, 'ROOM_JOIN_DENIED'],
@@ -138,35 +130,47 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
   describe('server logging', () => {
     it('logs the full exception to the server log on 5xx', () => {
       const err = new Error('boom');
-      const { filter, reply } = makeFilter();
+      const { filter, reply, logger } = makeFilter();
       filter.catch(err, makeHost(reply));
-      expect(errorSpy).toHaveBeenCalledWith(err);
+      expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ err }), expect.any(String));
+    });
+
+    it('5xx-лог несёт requestId из запроса (REQ-OPS-004)', () => {
+      const { filter, reply, logger } = makeFilter();
+      filter.catch(new Error('boom'), makeHost(reply) as never);
+      expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), expect.any(String));
     });
 
     it('logs AuthError message at warn level (design §11: различие reuse/expired/unknown живёт в серверном логе)', () => {
       const err = new AuthError('SESSION_INVALID', 'refresh reuse detected, family <uuid> revoked');
-      const { filter, reply } = makeFilter();
+      const { filter, reply, logger } = makeFilter();
       filter.catch(err, makeHost(reply));
-      expect(warnSpy).toHaveBeenCalledWith('refresh reuse detected, family <uuid> revoked');
-      expect(errorSpy).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'req-1' }),
+        'refresh reuse detected, family <uuid> revoked',
+      );
+      expect(logger.error).not.toHaveBeenCalled();
       // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
     });
 
     it('logs 4xx OAuthError message at warn level (та же норма, что AuthError; message — фиксированные строки + sub)', () => {
       const err = new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
-      const { filter, reply } = makeFilter();
+      const { filter, reply, logger } = makeFilter();
       filter.catch(err, makeHost(reply));
-      expect(warnSpy).toHaveBeenCalledWith('state mismatch or code missing');
-      expect(errorSpy).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'req-1' }),
+        'state mismatch or code missing',
+      );
+      expect(logger.error).not.toHaveBeenCalled();
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'OAUTH_STATE_INVALID' });
     });
 
     it('does not log non-auth 4xx at all', () => {
-      const { filter, reply } = makeFilter();
+      const { filter, reply, logger } = makeFilter();
       filter.catch(new RoomJoinDeniedError('no room for code'), makeHost(reply));
-      expect(errorSpy).not.toHaveBeenCalled();
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,4 +1,4 @@
-import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 import { ContractError } from '@mymozhem/sdk';
@@ -7,6 +7,7 @@ import { AuthError } from '../auth/auth.errors';
 import { OAuthError } from '../oauth/oauth.errors';
 import { RoomError } from '../room/room.errors';
 import { RealtimeError } from '../realtime/realtime.errors';
+import { PinoLogger } from '../observability/pino-logger.module';
 
 // Единственная точка маппинга ошибка → HTTP (design §5): контроллеры статусов не знают.
 // Наружу — ровно {code} (REQ-SEC-006); полное исключение уходит только в серверный лог.
@@ -61,24 +62,30 @@ interface ReplyLike {
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
-  private readonly logger = new Logger(HttpExceptionFilter.name);
+  constructor(private readonly logger: PinoLogger) {
+    this.logger.setContext(HttpExceptionFilter.name);
+  }
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const reply = host.switchToHttp().getResponse<ReplyLike>();
+    // requestId — из req.id, который кладёт pino-http (genReqId, observability-модуль):
+    // корреляция строки лога с запросом (REQ-OPS-004).
+    const req = host.switchToHttp().getRequest<{ id?: string }>();
+    const requestId = req.id;
     const code = this.toWireCode(exception);
     // Nest-встроенные HttpException (404 неизвестного роута и т.п.) сохраняют свой
     // статус («его status», маппинг design §5); wire-код при этом типизированный.
     const status: number =
       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
     if (status >= 500) {
-      this.logger.error(exception);
+      this.logger.error({ requestId, err: exception }, 'request failed');
     } else if (exception instanceof AuthError || exception instanceof OAuthError) {
       // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
       // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
       // токена не оставляет следа для расследования. Та же норма для OAuthError
       // (причина отказа флоу — в логе, наружу ровно {code}). Message обоих классов
       // безопасен: фиксированные строки + familyId/sub, без token-материала.
-      this.logger.warn(exception.message);
+      this.logger.warn({ requestId }, exception.message);
     }
     void reply.status(status).send({ code });
   }

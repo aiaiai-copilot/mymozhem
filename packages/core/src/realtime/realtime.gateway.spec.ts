@@ -64,6 +64,9 @@ function makeGateway(overrides: {
     incCommitError: jest.fn(),
   };
   const bus = { subscribe: jest.fn(), publish: jest.fn() };
+  // Структурный фейк PinoLogger (REQ-OPS-004): gateway логирует через инжектированный
+  // логгер — ассерты корреляции идут по этим мокам.
+  const fakeLogger = { setContext: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() };
   const gateway = new RealtimeGateway(
     tokens as never,
     prisma as never,
@@ -76,8 +79,9 @@ function makeGateway(overrides: {
     reconnectLimiter as never,
     {} as never,
     fakeMetrics as never,
+    fakeLogger as never,
   );
-  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter, metrics: fakeMetrics, bus };
+  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter, metrics: fakeMetrics, bus, logger: fakeLogger };
 }
 
 const ackOf = () => {
@@ -203,6 +207,18 @@ describe('RealtimeGateway.handleSubscribe', () => {
     // через публичный handleSubscribe (паттерн существующих subscribe-тестов файла):
     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, jest.fn() as never);
     expect(metrics.observeReplayDuration).toHaveBeenCalledWith('public', expect.any(Number));
+  });
+
+  it('subscribe-лог несёт корреляцию socketId/actorId/roomId, payload не логируется (REQ-OPS-004, REQ-SEC-009)', async () => {
+    const { gateway, logger } = makeGateway({});
+    const socket = fakeSocket();
+    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, jest.fn() as never);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ socketId: 'socket-1', actorId: GUEST_CLAIMS.sub, roomId: ROOM }),
+      expect.any(String),
+    );
+    const logged = JSON.stringify((logger.info as jest.Mock).mock.calls);
+    expect(logged).not.toContain('payload');
   });
 });
 

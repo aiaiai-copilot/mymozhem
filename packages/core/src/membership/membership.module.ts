@@ -2,13 +2,14 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ConfigModule } from '../config/config.module';
 import { IdentityModule } from '../identity/identity.module';
+import { PinoLoggerModule } from '../observability/pino-logger.module';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { MembershipService } from './membership.service';
 import { JoinRateLimiter } from './join-rate-limiter';
 
 @Module({
-  imports: [PrismaModule, ConfigModule, IdentityModule],
+  imports: [PrismaModule, ConfigModule, IdentityModule, PinoLoggerModule],
   providers: [
     {
       provide: JoinRateLimiter,

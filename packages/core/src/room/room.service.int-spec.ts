@@ -2,7 +2,7 @@ import { validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
@@ -45,6 +45,7 @@ const makeService = (db: TestDb) => {
       new IdentityService(db.prisma),
       new JoinRateLimiter(1000),
       TEST_CONFIG,
+      fakeLogger,
     ),
     TEST_CONFIG,
   );
@@ -576,6 +577,7 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );

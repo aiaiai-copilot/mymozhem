@@ -6,6 +6,7 @@ import type { AppConfig } from '../config/config.schema';
 import { MembershipModule } from '../membership/membership.module';
 import { AuthModule } from '../auth/auth.module';
 import { OAuthModule } from '../oauth/oauth.module';
+import { PinoLoggerModule } from '../observability/pino-logger.module';
 import { RoomModule } from '../room/room.module';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { JoinController } from './join.controller';
@@ -19,7 +20,7 @@ import { HttpExceptionFilter } from './http-exception.filter';
 import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER, REFRESH_RATE_LIMITER } from './auth.tokens';
 
 @Module({
-  imports: [ConfigModule, MembershipModule, AuthModule, OAuthModule, RoomModule],
+  imports: [ConfigModule, MembershipModule, AuthModule, OAuthModule, RoomModule, PinoLoggerModule],
   controllers: [
     JoinController,
     AuthController,
