@@ -26,4 +26,5 @@ export const TEST_CONFIG: AppConfig = {
   OAUTH_STATE_TTL: 600,
   OAUTH_RATE_LIMIT: 10,
   OAUTH_REDIRECT_ALLOWLIST: [],
+  LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
 };
