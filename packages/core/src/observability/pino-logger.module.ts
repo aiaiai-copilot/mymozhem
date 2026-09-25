@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Global, Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
 import { LoggerModule } from 'nestjs-pino';
 import type { DestinationStream } from 'pino';
 import { ConfigModule } from '../config/config.module';
@@ -6,9 +7,10 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 
 // REQ-OPS-004 (ф.4, дизайн §2): структурные JSON-логи поверх nestjs-pino.
-// Корреляция requestId — из genReqId (pino-http кладёт его в req.id и в каждую
-// строку лога запроса); roomId/actorId привязываются потребителями через
-// logger.assign/поля в операционных точках (Task 8), не middleware-магией.
+// Корреляция requestId — uuid в req.id (pino-http кладёт его в каждую строку лога
+// запроса, а RequestIdModule отражает в x-request-id ответа); roomId/actorId
+// привязываются потребителями через logger.assign/поля в операционных точках
+// (Task 8), не middleware-магией.
 
 // Опциональное назначение логов: прод — stdout (pino default); тесты подставляют
 // буферный Writable и читают фактические JSON-строки (observability.int-spec).
@@ -21,6 +23,35 @@ interface GenReqIdRes {
   setHeader(name: string, value: string): void;
 }
 
+// requestId — uuid; отражаем в ответ для разбора инцидентов с игроками.
+// Nest-Fastify присваивает raw req.id ДО middleware (fastify-middie: raw.id = req.id
+// — счётчик 'req-N'), а pino-http зовёт genReqId только на пустой req.id — поэтому
+// uuid обязан присвоить pre-middleware, иначе в лог уйдёт платформенный 'req-N'.
+export function requestIdMiddleware(
+  req: { id?: unknown },
+  res: GenReqIdRes,
+  next: () => void,
+): void {
+  const id = randomUUID();
+  req.id = id;
+  res.setHeader('x-request-id', id);
+  next();
+}
+
+// Pre-middleware requestId: ОБЯЗАН исполняться раньше LoggerModule (pino-http
+// замораживает req.id в child-логгере при входе — позже его не переопределить).
+// Nest сортирует middleware по distance модуля, @Global-модули — первыми, а между
+// собой — в порядке регистрации. LoggerModule nestjs-pino — @Global, поэтому этот
+// модуль тоже @Global и обязан импортироваться РАНЬШЕ PinoLoggerModule
+// (см. ObservabilityModule — порядок в imports значим).
+@Global()
+@Module({})
+export class RequestIdModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(requestIdMiddleware).forRoutes('*');
+  }
+}
+
 // Чистая фабрика опций pino-http — юнит-тестируема без Nest (pino-options.spec).
 export function buildPinoHttpOptions(config: AppConfig): {
   level: string;
@@ -29,7 +60,9 @@ export function buildPinoHttpOptions(config: AppConfig): {
 } {
   return {
     level: config.LOG_LEVEL,
-    // requestId — uuid; отражаем в ответ для разбора инцидентов с игроками.
+    // Запасной путь для платформ без предустановленного req.id (не Nest-Fastify):
+    // pino-http зовёт genReqId, только если req.id ещё пуст; в нашем стеке
+    // requestIdMiddleware присваивает uuid раньше (см. выше).
     genReqId: (_req: GenReqIdReq, res: GenReqIdRes): string => {
       const id = randomUUID();
       res.setHeader('x-request-id', id);

@@ -68,10 +68,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const reply = host.switchToHttp().getResponse<ReplyLike>();
-    // requestId — из req.id, который кладёт pino-http (genReqId, observability-модуль):
-    // корреляция строки лога с запросом (REQ-OPS-004).
-    const req = host.switchToHttp().getRequest<{ id?: string }>();
-    const requestId = req.id;
+    // requestId — uuid, который requestIdMiddleware (observability-модуль) кладёт в
+    // RAW req.id. Под Nest-Fastify getRequest() отдаёт wrapper, чей .id —
+    // платформенный счётчик 'req-N'; корреляционный uuid — в raw.id (REQ-OPS-004).
+    const req = host.switchToHttp().getRequest<{ id?: string; raw?: { id?: string } }>();
+    const requestId = req.raw?.id ?? req.id;
     const code = this.toWireCode(exception);
     // Nest-встроенные HttpException (404 неизвестного роута и т.п.) сохраняют свой
     // статус («его status», маппинг design §5); wire-код при этом типизированный.

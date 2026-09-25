@@ -1,3 +1,5 @@
+import { Writable } from 'node:stream';
+import { Global, Module } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { ConfigModule } from '../config/config.module';
@@ -5,6 +7,26 @@ import { APP_CONFIG } from '../config/config.tokens';
 import { TEST_CONFIG } from '../testing/test-config';
 import { MetricsService } from './metrics.service';
 import { ObservabilityModule } from './observability.module';
+import { PINO_STREAM } from './pino-logger.module';
+
+// Приёмник логов pino для спеки (тестовое состояние файла — REQ-CORE-004
+// запрещает мутабельный module-level state в src ПРОД-кода, не в спеках).
+const logLines: string[] = [];
+const logBuffer = new Writable({
+  write(chunk, _enc, cb) {
+    logLines.push(chunk.toString());
+    cb();
+  },
+});
+
+// PINO_STREAM инжектится в фабрику динамического (и @Global) LoggerModule —
+// провайдер из корневого TestingModule туда не виден; виден только глобальный.
+@Global()
+@Module({
+  providers: [{ provide: PINO_STREAM, useValue: logBuffer }],
+  exports: [PINO_STREAM],
+})
+class TestPinoStreamModule {}
 
 // HTTP-граница экспозиции метрик (REQ-OPS-004, дизайн ф.4 §3/§0.3): fastify-
 // адаптер, дерево ConfigModule + ObservabilityModule. БД не нужна — контроллер
@@ -16,11 +38,13 @@ describe('Observability /metrics (int)', () => {
 
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule, ObservabilityModule],
+      imports: [ConfigModule, ObservabilityModule, TestPinoStreamModule],
     })
       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
+      // LOG_LEVEL поднят до info: строка лога запроса пишется на уровне info,
+      // а с PINO_STREAM-буфером шум в консоль всё равно не уходит.
       .overrideProvider(APP_CONFIG)
-      .useValue(TEST_CONFIG)
+      .useValue({ ...TEST_CONFIG, LOG_LEVEL: 'info' })
       .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
@@ -46,5 +70,24 @@ describe('Observability /metrics (int)', () => {
   it('GET /metrics не требует авторизации (открытый — решение владельца, дизайн §0.3)', async () => {
     const res = await app.inject({ method: 'GET', url: '/metrics' }); // без заголовков
     expect(res.statusCode).toBe(200);
+  });
+
+  it('строка лога запроса — JSON с requestId; authorization/cookie замаскированы (Review Focus 5)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: 'Bearer SECRET-TOKEN', cookie: 'mm_refresh=SECRET-COOKIE' },
+    });
+    expect(res.statusCode).toBe(200);
+    const requestId = res.headers['x-request-id'];
+    const line = logLines
+      .map((l) => l.trim())
+      .filter((l) => l.includes('"req"'))
+      .pop();
+    expect(line).toBeDefined();
+    const parsed = JSON.parse(line!);
+    expect(parsed.req.id).toBe(requestId);
+    expect(line).not.toContain('SECRET-TOKEN');
+    expect(line).not.toContain('SECRET-COOKIE');
   });
 });

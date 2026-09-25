@@ -22,6 +22,7 @@ import {
   RoomService,
   TEST_CONFIG,
   TokenService,
+  fakeLogger,
   loadConfig,
   seedIdentity,
   startTestDb,
@@ -146,6 +147,12 @@ function waitEvent<T>(socket: ClientSocket, event: string): Promise<T> {
   return new Promise((resolve) => socket.once(event, (data: T) => resolve(data)));
 }
 
+// Значение числовой серии формата `<name>{<label>="<value>"} N`; отсутствие — 0.
+function metricSeriesCount(body: string, name: string, label: string, value: string): number {
+  const match = body.match(new RegExp(`^${name}\\{${label}="${value}"\\} (\\d+)$`, 'm'));
+  return match === null ? 0 : Number(match[1]);
+}
+
 // 4xx-отказ handshake: connect_error.message — wire-код (design §4).
 function connectError(port: number, token: string): Promise<string> {
   return connect(port, token).then(
@@ -181,7 +188,7 @@ describe('Realtime (e2e)', () => {
       eventLog,
       outbox,
       registry,
-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
       TEST_CONFIG,
     );
     tokens = new TokenService(db.prisma, TEST_CONFIG);
@@ -262,6 +269,51 @@ describe('Realtime (e2e)', () => {
     expect(event.actorId).toBe(claims.sub); // actorId конверта — только из токена
     pub.close();
     sub.close();
+  });
+
+  it('/metrics отражает realtime-жизнь комнаты: gauge, replay, publish→deliver (REQ-OPS-004)', async () => {
+    // Гистограммы накопительные и app один на файл (другие тесты тоже публикуют) —
+    // ассертим приращение рядов, а не абсолютные значения. Gauge — per-room,
+    // комната свежая, поэтому там абсолютная серия ` 1`.
+    const body0 = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+    const replayBefore = metricSeriesCount(body0, 'mymozhem_replay_duration_seconds_count', 'level', 'public');
+    const deliverBefore = metricSeriesCount(body0, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public');
+
+    const { room, accessToken } = await activeRoomWithGuest();
+    const socket = await connect(port, accessToken);
+    const ack = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+    expect(ack.ok).toBe(true);
+
+    const during = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+    expect(during).toContain(`mymozhem_active_connections{roomId="${room.id}"} 1`);
+    expect(metricSeriesCount(during, 'mymozhem_replay_duration_seconds_count', 'level', 'public')).toBe(replayBefore + 1);
+
+    // publish client-initiated public-события → fan-out → замер publish→deliver.
+    // Приём события на сокете — маркер: observe в fanOut идёт синхронно следом за emit.
+    const received = waitEvent<{ type: string }>(socket, REALTIME_MESSAGES.EVENT);
+    const pubAck = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.PUBLISH, {
+      type: 'test-app.note.posted',
+      payload: { n: 42 },
+    });
+    expect(pubAck.ok).toBe(true);
+    await received;
+    const afterPublish = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+    expect(metricSeriesCount(afterPublish, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public')).toBe(
+      deliverBefore + 1,
+    );
+
+    socket.close();
+    // disconnect обрабатывается асинхронно: poll /metrics до исчезновения gauge-серии
+    // комнаты (≤ 2 с; серия убирается на нуле — кардинальность = живым комнатам).
+    const deadline = Date.now() + 2000;
+    let body = '';
+    for (;;) {
+      body = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+      if (!body.includes(`mymozhem_active_connections{roomId="${room.id}"}`)) break;
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(body).not.toContain(`mymozhem_active_connections{roomId="${room.id}"}`);
   });
 
   it('publish в запечатанную комнату → ROOM_LOG_SEALED (REQ-RT-016 через провод)', async () => {

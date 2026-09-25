@@ -32,10 +32,16 @@ const makeFilter = () => {
   return { filter, reply, logger };
 };
 
-// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую;
-// request несёт id, который pino-http кладёт в req.id (requestId корреляции).
+// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую.
+// Request отражает форму Nest-Fastify: wrapper.id — платформенный счётчик 'req-N',
+// а requestId корреляции (uuid от requestIdMiddleware) лежит в raw.id.
 const makeHost = (reply: ReplyMock): ArgumentsHost =>
-  ({ switchToHttp: () => ({ getResponse: () => reply, getRequest: () => ({ id: 'req-1' }) }) }) as unknown as ArgumentsHost;
+  ({
+    switchToHttp: () => ({
+      getResponse: () => reply,
+      getRequest: () => ({ id: 'req-platform', raw: { id: 'req-1' } }),
+    }),
+  }) as unknown as ArgumentsHost;
 
 describe('HttpExceptionFilter (REQ-SEC-006)', () => {
   // Полная таблица маппинга design §5 + инвариант REQ-SEC-006: наружу ровно {code}.

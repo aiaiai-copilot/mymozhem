@@ -4,6 +4,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
+import { Logger } from 'nestjs-pino';
 import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
 import { AppModule } from './app.module';
 import { registerStaticWeb } from './static-web';
@@ -18,6 +19,8 @@ async function bootstrap(): Promise<void> {
     AppModule,
     new FastifyAdapter({ trustProxy: config.TRUST_PROXY }),
   );
+  // REQ-OPS-004: системные логи Nest — тоже через pino (единая стека).
+  app.useLogger(app.get(Logger));
   // Обязателен: transport-контроллеры читают req.cookies по структурному типу —
   // без плагина refresh вернёт 500 вместо 401.
   await app.register(fastifyCookie);
