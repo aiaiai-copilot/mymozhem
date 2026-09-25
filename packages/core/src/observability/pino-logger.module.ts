@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Global, Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
 import { LoggerModule } from 'nestjs-pino';
-import type { DestinationStream } from 'pino';
+import { stdSerializers, type DestinationStream } from 'pino';
 import { ConfigModule } from '../config/config.module';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
@@ -56,6 +56,7 @@ export class RequestIdModule implements NestModule {
 export function buildPinoHttpOptions(config: AppConfig): {
   level: string;
   genReqId: (req: GenReqIdReq, res: GenReqIdRes) => string;
+  serializers: { req: (req: unknown) => Record<string, unknown> };
   redact: { paths: string[]; censor: string };
 } {
   return {
@@ -68,9 +69,27 @@ export function buildPinoHttpOptions(config: AppConfig): {
       res.setHeader('x-request-id', id);
       return id;
     },
+    serializers: {
+      // I-1 (REQ-SEC-009): std-сериализатор req несёт url С querystring и поле query —
+      // OAuth callback (/auth/google/callback?code=…&state=…) сливал бы code/state
+      // в каждую строку лога. База — stdSerializers.req (id/method/headers/remoteAddress
+      // сохранены), из результата удалены query и querystring в url. Redact заголовков
+      // применяется к сериализованному объекту — продолжает работать.
+      req: (req: unknown): Record<string, unknown> => {
+        const serialized = stdSerializers.req(req as Parameters<typeof stdSerializers.req>[0]) as unknown as Record<
+          string,
+          unknown
+        >;
+        delete serialized.query;
+        if (typeof serialized.url === 'string') serialized.url = serialized.url.split('?')[0];
+        return serialized;
+      },
+    },
     // Тела и payload'ы не логируются нормой дизайна; секретные заголовки маскируем.
+    // C-1: set-cookie ОТВЕТА (refresh-токен, OAuth state/PKCE) — в том же ряду:
+    // std-сериализатор res печатает response headers.
     redact: {
-      paths: ['req.headers.authorization', 'req.headers.cookie'],
+      paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
       censor: '[redacted]',
     },
   };
