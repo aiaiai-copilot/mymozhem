@@ -7,6 +7,7 @@ import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
 import { EventOutbox } from '../realtime/event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -28,7 +29,7 @@ const ORG = '00000000-0000-0000-0000-000000000001';
 const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
 
 const makeService = (db: TestDb) => {
-  const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+  const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
   return new RoomService(
     db.prisma,
     new EventLogService(
@@ -559,7 +560,7 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
   it('rejects activation when the pinned manifest is absent from the registry', async () => {
     const room = await service.create(ORG);
     await configureQuiz(service, room.id);
-    const emptyRegistryOutbox = new EventOutbox(db.prisma, new RealtimeBus());
+    const emptyRegistryOutbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     const emptyRegistryService = new RoomService(
       db.prisma,
       new EventLogService(

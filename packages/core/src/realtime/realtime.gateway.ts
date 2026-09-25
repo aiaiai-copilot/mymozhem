@@ -29,6 +29,7 @@ import { RealtimeError } from './realtime.errors';
 import { contractCodeFor } from './error-mapping';
 import { SubscriptionRegistry } from './subscription-registry';
 import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+import { MetricsService } from '../observability/metrics.service';
 
 type Ack<T> = (result: T | ContractErrorPayload) => void;
 
@@ -58,6 +59,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
     private readonly bus: RealtimeBus,
     @Inject(RECONNECT_RATE_LIMITER) private readonly reconnectLimiter: JoinRateLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly metrics: MetricsService,
   ) {}
 
   afterInit(server: Server): void {
@@ -150,6 +152,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       await socket.join(roomChannel(roomId));
       if (level === 'organizer') await socket.join(organizerChannel(roomId));
       const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+      const replayStart = performance.now();
       const events = await this.prisma.logEvent.findMany({
         where: { roomId },
         orderBy: { seq: 'asc' },
@@ -162,6 +165,8 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
         events: this.projection.projectEvents(events, level),
         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
       };
+      // REQ-OPS-004: длительность replay = чтение лога + построение snapshot.
+      this.metrics.observeReplayDuration(level, (performance.now() - replayStart) / 1000);
       // M-3: disconnect, прилетевший внутри subscribe (пока читался лог), уже прошёл
       // слушателем как no-op (записи не было). Без этой проверки запись мёртвого
       // сокета протухла бы в реестре. Disconnect ПОСЛЕ проверки обслужит штатный
@@ -238,7 +243,15 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
           this.server.to(roomChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
         } else if (event.visibility === 'ORGANIZER') {
           this.server.to(organizerChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
+        } else {
+          // MODULE_PRIVATE: наружу не доставляется (REQ-CORE-005) — доставки нет, замера нет.
+          continue;
         }
+        // REQ-OPS-004: латентность publish→deliver от коммита (recordedAt — DB now()).
+        this.metrics.observePublishToDeliver(
+          event.visibility.toLowerCase(),
+          (Date.now() - event.recordedAt.getTime()) / 1000,
+        );
       } catch (err) {
         this.logger.error(
           `fan-out of ${event.type} (room ${event.roomId}, seq ${event.seq}) failed: ${(err as Error).message}`,

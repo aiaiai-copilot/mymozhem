@@ -30,6 +30,13 @@ type FakeSocket = ReturnType<typeof fakeSocket>;
 
 type Ack = (value: unknown) => void;
 
+// Фейк метрик для реестров, которые тесты конструируют вне makeGateway.
+const fakeRegistryMetrics = () =>
+  ({
+    connectionAdded: jest.fn(),
+    connectionRemoved: jest.fn(),
+  }) as never;
+
 function makeGateway(overrides: {
   membership?: { findActiveMembership: jest.Mock; onAccessRevoked?: jest.Mock };
   prisma?: { room: { findUnique: jest.Mock }; logEvent: { findMany: jest.Mock } };
@@ -49,6 +56,14 @@ function makeGateway(overrides: {
   const appRuntime = overrides.appRuntime ?? { dispatch: jest.fn().mockResolvedValue(undefined) };
   const tokens = overrides.tokens ?? { verifyAccessToken: jest.fn().mockReturnValue(GUEST_CLAIMS) };
   const reconnectLimiter = overrides.reconnectLimiter ?? { tryAcquire: jest.fn().mockReturnValue(true) };
+  const fakeMetrics = {
+    observePublishToDeliver: jest.fn(),
+    observeReplayDuration: jest.fn(),
+    connectionAdded: jest.fn(),
+    connectionRemoved: jest.fn(),
+    incCommitError: jest.fn(),
+  };
+  const bus = { subscribe: jest.fn(), publish: jest.fn() };
   const gateway = new RealtimeGateway(
     tokens as never,
     prisma as never,
@@ -56,12 +71,13 @@ function makeGateway(overrides: {
     { getManifest: jest.fn().mockReturnValue(undefined), getEventDefinition: jest.fn().mockReturnValue(undefined) } as never,
     appRuntime as never,
     new ProjectionService(),
-    overrides.registry ?? new SubscriptionRegistry(),
-    { subscribe: jest.fn(), publish: jest.fn() } as never,
+    overrides.registry ?? new SubscriptionRegistry(fakeMetrics as never),
+    bus as never,
     reconnectLimiter as never,
     {} as never,
+    fakeMetrics as never,
   );
-  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter };
+  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter, metrics: fakeMetrics, bus };
 }
 
 const ackOf = () => {
@@ -114,7 +130,7 @@ describe('RealtimeGateway.handleSubscribe', () => {
   // лога — сбой join ПОСЛЕ registry.add обязан откатить полуподписку (реестр +
   // каналы), иначе клиент с ack-ошибкой продолжал бы получать live-поток.
   it('join failure after registry.add leaves no stale subscription', async () => {
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     const { gateway } = makeGateway({ registry });
     const logger = { error: jest.fn(), warn: jest.fn() };
     (gateway as unknown as { logger: unknown }).logger = logger;
@@ -132,7 +148,7 @@ describe('RealtimeGateway.handleSubscribe', () => {
   });
 
   it('participant joins the room channel with a public snapshot', async () => {
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     const { gateway } = makeGateway({ registry });
     const socket = fakeSocket();
     const { ack, calls } = ackOf();
@@ -152,7 +168,7 @@ describe('RealtimeGateway.handleSubscribe', () => {
   });
 
   it('second subscription of the same socket to another room is REQUEST_INVALID', async () => {
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
     const { gateway } = makeGateway({ registry });
     const { ack, calls } = ackOf();
@@ -171,7 +187,7 @@ describe('RealtimeGateway.handleSubscribe', () => {
   // уже сделал remove no-op'ом; без проверки connected запись мёртвого сокета протухала
   // бы в реестре. Фикс: финальная проверка socket.connected до ack.
   it('disconnect mid-subscribe leaves no registry entry and sends no ack (M-3)', async () => {
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     const { gateway } = makeGateway({ registry });
     const socket = fakeSocket();
     socket.connected = false; // disconnect прилетел, пока subscribe читал лог
@@ -180,13 +196,21 @@ describe('RealtimeGateway.handleSubscribe', () => {
     expect(registry.get(socket.id)).toBeUndefined();
     expect(calls).toEqual([]);
   });
+
+  it('subscribe замеряет длительность replay (REQ-OPS-004)', async () => {
+    const { gateway, metrics } = makeGateway({});
+    const socket = fakeSocket();
+    // через публичный handleSubscribe (паттерн существующих subscribe-тестов файла):
+    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, jest.fn() as never);
+    expect(metrics.observeReplayDuration).toHaveBeenCalledWith('public', expect.any(Number));
+  });
 });
 
 describe('RealtimeGateway.handlePublish', () => {
   const SUBSCRIBED_ROOM = ROOM;
 
   function subscribedGateway(overrides: Parameters<typeof makeGateway>[0] = {}) {
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: SUBSCRIBED_ROOM, level: 'public' });
     return makeGateway({ ...overrides, registry });
   }
@@ -265,7 +289,7 @@ describe('RealtimeGateway fan-out and revoke', () => {
         return { emit: (event: string, payload: unknown) => emitted.push({ room, event, payload }) };
       },
     };
-    const registry = new SubscriptionRegistry();
+    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
     const { gateway } = makeGateway({ registry });
     (gateway as unknown as { server: unknown }).server = server;
     return { gateway, emitted, sockets, registry };
@@ -291,6 +315,32 @@ describe('RealtimeGateway fan-out and revoke', () => {
     expect(emitted.map((e) => e.room)).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
     expect(emitted[0].event).toBe(REALTIME_MESSAGES.EVENT);
     expect(emitted[0].payload).toEqual({ type: 'quiz.answer.submitted', payload: { c: 1 }, actorId: GUEST_CLAIMS.sub });
+  });
+
+  it('fan-out замеряет publish→deliver по recordedAt события (REQ-OPS-004)', () => {
+    const { gateway, bus, metrics } = makeGateway({});
+    const server = {
+      use: jest.fn(),
+      on: jest.fn(),
+      to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+      sockets: { sockets: new Map() },
+    };
+    gateway.afterInit(server as never);
+    const listener = (bus.subscribe as jest.Mock).mock.calls[0][0] as (e: readonly unknown[]) => void;
+    listener([
+      {
+        roomId: ROOM,
+        seq: 1,
+        type: 'quiz.question.opened',
+        payload: {},
+        actorId: null,
+        visibility: 'PUBLIC',
+        schemaVersion: 1,
+        recordedAt: new Date(Date.now() - 120),
+      },
+    ]);
+    expect(metrics.observePublishToDeliver).toHaveBeenCalledWith('public', expect.any(Number));
+    expect((metrics.observePublishToDeliver as jest.Mock).mock.calls[0][1]).toBeGreaterThanOrEqual(0.1);
   });
 
   // Санкционированное отклонение (леджер Task 5 → Task 7, решение владельца):

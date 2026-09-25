@@ -12,6 +12,7 @@ import {
   IdentityService,
   JoinRateLimiter,
   MembershipService,
+  MetricsService,
   RealtimeBus,
   RoomService,
   TEST_CONFIG,
@@ -116,7 +117,7 @@ describe('Transport HTTP (e2e)', () => {
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(

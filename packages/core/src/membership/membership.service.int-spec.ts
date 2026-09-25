@@ -5,6 +5,7 @@ import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
 import { EventOutbox } from '../realtime/event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
 import { IdentityService } from '../identity/identity.service';
@@ -42,7 +43,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(
@@ -371,7 +372,7 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
   beforeAll(async () => {
     db2 = await startTestDb();
     await seedIdentity(db2.prisma, { id: ORG, email: 'org2@example.test' });
-    const outbox = new EventOutbox(db2.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
     roomService2 = new RoomService(
       db2.prisma,
       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),

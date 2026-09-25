@@ -16,6 +16,7 @@ import {
   IdentityService,
   JoinRateLimiter,
   MembershipService,
+  MetricsService,
   RealtimeBus,
   RealtimeGateway,
   RoomService,
@@ -172,7 +173,7 @@ describe('Realtime (e2e)', () => {
     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     const bus = new RealtimeBus();
-    const outbox = new EventOutbox(db.prisma, bus);
+    const outbox = new EventOutbox(db.prisma, bus, new MetricsService());
     const registry = new AppRegistryService([TEST_APP]);
     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     roomService = new RoomService(

@@ -13,6 +13,7 @@ import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
 import { EventOutbox } from './event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -25,7 +26,7 @@ describe('EventLogService.commitCoreEvent', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     rooms = new RoomService(
       db.prisma,
       new EventLogService(

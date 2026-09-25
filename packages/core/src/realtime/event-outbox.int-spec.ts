@@ -1,4 +1,4 @@
-import type { AppManifest } from '@mymozhem/sdk';
+import { ContractError, type AppManifest } from '@mymozhem/sdk';
 import type { LogEvent } from '@prisma/client';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
@@ -9,6 +9,7 @@ import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { IdentityService } from '../identity/identity.service';
 import { RoomService } from '../room/room.service';
+import { MetricsService } from '../observability/metrics.service';
 import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
@@ -48,6 +49,7 @@ describe('EventOutbox', () => {
   let db: TestDb;
   let bus: RealtimeBus;
   let outbox: EventOutbox;
+  let metrics: MetricsService;
   let eventLog: EventLogService;
   let rooms: RoomService;
 
@@ -57,7 +59,8 @@ describe('EventOutbox', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
     bus = new RealtimeBus();
-    outbox = new EventOutbox(db.prisma, bus);
+    metrics = new MetricsService();
+    outbox = new EventOutbox(db.prisma, bus, metrics);
     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
@@ -133,6 +136,27 @@ describe('EventOutbox', () => {
     // обязано быть нормализовано до Prisma-enum — fan-out gateway сравнивает
     // visibility с 'PUBLIC' (вскрыто realtime e2e, Task 8: live-доставка пропадала).
     expect(delivered.map((e) => e.visibility)).toEqual(['PUBLIC']);
+  });
+
+  // Метрики этих двух тестов — свои per-test инстансы: общий `metrics` живёт в
+  // beforeAll, и серия UNKNOWN от первого теста протекла бы в рендер второго.
+  it('откат tx по нетипизированному сбою инкрементирует mymozhem_event_commit_errors_total (REQ-OPS-004)', async () => {
+    const localMetrics = new MetricsService();
+    const localOutbox = new EventOutbox(db.prisma, bus, localMetrics);
+    await expect(localOutbox.run(() => Promise.reject(new Error('db gone')))).rejects.toThrow('db gone');
+    expect(await localMetrics.render()).toContain('mymozhem_event_commit_errors_total{code="UNKNOWN"} 1');
+  });
+
+  it('типизированный отказ (ContractError) — штатный отказ гейтов, счётчик не трогаем', async () => {
+    const localMetrics = new MetricsService();
+    const localOutbox = new EventOutbox(db.prisma, bus, localMetrics);
+    await expect(
+      localOutbox.run(() => Promise.reject(new ContractError('PRIZE_FUND_EXHAUSTED', 'x'))),
+    ).rejects.toMatchObject({ code: 'PRIZE_FUND_EXHAUSTED' });
+    // prom-client рендерит HELP/TYPE даже для пустого счётчика — отсутствие серий
+    // проверяем по '{': ни одной серии быть не должно (бриф-assert по имени метрики
+    // неосуществим: HELP-строка содержит имя всегда).
+    expect(await localMetrics.render()).not.toContain('mymozhem_event_commit_errors_total{');
   });
 
   it('rollback delivers nothing and writes nothing (REQ-DEV-008)', async () => {

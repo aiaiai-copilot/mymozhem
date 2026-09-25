@@ -1,8 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable } from '@nestjs/common';
-import type { LogEvent, Prisma } from '@prisma/client';
+import { ContractError } from '@mymozhem/sdk';
+import { Prisma, type LogEvent } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MetricsService } from '../observability/metrics.service';
 import { RealtimeBus } from './realtime-bus';
+import { RealtimeError } from './realtime.errors';
 
 // Внутренние ошибки механизма (design §5): обе означают баг вызывающего, на провод
 // не маппятся (через gateway-фильтр уйдут как INTERNAL_ERROR).
@@ -20,6 +23,11 @@ export class EventOutboxNestedRunError extends Error {
   }
 }
 
+// Label счётчика ошибок фиксации: P-код Prisma (ограниченное множество) либо UNKNOWN.
+function commitErrorLabel(err: unknown): string {
+  return err instanceof Prisma.PrismaClientKnownRequestError ? err.code : 'UNKNOWN';
+}
+
 // Tx-scoped outbox (design §5, подход A): commit*Event складывает событие в
 // ALS-контекст транзакции; run() после УСПЕШНОГО коммита отдаёт буфер в шину; при
 // откате буфер умирает вместе с контекстом — откаченное событие недоставимо
@@ -31,6 +39,7 @@ export class EventOutbox {
   constructor(
     private readonly prisma: PrismaService,
     private readonly bus: RealtimeBus,
+    private readonly metrics: MetricsService,
   ) {}
 
   async run<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
@@ -38,7 +47,18 @@ export class EventOutbox {
       throw new EventOutboxNestedRunError();
     }
     const store = { events: [] as LogEvent[] };
-    const result = await this.prisma.$transaction((tx) => this.als.run(store, () => fn(tx)));
+    let result: T;
+    try {
+      result = await this.prisma.$transaction((tx) => this.als.run(store, () => fn(tx)));
+    } catch (err) {
+      // REQ-OPS-004: откат tx по СБОЮ фиксации (БД, баг) — считаем. Типизированные
+      // отказы домена (ContractError/RealtimeError) — штатные отказы гейтов, их
+      // rollback — не сбой: не считаем (дизайн ф.4 §3).
+      if (!(err instanceof ContractError) && !(err instanceof RealtimeError)) {
+        this.metrics.incCommitError(commitErrorLabel(err));
+      }
+      throw err;
+    }
     // Flush строго после resolves $transaction: до этой строки события видны только
     // буферу — подписчики никогда не наблюдают то, что может откатиться.
     this.bus.publish(store.events);

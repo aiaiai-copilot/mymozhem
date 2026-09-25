@@ -13,6 +13,7 @@ import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
 import { EventOutbox } from './event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 const P1 = '00000000-0000-0000-0000-0000000000a1';
@@ -75,7 +76,7 @@ describe('Fail-closed при недоступной БД (REQ-DEV-008)', () => {
 
   function wire(p: PrismaService) {
     const registry = new AppRegistryService([TEST_APP]);
-    const outbox = new EventOutbox(p, new RealtimeBus());
+    const outbox = new EventOutbox(p, new RealtimeBus(), new MetricsService());
     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     const membership = new MembershipService(
       p,
