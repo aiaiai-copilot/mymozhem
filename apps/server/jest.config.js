@@ -3,4 +3,5 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/test'],
   testMatch: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
+  setupFiles: ['<rootDir>/test/jest-env-setup.ts'],
 };

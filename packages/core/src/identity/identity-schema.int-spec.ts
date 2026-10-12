@@ -67,9 +67,13 @@ describe('Identity registered-email partial unique index', () => {
     expect(await db.prisma.identity.count()).toBe(2);
   });
 
-  it('allows many rows with NULL email', async () => {
+  it('rejects a second live REGISTERED row even with NULL email (ADR-012)', async () => {
+    // ADR-012: partial index "Identity_single_registered_key" — ровно один живой
+    // REGISTERED на инстанс; email-индекс больше не единственный страж (NULL не
+    // спасает: предикат kind-only).
     await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
-    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
-    expect(await db.prisma.identity.count()).toBe(2);
+    await expect(
+      db.prisma.identity.create({ data: { kind: 'REGISTERED' } }),
+    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
   });
 });

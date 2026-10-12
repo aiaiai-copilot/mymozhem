@@ -150,10 +150,12 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
     await expect(tokens.rotate(winner.refreshToken)).resolves.toBeDefined();
   });
 
-  // REGISTERED-ветка (OAuth-срез, REQ-ID-015/016): ротация без комнаты и без guest-cap;
+  // REGISTERED-ветка (REQ-ID-016): ротация без комнаты и без guest-cap;
   // reuse-detection (REQ-ID-007) работает и для зарегистрированных сессий.
   it('rotates a REGISTERED session: no guest cap, no roomId; reuse revokes family (REQ-ID-007/016)', async () => {
-    const identity = await seedIdentity(db.prisma, { kind: 'REGISTERED' });
+    // ADR-012: второй живой REGISTERED невозможен ("Identity_single_registered_key")
+    // — используем уже посеянного ORG.
+    const identity = { id: ORG };
     const first = await tokens.issueRegisteredTokens(identity.id);
     expect(first.kind).toBe('REGISTERED');
 

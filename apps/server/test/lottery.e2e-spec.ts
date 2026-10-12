@@ -339,7 +339,11 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
     for (const s of [g1.socket, g2.socket, g3.socket, orgSocket]) s.close();
   });
 
-  it('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
+  // ADR-012 / амендмент v1.5: verified-ветка REQ-RWD-014 приостановлена, а второй
+  // живой REGISTERED непредставим ("Identity_single_registered_key" — один REGISTERED
+  // на инстанс, и это организатор). Сценарий засыпает до задачи манифеста lottery v2
+  // (draw_eligibility снимается из манифеста); реактивация — с возвратом аккаунтов.
+  it.skip('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
     // Рулинг D-pre.2 (поправка к brief): sketch «10 розыгрышей с quantity 10 → все
     // winnerId === registered.id» противоречил реализованному исключению прежних
     // победителей ЭТОГО приза из пула (lottery-handlers.ts: после первого розыгрыша

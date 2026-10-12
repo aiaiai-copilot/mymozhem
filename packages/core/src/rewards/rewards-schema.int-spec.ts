@@ -16,6 +16,13 @@ describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
     await db.stop();
   });
 
+  afterEach(async () => {
+    // ADR-012: seedRoomPrizeWinner сеет организатора на вызов, а
+    // "Identity_single_registered_key" допускает ровно одного живого REGISTERED —
+    // чистим identity (CASCADE забирает room/rewards-строки теста).
+    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity", room."Room" CASCADE');
+  });
+
   it('has the partial unique index on active awards (REQ-RWD-003)', async () => {
     const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
       SELECT indexdef FROM pg_indexes
@@ -39,7 +46,8 @@ describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
   });
 
   // Сиды комнаты/приза/победителя. Значения уникальны на вызов: тесты делят одну
-  // testcontainer-БД, фиксированные email/код комнаты конфликтовали бы по P2002.
+  // testcontainer-БД (identity транкейтится в afterEach — ADR-012: один живой
+  // REGISTERED), код комнаты уникален сам по себе.
   async function seedRoomPrizeWinner() {
     const org = await seedIdentity(db.prisma, {
       email: `org-${randomUUID()}@example.test`,

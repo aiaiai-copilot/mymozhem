@@ -58,14 +58,16 @@ describe('RewardsService (int)', () => {
   });
 
   afterEach(async () => {
+    // ADR-012: identity."Identity" в списке — seedPrize сеет организатора на вызов,
+    // а "Identity_single_registered_key" допускает ровно одного живого REGISTERED.
     await db.prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE',
+      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE',
     );
   });
 
   // Хелпер: комната DRAFT с организатором (membership нужен assertOrganizer в
   // fulfill/revoke) + приз с фондом quantity. Значения уникальны на вызов:
-  // тесты делят одну testcontainer-БД, identity не транкейтится.
+  // тесты делят одну testcontainer-БД.
   async function seedPrize(quantity: number) {
     const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
     const room = await db.prisma.room.create({

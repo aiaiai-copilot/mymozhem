@@ -4,7 +4,6 @@ import { ZodError } from 'zod';
 import { ContractError } from '@mymozhem/sdk';
 import { MembershipError } from '../membership/membership.errors';
 import { AuthError } from '../auth/auth.errors';
-import { OAuthError } from '../oauth/oauth.errors';
 import { RoomError } from '../room/room.errors';
 import { RealtimeError } from '../realtime/realtime.errors';
 import { PinoLogger } from '../observability/pino-logger.module';
@@ -24,14 +23,6 @@ const STATUS_BY_WIRE_CODE = {
   TARGET_NOT_EXCLUDABLE: 409,
   REQUEST_INVALID: 400,
   SESSION_INVALID: 401,
-  // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
-  OAUTH_NOT_CONFIGURED: 503,
-  OAUTH_REDIRECT_INVALID: 400,
-  OAUTH_STATE_INVALID: 401,
-  OAUTH_ACCESS_DENIED: 403,
-  OAUTH_EXCHANGE_FAILED: 502,
-  OAUTH_EMAIL_UNVERIFIED: 403,
-  OAUTH_EMAIL_CONFLICT: 409,
   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
   ROOM_ORGANIZER_NOT_REGISTERED: 403,
   // UI-срез (lifecycle-контур, решение №9): остальные RoomError идут в wire 1:1
@@ -80,12 +71,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
     if (status >= 500) {
       this.logger.error({ requestId, err: exception }, 'request failed');
-    } else if (exception instanceof AuthError || exception instanceof OAuthError) {
+    } else if (exception instanceof AuthError) {
       // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
       // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
-      // токена не оставляет следа для расследования. Та же норма для OAuthError
-      // (причина отказа флоу — в логе, наружу ровно {code}). Message обоих классов
-      // безопасен: фиксированные строки + familyId/sub, без token-материала.
+      // токена не оставляет следа для расследования. Message класса безопасен:
+      // фиксированные строки + familyId, без token-материала.
       this.logger.warn({ requestId }, exception.message);
     }
     void reply.status(status).send({ code });
@@ -97,7 +87,6 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return exception.code === 'JOIN_RATE_LIMITED' ? 'RATE_LIMITED' : exception.code;
     }
     if (exception instanceof AuthError) return 'SESSION_INVALID';
-    if (exception instanceof OAuthError) return exception.code;
     if (exception instanceof RoomError) {
       // Покрытие полное (UI-срез, lifecycle-контур): все коды RoomError присутствуют
       // в STATUS_BY_WIRE_CODE и идут наружу 1:1; неизвестный код — fail-closed в

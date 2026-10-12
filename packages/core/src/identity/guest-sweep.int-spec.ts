@@ -48,8 +48,11 @@ import { IdentityModule } from './identity.module';
 })
 class TestAnonymizationWiringModule {}
 
+// ADR-012: identity."Identity" тоже транкейтится — иначе REGISTERED-сиды тестов
+// накапливались бы и упирались в "Identity_single_registered_key" (один живой
+// REGISTERED на инстанс). Каждый тест сеет свои identity-строки сам.
 const TRUNCATE =
-  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE';
+  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE';
 
 describe('GuestSweepService (int, REQ-ID-003/014)', () => {
   let db: TestDb;

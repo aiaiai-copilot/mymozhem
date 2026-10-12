@@ -71,10 +71,10 @@ export function buildPinoHttpOptions(config: AppConfig): {
     },
     serializers: {
       // I-1 (REQ-SEC-009): std-сериализатор req несёт url С querystring и поле query —
-      // OAuth callback (/auth/google/callback?code=…&state=…) сливал бы code/state
-      // в каждую строку лога. База — stdSerializers.req (id/method/headers/remoteAddress
-      // сохранены), из результата удалены query и querystring в url. Redact заголовков
-      // применяется к сериализованному объекту — продолжает работать.
+      // секреты в query (code/state и т.п.) сливались бы в каждую строку лога.
+      // База — stdSerializers.req (id/method/headers/remoteAddress сохранены), из
+      // результата удалены query и querystring в url. Redact заголовков применяется
+      // к сериализованному объекту — продолжает работать.
       req: (req: unknown): Record<string, unknown> => {
         const serialized = stdSerializers.req(req as Parameters<typeof stdSerializers.req>[0]) as unknown as Record<
           string,
@@ -85,8 +85,8 @@ export function buildPinoHttpOptions(config: AppConfig): {
         return serialized;
       },
       // Финревью батча D (Important #1, REQ-SEC-009): std-сериализатор res печатает
-      // заголовки ответа — 302 authorize несёт OAuth state/code_challenge в location
-      // (тот же класс, что I-1 для req.url). Query в location срезается, origin+path
+      // заголовки ответа — 302 redirect может нести query-секреты в location (тот
+      // же класс, что I-1 для req.url). Query в location срезается, origin+path
       // сохранены для диагностики. set-cookie того же ответа — в redact.paths (C-1).
       res: (res: unknown): Record<string, unknown> => {
         const serialized = stdSerializers.res(res as Parameters<typeof stdSerializers.res>[0]) as unknown as Record<
@@ -101,7 +101,7 @@ export function buildPinoHttpOptions(config: AppConfig): {
       },
     },
     // Тела и payload'ы не логируются нормой дизайна; секретные заголовки маскируем.
-    // C-1: set-cookie ОТВЕТА (refresh-токен, OAuth state/PKCE) — в том же ряду:
+    // C-1: set-cookie ОТВЕТА (refresh-токен и прочие сессионные куки) — в том же ряду:
     // std-сериализатор res печатает response headers.
     redact: {
       paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],

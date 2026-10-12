@@ -12,7 +12,6 @@ import {
   TargetNotExcludableError,
   TargetNotMemberError,
 } from '../membership/membership.errors';
-import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
 import { RoomConflictError, RoomNotConfiguredError, RoomOrganizerNotRegisteredError, RoomSettingsFrozenError, RoomTransitionError } from '../room/room.errors';
 import {
   ActorNotMemberError as RealtimeActorNotMemberError,
@@ -57,15 +56,6 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
     ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
-    // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7): core-код 1:1 в wire,
-    // статус из таблицы маппинга.
-    ['oauth not configured', new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'x'), 503, 'OAUTH_NOT_CONFIGURED'],
-    ['oauth redirect invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'x'), 400, 'OAUTH_REDIRECT_INVALID'],
-    ['oauth state invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'x'), 401, 'OAUTH_STATE_INVALID'],
-    ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
-    ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
-    ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
-    ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
     // RoomError — полное покрытие: ROOM_ORGANIZER_NOT_REGISTERED с POST /rooms
     // (REQ-ID-005), остальные — с lifecycle-контура UI-среза (решение №9); коды в
     // wire 1:1 (строковый паритет room.errors.ts), статус 409 — отказ из-за состояния.
@@ -158,18 +148,6 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
       expect(logger.error).not.toHaveBeenCalled();
       // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
-    });
-
-    it('logs 4xx OAuthError message at warn level (та же норма, что AuthError; message — фиксированные строки + sub)', () => {
-      const err = new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
-      const { filter, reply, logger } = makeFilter();
-      filter.catch(err, makeHost(reply));
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ requestId: 'req-1' }),
-        'state mismatch or code missing',
-      );
-      expect(logger.error).not.toHaveBeenCalled();
-      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'OAUTH_STATE_INVALID' });
     });
 
     it('does not log non-auth 4xx at all', () => {

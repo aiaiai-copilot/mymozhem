@@ -43,7 +43,9 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
+    // ADR-012: второй живой REGISTERED в одной БД запрещён ("Identity_single_registered_key")
+    // — участник P1 посеян гостем; тесты ниже kind-агностичны (raw membership + lookup).
+    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST', email: 'p1@example.test' });
     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
@@ -427,21 +429,10 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
     expect(sessions[0].revokedAt).not.toBeNull();
   });
 
-  it('REGISTERED-цель сохраняет сессии (дизайн §0.2)', async () => {
-    const room = await roomService2.create(ORG);
-    const registered = await seedIdentity(db2.prisma, { kind: 'REGISTERED', email: 'reg@example.test' });
-    await db2.prisma.membership.create({
-      data: { roomId: room.id, identityId: registered.id, role: 'PARTICIPANT', joinIp: IP },
-    });
-    const tokens = new TokenService(db2.prisma, TEST_CONFIG);
-    await tokens.issueGuestTokens(registered.id, room.id); // session row kind-агностичен
-
-    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: registered.id, actorId: ORG });
-
-    const sessions = await db2.prisma.session.findMany({ where: { identityId: registered.id } });
-    expect(sessions[0].revokedAt).toBeNull();
-  });
-
+  // ADR-012: сценарий «REGISTERED-цель сохраняет сессии» (дизайн §0.2) удалён —
+  // второй живой REGISTERED непредставим ("Identity_single_registered_key":
+  // единственный REGISTERED — организатор, а он неисключаем). Ветка
+  // kind !== 'GUEST' в MembershipService.exclude сохранена до возврата аккаунтов.
   it('актор-не-член → ActorNotMemberError', async () => {
     const { room, guest } = await roomWithGuest();
     await expect(

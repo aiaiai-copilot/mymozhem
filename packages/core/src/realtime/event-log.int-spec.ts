@@ -107,7 +107,9 @@ describe('EventLogService.commitCoreEvent', () => {
 
   it('records actorId on lifecycle events when the caller supplies it (REQ-RT-009)', async () => {
     const ACTOR = '00000000-0000-0000-0000-0000000000c3';
-    await seedIdentity(db.prisma, { id: ACTOR, email: 'actor@example.test' });
+    // ADR-012: второй живой REGISTERED невозможен ("Identity_single_registered_key");
+    // актору достаточно существующей identity — kind для записи actorId не значим.
+    await seedIdentity(db.prisma, { id: ACTOR, kind: 'GUEST' });
     const room = await rooms.create(ORG);
     await rooms.cancel(room.id, ACTOR);
 

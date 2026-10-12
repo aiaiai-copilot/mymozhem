@@ -27,11 +27,11 @@ import { AppModule } from '../src/app.module';
 
 jest.setTimeout(120_000);
 
-const ORG = '00000000-0000-0000-0000-000000000001';
-// Второй организатор с z.uuid()-совместимым id (v4-nibble): ORG как path-param
-// не прошёл бы контроллерный z.uuid().parse — кейс «цель — ORGANIZER» требует
-// валидного uuid в path (срез исключения).
-const ORG2 = '00000000-0000-4000-8000-000000000002';
+// ADR-012: второй организатор невозможен ("Identity_single_registered_key" — один
+// живой REGISTERED на инстанс), поэтому ORG сам несёт z.uuid()-совместимый id
+// (v4-nibble): как path-param exclude-кейсов он обязан проходить контроллерный
+// z.uuid().parse.
+const ORG = '00000000-0000-4000-8000-000000000001';
 // Не-член с валидным v4-uuid (target path-param кейсов exclude).
 const STRANGER = '00000000-0000-4000-8000-000000000099';
 
@@ -116,7 +116,6 @@ describe('Transport HTTP (e2e)', () => {
     // Access-токены верифицируем тем же секретом, которым подписывают boot'нутые app'ы.
     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
@@ -418,9 +417,8 @@ describe('Transport HTTP (e2e)', () => {
     });
 
     it('цель — ORGANIZER → 409 TARGET_NOT_EXCLUDABLE', async () => {
-      // ORG2 — v4-совместимый uuid: path-param проходит z.uuid().parse контроллера.
-      const room = await roomService.create(ORG2);
-      const res = await exclude(app, room.id, ORG2, await organizerToken(room.id, ORG2));
+      const room = await roomService.create(ORG);
+      const res = await exclude(app, room.id, ORG, await organizerToken(room.id));
       expect(res.statusCode).toBe(409);
       expect(res.json()).toEqual({ code: 'TARGET_NOT_EXCLUDABLE' });
     });
