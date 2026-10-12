@@ -56,7 +56,7 @@ export class RequestIdModule implements NestModule {
 export function buildPinoHttpOptions(config: AppConfig): {
   level: string;
   genReqId: (req: GenReqIdReq, res: GenReqIdRes) => string;
-  serializers: { req: (req: unknown) => Record<string, unknown> };
+  serializers: { req: (req: unknown) => Record<string, unknown>; res: (res: unknown) => Record<string, unknown> };
   redact: { paths: string[]; censor: string };
 } {
   return {
@@ -82,6 +82,21 @@ export function buildPinoHttpOptions(config: AppConfig): {
         >;
         delete serialized.query;
         if (typeof serialized.url === 'string') serialized.url = serialized.url.split('?')[0];
+        return serialized;
+      },
+      // Финревью батча D (Important #1, REQ-SEC-009): std-сериализатор res печатает
+      // заголовки ответа — 302 authorize несёт OAuth state/code_challenge в location
+      // (тот же класс, что I-1 для req.url). Query в location срезается, origin+path
+      // сохранены для диагностики. set-cookie того же ответа — в redact.paths (C-1).
+      res: (res: unknown): Record<string, unknown> => {
+        const serialized = stdSerializers.res(res as Parameters<typeof stdSerializers.res>[0]) as unknown as Record<
+          string,
+          unknown
+        >;
+        const headers = serialized.headers as Record<string, unknown> | undefined;
+        if (headers && typeof headers.location === 'string') {
+          headers.location = headers.location.split('?')[0];
+        }
         return serialized;
       },
     },

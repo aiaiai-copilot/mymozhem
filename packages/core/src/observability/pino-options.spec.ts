@@ -54,6 +54,39 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
     expect(parsed.req).not.toHaveProperty('query');
   });
 
+  // Финревью батча D (Important #1): std-сериализатор res печатает заголовки
+  // ответа — 302 authorize несёт OAuth state/code_challenge в location, тот же
+  // класс, что I-1 (req.url). Query в location срезается, origin+path сохранены.
+  it('строка лога: query (state/code_challenge) срезан из res.headers.location на 302 authorize', () => {
+    const lines: string[] = [];
+    const stream = new Writable({
+      write(chunk, _enc, cb) {
+        lines.push(chunk.toString());
+        cb();
+      },
+    });
+    const opts = buildPinoHttpOptions({ ...TEST_CONFIG, LOG_LEVEL: 'info' });
+    const logger = pino({ level: opts.level, serializers: opts.serializers, redact: opts.redact }, stream);
+    // Контракт std-сериализатора v7: заголовки читаются через getHeaders()
+    // (res.headersSent=true → statusCode сохраняется).
+    const res = {
+      statusCode: 302,
+      headersSent: true,
+      getHeaders: () => ({
+        location:
+          'https://accounts.google.com/o/oauth2/v2/auth?client_id=C&state=SECRET-STATE&code_challenge=SECRET-CHALLENGE',
+        'set-cookie': 'mm_oauth_state=SECRET-STATE; HttpOnly; Path=/auth',
+      }),
+    };
+    logger.info({ res }, 'request completed');
+    const line = lines.join('');
+    for (const secret of ['SECRET-STATE', 'SECRET-CHALLENGE']) {
+      expect(line).not.toContain(secret);
+    }
+    const parsed = JSON.parse(line);
+    expect(parsed.res.headers.location).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+  });
+
   it('genReqId генерирует uuid и отражает его в заголовок x-request-id', () => {
     const setHeader = jest.fn();
     const id = buildPinoHttpOptions(TEST_CONFIG).genReqId({ headers: {} }, { setHeader });
