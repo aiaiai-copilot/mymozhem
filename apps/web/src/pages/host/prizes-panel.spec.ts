@@ -4,7 +4,9 @@ import {
   DRAW_ID_GENERATION_FAILED,
   isDrawable,
   startDrawAttempt,
+  startParticipantDrawAttempt,
   tryStartDrawAttempt,
+  tryStartParticipantDrawAttempt,
   type DrawAttempt,
 } from './prizes-panel';
 
@@ -102,6 +104,49 @@ describe('tryStartDrawAttempt', () => {
     const result = tryStartDrawAttempt(p, null, () => '88888888-8888-4888-8888-888888888888');
     expect(result).toEqual({
       attempt: { drawId: '88888888-8888-4888-8888-888888888888', prizeId: p.id },
+      error: null,
+    });
+  });
+});
+
+// Безпризовой розыгрыш «Разыграть участника» (ADR-012 §4 / REQ-RWD-002b):
+// prizeId null — wire-команда draw.run уходит без ключа prizeId. Тот же
+// дисциплинарный паттерн, что у призового: одна попытка за раз, повторный клик
+// до ack не тратит новый drawId, бросок генератора — текстом ошибки панели.
+describe('startParticipantDrawAttempt', () => {
+  it('нет pending-попытки → попытка с drawId генератора и prizeId null', () => {
+    const attempt = startParticipantDrawAttempt(null, () => '99999999-9999-4999-8999-999999999999');
+    expect(attempt).toEqual({ drawId: '99999999-9999-4999-8999-999999999999', prizeId: null });
+  });
+
+  it('pending-попытка уже есть → null, генератор drawId НЕ вызывается', () => {
+    const pending: DrawAttempt = {
+      drawId: '44444444-4444-4444-8444-444444444444',
+      prizeId: prize(1).id,
+    };
+    let generated = 0;
+    const attempt = startParticipantDrawAttempt(pending, () => {
+      generated += 1;
+      return '55555555-5555-4555-8555-555555555555';
+    });
+    expect(attempt).toBeNull();
+    expect(generated).toBe(0);
+  });
+});
+
+describe('tryStartParticipantDrawAttempt', () => {
+  it('генератор бросает → ошибка всплывает, попытка НЕ создана (pending не залипнет)', () => {
+    const result = tryStartParticipantDrawAttempt(null, () => {
+      throw new TypeError('crypto.randomUUID is not a function');
+    });
+    expect(result.attempt).toBeNull();
+    expect(result.error).toBe(DRAW_ID_GENERATION_FAILED);
+  });
+
+  it('успешная генерация → попытка без ошибки (прозрачный pass-through)', () => {
+    const result = tryStartParticipantDrawAttempt(null, () => '66666666-6666-4666-8666-666666666666');
+    expect(result).toEqual({
+      attempt: { drawId: '66666666-6666-4666-8666-666666666666', prizeId: null },
       error: null,
     });
   });

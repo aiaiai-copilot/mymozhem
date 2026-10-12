@@ -41,9 +41,6 @@ export function SetupPage() {
   const [roomId, setRoomId] = useState<string | null>(() => SessionStore.loadHostRoomId());
   const [roomError, setRoomError] = useState<string | null>(null);
   const [appKind, setAppKind] = useState<AppKind>('quiz');
-  const [drawEligibility, setDrawEligibility] = useState<'guests_allowed' | 'verified'>(
-    'guests_allowed',
-  );
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const createStarted = useRef(false);
@@ -90,13 +87,10 @@ export function SetupPage() {
     finalize(QUIZ_APP_ID, QUIZ_MANIFEST_VERSION, settings);
 
   const submitLottery = () =>
-    // Дефолт схемы — guests_allowed: шлём явно выбранное значение (для дефолта
-    // эквивалентно {}, но прозрачнее); parse — та же серверная схема.
-    finalize(
-      LOTTERY_APP_ID,
-      LOTTERY_MANIFEST_VERSION,
-      lotterySettingsSchema.parse({ drawEligibility }),
-    );
+    // ADR-012 §4: draw_eligibility удалена (verified-ветка приостановлена —
+    // REGISTERED только организатор); settings-схема лотереи — пустая (I-5:
+    // точка расширения манифеста). parse — та же серверная схема.
+    finalize(LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION, lotterySettingsSchema.parse({}));
 
   if (roomError) {
     return (
@@ -146,27 +140,6 @@ export function SetupPage() {
             submitLottery();
           }}
         >
-          <fieldset disabled={busy}>
-            <legend>Кто участвует в розыгрыше</legend>
-            <label>
-              <input
-                type="radio"
-                name="draw-eligibility"
-                checked={drawEligibility === 'guests_allowed'}
-                onChange={() => setDrawEligibility('guests_allowed')}
-              />
-              Все участники, включая гостей
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="draw-eligibility"
-                checked={drawEligibility === 'verified'}
-                onChange={() => setDrawEligibility('verified')}
-              />
-              Только зарегистрированные
-            </label>
-          </fieldset>
           <button type="submit" disabled={busy}>
             Сохранить и запустить
           </button>

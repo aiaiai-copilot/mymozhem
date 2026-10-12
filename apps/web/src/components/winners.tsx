@@ -9,6 +9,7 @@ interface WinnersProps {
 
 // Список победителей розыгрыша (functional-minimum). Названий призов на клиенте
 // нет (listPrizes — контур консоли организатора), поэтому показываем prizeId.
+// prizeId null — безпризовой розыгрыш (ADR-012 §4): строка без «приз …».
 export function Winners({ draws, names }: WinnersProps) {
   const entries = Object.entries(draws);
   if (entries.length === 0) return null;
@@ -18,7 +19,9 @@ export function Winners({ draws, names }: WinnersProps) {
       <ul>
         {entries.map(([drawId, draw]) => (
           <li key={drawId}>
-            {displayNameOf(names, draw.winnerId)} — приз {draw.prizeId}
+            {draw.prizeId === null
+              ? displayNameOf(names, draw.winnerId)
+              : `${displayNameOf(names, draw.winnerId)} — приз ${draw.prizeId}`}
           </li>
         ))}
       </ul>

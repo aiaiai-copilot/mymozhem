@@ -4,6 +4,7 @@ import {
   awardResponseSchema,
   createRoomResponseSchema,
   excludeResponseSchema,
+  joinResponseSchema,
   listPrizesResponseSchema,
   listRewardsResponseSchema,
   prizeResponseSchema,
@@ -15,6 +16,7 @@ import { ApiError } from './api-error';
 import type { TokenProvider } from './token-provider';
 import {
   activateRoom,
+  bootstrapOrganizer,
   cancelRoom,
   completeRoom,
   configureRoom,
@@ -220,11 +222,12 @@ describe('endpoints', () => {
     return { calls, client };
   };
 
-  it('все 14 обёрток маппятся на пути/методы/схемы HTTP-контракта', async () => {
+  it('все 15 обёрток маппятся на пути/методы/схемы HTTP-контракта', async () => {
     const { calls, client } = makeRecordingClient();
 
     await joinRoom(client, { code: 'ABCD-1234', displayName: 'Гость' });
     await refreshSession(client);
+    await bootstrapOrganizer(client, { setupToken: 'x'.repeat(32) });
     await createRoom(client, { joinPolicy: 'guests' });
     await configureRoom(client, ROOM_ID, { appId: 'quiz', manifestVersion: 1, settings: {} });
     await activateRoom(client, ROOM_ID);
@@ -239,9 +242,12 @@ describe('endpoints', () => {
     await excludeMember(client, ROOM_ID, IDENTITY_ID, { reason: 'флуд' });
 
     const expected: Array<Pick<ApiRequest<z.ZodType>, 'method' | 'path' | 'schema'> & { auth?: boolean }> = [
-      // join/refresh — без access-токена: refresh ездит httpOnly-кукой (REQ-ID-008).
-      { method: 'POST', path: '/rooms/join', schema: tokenResponseSchema, auth: false },
+      // join/refresh/bootstrap — без access-токена: refresh ездит httpOnly-кукой
+      // (REQ-ID-008), bootstrap её ставит (ADR-012 §2). Ответ join несёт
+      // фактический displayName (joinResponseSchema, ADR-012 §3).
+      { method: 'POST', path: '/rooms/join', schema: joinResponseSchema, auth: false },
       { method: 'POST', path: '/auth/refresh', schema: tokenResponseSchema, auth: false },
+      { method: 'POST', path: '/auth/organizer', schema: tokenResponseSchema, auth: false },
       { method: 'POST', path: '/rooms', schema: createRoomResponseSchema },
       { method: 'POST', path: `/rooms/${ROOM_ID}/configure`, schema: createRoomResponseSchema },
       { method: 'POST', path: `/rooms/${ROOM_ID}/activate`, schema: createRoomResponseSchema },
@@ -265,5 +271,7 @@ describe('endpoints', () => {
     });
     // Тело join доезжает как есть — сервер валидирует по joinRequestSchema сам.
     expect(calls[0]?.body).toEqual({ code: 'ABCD-1234', displayName: 'Гость' });
+    // Тело bootstrap — ровно setup-токен (сервер парсит strict-схемой).
+    expect(calls[2]?.body).toEqual({ setupToken: 'x'.repeat(32) });
   });
 });

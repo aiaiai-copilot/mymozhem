@@ -2,6 +2,7 @@ import {
   awardResponseSchema,
   createRoomResponseSchema,
   excludeResponseSchema,
+  joinResponseSchema,
   listPrizesResponseSchema,
   listRewardsResponseSchema,
   prizeResponseSchema,
@@ -15,8 +16,10 @@ import {
   type ExcludeRequest,
   type ExcludeResponse,
   type JoinRequest,
+  type JoinResponse,
   type ListPrizesResponse,
   type ListRewardsResponse,
+  type OrganizerBootstrapRequest,
   type PrizeResponse,
   type RosterResponse,
   type TokenResponse,
@@ -29,10 +32,18 @@ import type { ApiClient } from './api-client';
 // Lifecycle/configure отвечают формой createRoomResponseSchema — так парсит сервер
 // (toRoomResponse), отдельной схемы в SDK нет и не нужно.
 
-// join/refresh — auth:false: access-токена ещё нет, refresh ездит httpOnly-кукой
-// (REQ-ID-008), Bearer на этих вызовах бессмысленнен.
-export const joinRoom = (c: ApiClient, input: JoinRequest): Promise<TokenResponse> =>
-  c.call({ method: 'POST', path: '/rooms/join', body: input, schema: tokenResponseSchema, auth: false });
+// join/refresh/bootstrap — auth:false: access-токена ещё нет, refresh ездит
+// httpOnly-кукой (REQ-ID-008), Bearer на этих вызовах бессмысленнен.
+
+// ADR-012 §2: bootstrap единственного организатора инстанса по setup-токену
+// из конфигурации сервера; refresh-куку ставит сервер в ответе.
+export const bootstrapOrganizer = (c: ApiClient, input: OrganizerBootstrapRequest): Promise<TokenResponse> =>
+  c.call({ method: 'POST', path: '/auth/organizer', body: input, schema: tokenResponseSchema, auth: false });
+
+// joinRoom — ответ теперь несёт фактический displayName (ADR-012 §3): заданный
+// или назначенный сервером псевдоним, если имя не задавали.
+export const joinRoom = (c: ApiClient, input: JoinRequest): Promise<JoinResponse> =>
+  c.call({ method: 'POST', path: '/rooms/join', body: input, schema: joinResponseSchema, auth: false });
 
 export const refreshSession = (c: ApiClient): Promise<TokenResponse> =>
   c.call({ method: 'POST', path: '/auth/refresh', schema: tokenResponseSchema, auth: false });

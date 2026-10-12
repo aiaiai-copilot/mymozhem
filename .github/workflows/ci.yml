@@ -49,6 +49,9 @@ jobs:
       # интерполирует окружение файла в каждом шаге (up/exec/down), а compose
       # помечает JWT_SECRET как обязательный (:? — fail-closed).
       JWT_SECRET: ci-e2e-dummy-jwt-secret-0123456789abcdef0123456789abcdef
+      # Фиктивный setup-токен стенда (ADR-012 §2, >=32 байта): smoke логинит
+      # организатора через UI этим же значением (compose-директива :?).
+      ORGANIZER_SETUP_TOKEN: ci-e2e-dummy-organizer-setup-token-0123456789abcdef
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -76,11 +79,6 @@ jobs:
       # из корня workspace `pnpm exec playwright` его не видит — без --filter
       # шаг падает с "Command not found".
       - run: pnpm --filter @mymozhem/web exec playwright install --with-deps chromium
-      - name: Seed REGISTERED-сессии организатора
-        run: |
-          TOKEN=$(docker compose exec -T server node apps/server/scripts/e2e-web-seed.mjs --email=e2e@example.com | jq -r .refreshToken)
-          test -n "$TOKEN" && test "$TOKEN" != "null"
-          echo "E2E_REFRESH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - run: pnpm --filter @mymozhem/web test:e2e
       - name: Погасить стенд
         if: always()
