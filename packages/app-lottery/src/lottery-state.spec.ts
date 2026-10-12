@@ -38,6 +38,12 @@ describe('reduceLottery', () => {
     ).toBe(W1);
   });
 
+  it('draw.completed с prizeId=null записывается с null (безпризовой розыгрыш, REQ-RWD-002b)', () => {
+    const s0 = initialLotteryState();
+    const s1 = reduceLottery(s0, event('draw.completed', { drawId: D1, prizeId: null, winnerId: W1 }));
+    expect(s1.draws[D1]).toEqual({ prizeId: null, winnerId: W1 });
+  });
+
   it('неизвестный тип — no-op; состояние иммутабельно', () => {
     const s0 = initialLotteryState();
     expect(reduceLottery(s0, event('something.else', {}))).toBe(s0);

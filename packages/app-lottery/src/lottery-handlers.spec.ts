@@ -6,11 +6,14 @@ import {
 import { handleLotteryPublish } from './lottery-handlers';
 import { createLotteryApp, createLotteryRuntime } from './lottery-runtime';
 import { buildLotteryManifest, LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION } from './lottery-manifest';
+import { lotterySettingsSchema } from './lottery-settings';
 import { initialLotteryState, type LotteryState } from './lottery-state';
 
 // Командный handler розыгрыша: ролевой гейт (только ORGANIZER), выбор победителя
-// только через ctx.randomInt (REQ-RWD-011), eligibility-фильтр пула (REQ-RWD-014),
-// идемпотентность по drawId на уровне app-команды (REQ-RWD-003, design §4).
+// только через ctx.randomInt (REQ-RWD-011), winner-exclusion по ключу prizeId
+// (null — безпризовые розыгрыши, решение §0.4), идемпотентность по drawId на
+// уровне app-команды (REQ-RWD-003, design §4). v2 (ADR-012): prizeId необязателен
+// (REQ-RWD-002b), draw_eligibility удалена (REQ-RWD-014 приостановлена).
 
 const ORG = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
@@ -108,14 +111,55 @@ describe('handleLotteryPublish draw.run', () => {
     );
   });
 
-  it('verified: гости вне пула — победитель всегда REGISTERED (REQ-RWD-014)', () => {
-    const settings = { drawEligibility: 'verified' };
+  it('verified-ветка удалена (REQ-RWD-014 приостановлена): настройка drawEligibility отклоняется strict-схемой', () => {
+    expect(lotterySettingsSchema.safeParse({ drawEligibility: 'verified' }).success).toBe(false);
+  });
+
+  it('безпризовой draw: draw.completed с prizeId=null, БЕЗ эффекта award.prize (REQ-RWD-002b)', () => {
+    const result = handleLotteryPublish(ctx({ settings: {}, drawPool: POOL }), 'draw.run', { drawId: D1 });
+    const completed = result.commits.find((c) => c.shortName === 'draw.completed');
+    expect(completed?.payload).toMatchObject({ drawId: D1, prizeId: null });
+    expect(result.effects).toEqual([]);
+  });
+
+  it('winner-exclusion по ключу null: победитель безпризового розыгрыша вне пула следующего безпризового (решение §0.4)', () => {
+    const state = { draws: { [D0]: { prizeId: null, winnerId: W1 } } };
     const result = handleLotteryPublish(
-      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, settings }),
+      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
+      'draw.run',
+      { drawId: D1 },
+    );
+    expect(result.commits[1].payload).toMatchObject({ prizeId: null, winnerId: W2 }); // W1 исключён, randomInt() = 0 → pool[0]
+  });
+
+  it('безпризовые и призовые пулы победителей не пересекаются: приз X не исключает безпризового победителя', () => {
+    const state = { draws: { [D0]: { prizeId: null, winnerId: W1 } } };
+    const result = handleLotteryPublish(
+      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
       'draw.run',
       { drawId: D1, prizeId: P1 },
     );
-    expect(result.commits[1].payload.winnerId).toBe(W3); // единственный REGISTERED
+    expect(result.commits[1].payload.winnerId).toBe(W1); // W1 остаётся в пуле приза P1
+  });
+
+  it('replay безпризового drawId: re-emit прежнего результата с prizeId=null, без эффекта', () => {
+    const state = { draws: { [D1]: { prizeId: null, winnerId: W2 } } };
+    const result = handleLotteryPublish(
+      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
+      'draw.run',
+      { drawId: D1 },
+    );
+    expect(result).toEqual({
+      commits: [
+        {
+          shortName: 'draw.completed',
+          payload: { drawId: D1, prizeId: null, winnerId: W2 },
+          visibility: 'public',
+          actor: 'server',
+        },
+      ],
+      effects: [],
+    });
   });
 
   it('прежний победитель этого приза исключён из пула (UX; индекс — страховка)', () => {

@@ -75,6 +75,9 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
     ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
     ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
+    // ADR-012 §4: призовой режим выключен конфигурацией — отказ операции, не
+    // конфликт состояния и не отказ доступа к комнате: 403 рядом с ACTOR_NOT_*.
+    ['prizes disabled', new ContractError('PRIZES_DISABLED', 'x'), 403, 'PRIZES_DISABLED'],
     // Фаза 4 (C-8.1): награждение анонимизированной identity — конфликт состояния.
     ['identity anonymized', new ContractError('IDENTITY_ANONYMIZED', 'x'), 409, 'IDENTITY_ANONYMIZED'],
     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError

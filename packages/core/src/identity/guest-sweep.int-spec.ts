@@ -171,8 +171,10 @@ describe('GuestSweepService — приостановка при открытой
         TestAnonymizationWiringModule,
       ],
     })
+      // ADR-012 §4 (принцип рулинга C-pre.1): сьют исполняет эффект award.prize
+      // через RewardsService — призовый путь, работает при PRIZE_MODE='on'.
       .overrideProvider(APP_CONFIG)
-      .useValue(TEST_CONFIG)
+      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
       .compile();
     await moduleRef.init();
     sweep = moduleRef.get(GuestSweepService);

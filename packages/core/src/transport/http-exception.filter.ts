@@ -41,6 +41,8 @@ const STATUS_BY_WIRE_CODE = {
   AWARD_UNKNOWN: 404,
   PRIZE_FUND_EXHAUSTED: 409,
   REWARD_ALREADY_RESOLVED: 409,
+  // ADR-012 §4: призовой режим выключен конфигурацией — 403 рядом с ACTOR_NOT_*.
+  PRIZES_DISABLED: 403,
   // Фаза 4 (C-8.1): гонка свип/розыгрыш проиграна награждением — как прочие 409 конфликта состояния.
   IDENTITY_ANONYMIZED: 409,
   INTERNAL_ERROR: 500,

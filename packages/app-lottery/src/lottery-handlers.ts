@@ -5,7 +5,6 @@ import {
 } from '@mymozhem/sdk';
 import type { z } from 'zod';
 import { drawRunPayload } from './lottery-events';
-import { lotterySettingsSchema } from './lottery-settings';
 import type { LotteryState } from './lottery-state';
 
 // actorId — только из ctx, никогда из payload (REQ-RT-009). Случайность — только
@@ -40,32 +39,29 @@ export function handleLotteryPublish(
     };
   }
 
-  const settings = lotterySettingsSchema.parse(ctx.settings);
-  // Пул — снапшот от диспетчера (ctx.drawPool). verified: отсекаем GUEST (REQ-RWD-014).
-  let pool = settings.drawEligibility === 'verified'
-    ? ctx.drawPool.filter((e) => e.kind !== 'GUEST')
-    : [...ctx.drawPool];
-  // Прежние победители этого приза вне пула (UX; частичный индекс — страховка).
+  const prizeId = command.prizeId ?? null;
+  // Прежние победители ЭТОГО приза вне пула; безпризовый розыгрыш исключает
+  // прежних безпризовых победителей (ключ null, решение §0.4).
   const previousWinners = new Set(
     Object.values(ctx.state.draws)
-      .filter((d) => d.prizeId === command.prizeId)
+      .filter((d) => d.prizeId === prizeId)
       .map((d) => d.winnerId),
   );
-  pool = pool.filter((e) => !previousWinners.has(e.identityId));
-  if (pool.length === 0) {
-    throw new AppRejection('DRAW_POOL_EMPTY', 'draw pool is empty');
-  }
+  const pool = ctx.drawPool.filter((e) => !previousWinners.has(e.identityId));
+  if (pool.length === 0) throw new AppRejection('DRAW_POOL_EMPTY', 'draw pool is empty');
   const winnerId = pool[ctx.randomInt(pool.length)].identityId;
   return {
     commits: [
       { shortName: 'draw.run', payload: command, visibility: 'public', actor: 'publisher' },
       {
         shortName: 'draw.completed',
-        payload: { drawId: command.drawId, prizeId: command.prizeId, winnerId },
+        payload: { drawId: command.drawId, prizeId, winnerId },
         visibility: 'public',
         actor: 'server',
       },
     ],
-    effects: [{ kind: 'award.prize', prizeId: command.prizeId, winnerId }],
+    // Эффект списания фонда — только при реальном призе; безпризовый draw
+    // юридического факта выигрыша не создаёт (ADR-012 §4).
+    effects: prizeId ? [{ kind: 'award.prize', prizeId, winnerId }] : [],
   };
 }

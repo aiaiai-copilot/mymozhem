@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { AppEffect, CreatePrizeRequest } from '@mymozhem/sdk';
+import { APP_CONFIG } from '../config/config.tokens';
+import type { AppConfig } from '../config/config.schema';
 import { PrismaService } from '../prisma/prisma.service';
 import { MembershipService } from '../membership/membership.service';
 import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membership.errors';
@@ -13,6 +15,7 @@ import {
   IdentityAnonymizedError,
   PrizeFundExhaustedError,
   PrizeUnknownError,
+  PrizesDisabledError,
   RewardAlreadyResolvedError,
 } from './rewards.errors';
 
@@ -31,6 +34,7 @@ export class RewardsService implements AwardEffectHandler {
     private readonly membership: MembershipService,
     private readonly eventLog: EventLogService,
     private readonly outbox: EventOutbox,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   // --- Вход 1: эффекты из app-runtime (чужая транзакция) ---
@@ -69,6 +73,9 @@ export class RewardsService implements AwardEffectHandler {
     prizeId: string,
     winnerId: string,
   ): Promise<void> {
+    // ADR-012 §4 (решение §0.3): гейт ДО findFirst — при выключенном режиме
+    // отказ PRIZES_DISABLED, а не PRIZE_UNKNOWN (порядок запинан e2e RF3).
+    if (this.config.PRIZE_MODE === 'off') throw new PrizesDisabledError();
     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
     if (!prize) throw new PrizeUnknownError(prizeId);
     // C-8.1 (ф.4, амендмент 2026-09-25): победитель не должен быть
@@ -116,6 +123,9 @@ export class RewardsService implements AwardEffectHandler {
   // --- Вход 2: REST-контур организатора ---
 
   async createPrize(roomId: string, actorId: string, input: CreatePrizeRequest) {
+    // ADR-012 §4: создание сущности приза — юридический факт призового фонда;
+    // при выключенном режиме отклонено конфигурацией (дефолт off).
+    if (this.config.PRIZE_MODE === 'off') throw new PrizesDisabledError();
     await this.assertOrganizer(roomId, actorId);
     const room = await this.prisma.room.findUnique({ where: { id: roomId } });
     // Добавление призов — в не-терминальной комнате (design §2: призы добавляют

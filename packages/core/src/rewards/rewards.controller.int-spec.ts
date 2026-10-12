@@ -51,8 +51,10 @@ describe('RewardsController (int)', () => {
       providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],
     })
       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
+      // ADR-012 §4 (рулинг C-pre.1): призовые кейсы этого сьюта — прежнее поведение
+      // при PRIZE_MODE='on'; гейт-кейс при 'off' — отдельный describe ниже.
       .overrideProvider(APP_CONFIG)
-      .useValue(TEST_CONFIG)
+      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
       .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
@@ -204,5 +206,63 @@ describe('RewardsController (int)', () => {
     const res = await app.inject({ method: 'GET', url: `/rooms/${room.id}/rewards` });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
+  });
+});
+
+// Гейт призового режима на HTTP-границе (ADR-012 §4): POST /rooms/:id/prizes при
+// PRIZE_MODE='off' → 403 PRIZES_DISABLED, наружу ровно {code} (REQ-SEC-006).
+// Свой app и свой testcontainer: основной сьют бежит при 'on' (рулинг C-pre.1).
+describe('RewardsController prize_mode=off (ADR-012 §4)', () => {
+  let db: TestDb;
+  let app: NestFastifyApplication;
+  let tokens: TokenService;
+  let roomService: RoomService;
+
+  const ORG = '00000000-0000-4000-8000-000000000001';
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ConfigModule,
+        PrismaModule,
+        AppRegistryModule.register([]),
+        AppRuntimeModule.register([]),
+        AuthModule,
+        MembershipModule,
+        RealtimeModule,
+        RoomModule,
+        RewardsModule,
+      ],
+      providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],
+    })
+      .overrideProvider(APP_CONFIG)
+      .useValue(TEST_CONFIG) // PRIZE_MODE: 'off' — дефолт тестового конфига
+      .compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+    tokens = app.get(TokenService);
+    roomService = app.get(RoomService);
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+  }, 120_000);
+
+  afterAll(async () => {
+    await app.close();
+    await db.stop();
+  });
+
+  it('POST /rooms/:id/prizes при PRIZE_MODE=off → 403 PRIZES_DISABLED', async () => {
+    const room = await roomService.create(ORG);
+    const { accessToken } = await tokens.issueGuestTokens(ORG, room.id);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/rooms/${room.id}/prizes`,
+      headers: { authorization: `Bearer ${accessToken}` },
+      payload: { name: 'Приз', quantity: 1 },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ code: 'PRIZES_DISABLED' });
+    expect(await db.prisma.prize.count({ where: { roomId: room.id } })).toBe(0);
   });
 });

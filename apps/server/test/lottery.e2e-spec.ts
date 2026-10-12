@@ -24,10 +24,10 @@ jest.setTimeout(180_000);
 // RFC 9562-валидный v4 UUID (прецедент realtime.e2e): z.uuid() (zod v4) отклоняет
 // версию 0 — иначе проекция core.room.activated (actorId = ORG) падает на parse.
 const ORG = '00000000-0000-4000-8000-000000000001';
-// REGISTERED-участник сценария 4 (verified eligibility).
-const REG = '00000000-0000-4000-8000-000000000002';
 
-const LOTTERY_SETTINGS: LotterySettings = { drawEligibility: 'guests_allowed' };
+// ADR-012 (lottery v2): draw_eligibility удалена (verified-ветка REQ-RWD-014
+// приостановлена) — appSettings лотереи пусты; `{}` — единственный валидный snapshot.
+const LOTTERY_SETTINGS: LotterySettings = {};
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
@@ -131,21 +131,133 @@ type SubscribeAck = {
 };
 type PublishAck = { ok: true } | { code: string };
 
+// Общий стенд файла: одна testcontainer-БД и сидированный организатор на оба
+// сьюта (призовой при PRIZE_MODE='on' и RF3-гейт при 'off'); app-инстансы —
+// свои у каждого describe, describes бегут серийно (рулинг C-pre.1).
+let db: TestDb;
+let app: NestFastifyApplication;
+let port: number;
+let roomService: RoomService;
+let tokens: TokenService;
+let savedDatabaseUrl: string | undefined;
+let savedJwtSecret: string | undefined;
+
+beforeAll(async () => {
+  savedDatabaseUrl = process.env.DATABASE_URL;
+  savedJwtSecret = process.env.JWT_SECRET;
+  db = await startTestDb();
+  process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+  await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+});
+
+afterAll(async () => {
+  await db.stop();
+  restoreEnv('DATABASE_URL', savedDatabaseUrl);
+  restoreEnv('JWT_SECRET', savedJwtSecret);
+});
+
+afterEach(async () => {
+  await db.prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE identity."Session", membership."Membership", rewards."Award", rewards."Prize", room."Room" CASCADE',
+  );
+});
+
+// Комната лотереи в ACTIVE (сервисный путь, прецедент quiz.e2e). Settings
+// всегда явно: у лотереи v2 они пусты (ADR-012), но configure требует ключ.
+async function activeLotteryRoom(
+  settings: LotterySettings = LOTTERY_SETTINGS,
+): Promise<{ id: string; code: string }> {
+  const room = await roomService.create(ORG);
+  await roomService.configure(room.id, {
+    appId: LOTTERY_APP_ID,
+    manifestVersion: LOTTERY_MANIFEST_VERSION,
+    settings,
+  });
+  await roomService.activate(room.id, ORG);
+  return room;
+}
+
+// Гость через HTTP (транспортный путь): POST /rooms/join → accessToken → connect.
+async function joinGuest(
+  roomCode: string,
+  name: string,
+): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/rooms/join',
+    payload: { code: roomCode, displayName: name },
+  });
+  expect(res.statusCode).toBe(201);
+  const { accessToken } = joinResponseSchema.parse(res.json());
+  const identityId = tokens.verifyAccessToken(accessToken).sub;
+  return { socket: await connect(port, accessToken), token: accessToken, identityId };
+}
+
+// REST с Bearer организатора: guest-claims (kind GUEST + roomId), роль ORGANIZER
+// берётся из membership — прецедент transport.e2e-spec.ts:362-367.
+async function organizerRestToken(roomId: string): Promise<string> {
+  return (await tokens.issueGuestTokens(ORG, roomId)).accessToken;
+}
+
+async function createPrize(roomId: string, name: string, quantity: number): Promise<{ id: string }> {
+  const res = await app.inject({
+    method: 'POST',
+    url: `/rooms/${roomId}/prizes`,
+    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+    payload: { name, quantity },
+  });
+  expect(res.statusCode).toBe(201);
+  return res.json() as { id: string };
+}
+
+async function fulfillAward(roomId: string, awardId: string) {
+  return app.inject({
+    method: 'POST',
+    url: `/rooms/${roomId}/awards/${awardId}/fulfill`,
+    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+  });
+}
+
+async function revokeAward(roomId: string, awardId: string) {
+  return app.inject({
+    method: 'POST',
+    url: `/rooms/${roomId}/awards/${awardId}/revoke`,
+    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+  });
+}
+
+// Организатор на ws: guest-claims токен, роль из membership; subscribe сразу —
+// publish адресуется комнатой подписки (roomId в publish-body не принимается,
+// publishRequestSchema strict).
+async function organizerSocket(roomId: string): Promise<ClientSocket> {
+  const socket = await connect(port, await organizerRestToken(roomId));
+  const ack = await emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
+  expect(ack.ok).toBe(true);
+  return socket;
+}
+
+function subscribe(socket: ClientSocket, roomId: string): Promise<SubscribeAck> {
+  return emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
+}
+
+function publish(socket: ClientSocket, type: string, payload: Record<string, unknown>): Promise<PublishAck> {
+  return emitAck<PublishAck>(socket, REALTIME_MESSAGES.PUBLISH, { type, payload });
+}
+
+// prizeId необязателен (lottery v2, ADR-012): без ключа — безпризовой розыгрыш.
+function runDraw(orgSocket: ClientSocket, drawId: string, prizeId?: string): Promise<PublishAck> {
+  return publish(orgSocket, 'lottery.draw.run', prizeId === undefined ? { drawId } : { drawId, prizeId });
+}
+
 describe('Lottery (e2e, приёмка фазы 3)', () => {
-  let db: TestDb;
-  let app: NestFastifyApplication;
-  let port: number;
-  let roomService: RoomService;
-  let tokens: TokenService;
-  let savedDatabaseUrl: string | undefined;
-  let savedJwtSecret: string | undefined;
+  let savedPrizeMode: string | undefined;
 
   beforeAll(async () => {
-    savedDatabaseUrl = process.env.DATABASE_URL;
-    savedJwtSecret = process.env.JWT_SECRET;
-    db = await startTestDb();
-    process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
-    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    // ADR-012 §4 (рулинг C-pre.1): призовые сценарии — прежнее поведение при
+    // PRIZE_MODE='on' (env-дефолт off загейчил бы createPrize и draw.run с
+    // призом). Прецедент JWT_SECRET выше: env ДО createApp, restore в afterAll.
+    savedPrizeMode = process.env.PRIZE_MODE;
+    process.env.PRIZE_MODE = 'on';
     app = await createApp();
     port = portOf(app);
     roomService = app.get(RoomService);
@@ -154,102 +266,8 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
 
   afterAll(async () => {
     await app.close();
-    await db.stop();
-    restoreEnv('DATABASE_URL', savedDatabaseUrl);
-    restoreEnv('JWT_SECRET', savedJwtSecret);
+    restoreEnv('PRIZE_MODE', savedPrizeMode);
   });
-
-  afterEach(async () => {
-    await db.prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE identity."Session", membership."Membership", rewards."Award", rewards."Prize", room."Room" CASCADE',
-    );
-  });
-
-  // Комната лотереи в ACTIVE (сервисный путь, прецедент quiz.e2e). Settings — всегда
-  // явно: открытый вопрос контракта о дефолте, `{}` отклоняется.
-  async function activeLotteryRoom(
-    settings: LotterySettings = LOTTERY_SETTINGS,
-  ): Promise<{ id: string; code: string }> {
-    const room = await roomService.create(ORG);
-    await roomService.configure(room.id, {
-      appId: LOTTERY_APP_ID,
-      manifestVersion: LOTTERY_MANIFEST_VERSION,
-      settings,
-    });
-    await roomService.activate(room.id, ORG);
-    return room;
-  }
-
-  // Гость через HTTP (транспортный путь): POST /rooms/join → accessToken → connect.
-  async function joinGuest(
-    roomCode: string,
-    name: string,
-  ): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/rooms/join',
-      payload: { code: roomCode, displayName: name },
-    });
-    expect(res.statusCode).toBe(201);
-    const { accessToken } = joinResponseSchema.parse(res.json());
-    const identityId = tokens.verifyAccessToken(accessToken).sub;
-    return { socket: await connect(port, accessToken), token: accessToken, identityId };
-  }
-
-  // REST с Bearer организатора: guest-claims (kind GUEST + roomId), роль ORGANIZER
-  // берётся из membership — прецедент transport.e2e-spec.ts:362-367.
-  async function organizerRestToken(roomId: string): Promise<string> {
-    return (await tokens.issueGuestTokens(ORG, roomId)).accessToken;
-  }
-
-  async function createPrize(roomId: string, name: string, quantity: number): Promise<{ id: string }> {
-    const res = await app.inject({
-      method: 'POST',
-      url: `/rooms/${roomId}/prizes`,
-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
-      payload: { name, quantity },
-    });
-    expect(res.statusCode).toBe(201);
-    return res.json() as { id: string };
-  }
-
-  async function fulfillAward(roomId: string, awardId: string) {
-    return app.inject({
-      method: 'POST',
-      url: `/rooms/${roomId}/awards/${awardId}/fulfill`,
-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
-    });
-  }
-
-  async function revokeAward(roomId: string, awardId: string) {
-    return app.inject({
-      method: 'POST',
-      url: `/rooms/${roomId}/awards/${awardId}/revoke`,
-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
-    });
-  }
-
-  // Организатор на ws: guest-claims токен, роль из membership; subscribe сразу —
-  // publish адресуется комнатой подписки (roomId в publish-body не принимается,
-  // publishRequestSchema strict).
-  async function organizerSocket(roomId: string): Promise<ClientSocket> {
-    const socket = await connect(port, await organizerRestToken(roomId));
-    const ack = await emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
-    expect(ack.ok).toBe(true);
-    return socket;
-  }
-
-  function subscribe(socket: ClientSocket, roomId: string): Promise<SubscribeAck> {
-    return emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
-  }
-
-  function publish(socket: ClientSocket, type: string, payload: Record<string, unknown>): Promise<PublishAck> {
-    return emitAck<PublishAck>(socket, REALTIME_MESSAGES.PUBLISH, { type, payload });
-  }
-
-  function runDraw(orgSocket: ClientSocket, drawId: string, prizeId: string): Promise<PublishAck> {
-    return publish(orgSocket, 'lottery.draw.run', { drawId, prizeId });
-  }
 
   it('1. полный цикл: гости входят → приз → draw.run → draw.completed из пула → AWARDED → fulfill; события публичны live и в replay', async () => {
     const room = await activeLotteryRoom();
@@ -339,37 +357,44 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
     for (const s of [g1.socket, g2.socket, g3.socket, orgSocket]) s.close();
   });
 
-  // ADR-012 / амендмент v1.5: verified-ветка REQ-RWD-014 приостановлена, а второй
-  // живой REGISTERED непредставим ("Identity_single_registered_key" — один REGISTERED
-  // на инстанс, и это организатор). Сценарий засыпает до задачи манифеста lottery v2
-  // (draw_eligibility снимается из манифеста); реактивация — с возвратом аккаунтов.
-  it.skip('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
-    // Рулинг D-pre.2 (поправка к brief): sketch «10 розыгрышей с quantity 10 → все
-    // winnerId === registered.id» противоречил реализованному исключению прежних
-    // победителей ЭТОГО приза из пула (lottery-handlers.ts: после первого розыгрыша
-    // единственный eligible REGISTERED исключён → DRAW_POOL_EMPTY на повторах).
-    // Вместо этого — ОДИН розыгрыш (quantity 1): пул verified = {registered}
-    // детерминированно, гости отфильтрованы.
-    // HTTP-входа для REGISTERED нет (JoinController создаёт только гостей) —
-    // членство REGISTERED-партисипанта сеем на уровне БД; пул розыгрыша читается
-    // из membership (listActiveParticipantPool), так что это честная посадка.
-    const room = await activeLotteryRoom({ drawEligibility: 'verified' });
+  it('4. безпризовой розыгрыш: draw.run без prizeId → draw.completed с prizeId=null, award НЕ создан; следующий безпризовой исключает прежнего победителя (null-ключ, §0.4)', async () => {
+    const room = await activeLotteryRoom();
     const g1 = await joinGuest(room.code, 'Гость-1');
     const g2 = await joinGuest(room.code, 'Гость-2');
-    await seedIdentity(db.prisma, { id: REG, kind: 'REGISTERED' });
-    await db.prisma.membership.create({
-      data: { roomId: room.id, identityId: REG, role: 'PARTICIPANT' },
-    });
-    const prize = await createPrize(room.id, 'Приз', 1);
     const orgSocket = await organizerSocket(room.id);
 
-    const completedFrame = waitEventWhere(orgSocket, 'lottery.draw.completed');
-    const drawId = crypto.randomUUID();
-    expect(await runDraw(orgSocket, drawId, prize.id)).toEqual({ ok: true });
-    expect((await completedFrame).payload).toEqual({ drawId, prizeId: prize.id, winnerId: REG });
+    const drawId1 = crypto.randomUUID();
+    const frame1 = waitEventWhere(orgSocket, 'lottery.draw.completed');
+    expect(await runDraw(orgSocket, drawId1)).toEqual({ ok: true });
+    const completed1 = await frame1;
+    expect(completed1.payload).toMatchObject({ drawId: drawId1, prizeId: null });
+    const winner1 = (completed1.payload as { winnerId: string }).winnerId;
+    expect([g1.identityId, g2.identityId]).toContain(winner1);
 
-    const award = await db.prisma.award.findFirstOrThrow({ where: { roomId: room.id } });
-    expect(award.winnerId).toBe(REG);
+    // Юридического факта выигрыша нет (ADR-012 §4): awards пуст — и по REST…
+    const list = await app.inject({
+      method: 'GET',
+      url: `/rooms/${room.id}/rewards`,
+      headers: { authorization: `Bearer ${await organizerRestToken(room.id)}` },
+    });
+    expect(list.statusCode).toBe(200);
+    expect((list.json() as { awards: unknown[] }).awards).toHaveLength(0);
+
+    // Второй безпризовой draw (новый drawId): победитель ≠ первому — прежние
+    // безпризовые победители вне пула (ключ null, решение §0.4).
+    const drawId2 = crypto.randomUUID();
+    const frame2 = waitEventWhere(
+      orgSocket,
+      'lottery.draw.completed',
+      (e) => (e.payload as { drawId: string }).drawId === drawId2,
+    );
+    expect(await runDraw(orgSocket, drawId2)).toEqual({ ok: true });
+    const winner2 = ((await frame2).payload as { winnerId: string }).winnerId;
+    expect(winner2).not.toBe(winner1);
+    expect([g1.identityId, g2.identityId]).toContain(winner2);
+
+    // …и прямой проверкой таблицы после обоих розыгрышей.
+    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
     g1.socket.close();
     g2.socket.close();
     orgSocket.close();
@@ -472,5 +497,48 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
       await publish(g.socket, 'lottery.draw.run', { drawId: crypto.randomUUID(), prizeId: crypto.randomUUID() }),
     ).toEqual({ code: 'PUBLISH_FORBIDDEN' });
     g.socket.close();
+  });
+});
+
+// RF3 (ADR-012 §4): draw.run С призом при PRIZE_MODE='off' отклонён PRIZES_DISABLED
+// на уровне эффекта — до коммитов, поэтому откат всего dispatch. Отдельный
+// app-инстанс на той же testcontainer-БД (рулинг C-pre.1); describes серийны.
+describe('Lottery prize_mode=off (e2e, ADR-012 §4)', () => {
+  beforeAll(async () => {
+    app = await createApp({ PRIZE_MODE: 'off' });
+    port = portOf(app);
+    roomService = app.get(RoomService);
+    tokens = app.get(TokenService);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('draw.run с prizeId при off → ack PRIZES_DISABLED; в логе нет ни draw.run, ни draw.completed (эффект до коммитов); безпризовой draw гейтом не затронут', async () => {
+    const room = await activeLotteryRoom();
+    const g = await joinGuest(room.code, 'Гость');
+    const orgSocket = await organizerSocket(room.id);
+
+    // Приз создать нельзя (createPrize тоже загейчен) — prizeId произвольный uuid;
+    // гейт срабатывает ДО findFirst (порядок строк в awardPrize), поэтому отказ —
+    // PRIZES_DISABLED, а не PRIZE_UNKNOWN.
+    expect(await runDraw(orgSocket, crypto.randomUUID(), crypto.randomUUID())).toEqual({
+      code: 'PRIZES_DISABLED',
+    });
+    const log = await readRoomLog(db.prisma, room.id);
+    expect(log.filter((e) => e.type === 'lottery.draw.run')).toHaveLength(0);
+    expect(log.filter((e) => e.type === 'lottery.draw.completed')).toHaveLength(0);
+    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
+
+    // Контроль: безпризовой розыгрыш при off работает — гейтится сущность приза,
+    // не выбор победителя (REQ-RWD-002b).
+    const frame = waitEventWhere(orgSocket, 'lottery.draw.completed');
+    const drawId = crypto.randomUUID();
+    expect(await runDraw(orgSocket, drawId)).toEqual({ ok: true });
+    expect((await frame).payload).toMatchObject({ drawId, prizeId: null, winnerId: g.identityId });
+
+    g.socket.close();
+    orgSocket.close();
   });
 });

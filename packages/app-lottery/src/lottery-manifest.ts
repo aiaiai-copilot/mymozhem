@@ -3,7 +3,8 @@ import { lotterySettingsSchema } from './lottery-settings';
 import { drawCompletedPayload, drawRunPayload } from './lottery-events';
 
 export const LOTTERY_APP_ID = 'lottery';
-export const LOTTERY_MANIFEST_VERSION = 1;
+// v2 (ADR-012): prizeId необязателен, draw_eligibility удалена.
+export const LOTTERY_MANIFEST_VERSION = 2;
 
 export function buildLotteryManifest(): AppManifest {
   return defineApp({

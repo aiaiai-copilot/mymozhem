@@ -45,8 +45,10 @@ describe('RewardsService (int)', () => {
       ],
     })
       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
+      // ADR-012 §4 (рулинг C-pre.1): призовые кейсы этого сьюта — прежнее поведение
+      // при PRIZE_MODE='on'; гейт-кейсы при 'off' — отдельный describe ниже.
       .overrideProvider(APP_CONFIG)
-      .useValue(TEST_CONFIG)
+      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
       .compile();
     await moduleRef.init();
     rewards = moduleRef.get(RewardsService);
@@ -66,9 +68,9 @@ describe('RewardsService (int)', () => {
   });
 
   // Хелпер: комната DRAFT с организатором (membership нужен assertOrganizer в
-  // fulfill/revoke) + приз с фондом quantity. Значения уникальны на вызов:
+  // fulfill/revoke/createPrize). Значения уникальны на вызов:
   // тесты делят одну testcontainer-БД.
-  async function seedPrize(quantity: number) {
+  async function seedRoom() {
     const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
     const room = await db.prisma.room.create({
       data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
@@ -76,6 +78,10 @@ describe('RewardsService (int)', () => {
     await db.prisma.membership.create({
       data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
     });
+    return { org, room };
+  }
+  async function seedPrize(quantity: number) {
+    const { org, room } = await seedRoom();
     const prize = await db.prisma.prize.create({
       data: { roomId: room.id, name: 'Приз', quantityTotal: quantity, quantity },
     });
@@ -270,6 +276,12 @@ describe('RewardsService (int)', () => {
     expect(grants[0]).toMatchObject({ identityId: p.id, points: 900, reason: 'quiz.round', sourceAppId: 'quiz' });
   });
 
+  it('on: createPrize работает (конфиг с PRIZE_MODE: on) — контроль гейта ADR-012 §4', async () => {
+    const { org, room } = await seedRoom();
+    const prize = await rewards.createPrize(room.id, org.id, { name: 'X', quantity: 1 });
+    expect(prize).toMatchObject({ roomId: room.id, name: 'X', quantity: 1, quantityTotal: 1 });
+  });
+
   it('отказ эффекта откатывает транзакцию целиком — награды и события нет (подход A)', async () => {
     const { room } = await seedPrize(1);
     const winner = await guest();
@@ -280,5 +292,106 @@ describe('RewardsService (int)', () => {
     ).rejects.toMatchObject({ code: 'PRIZE_UNKNOWN' });
     expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
     expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(0);
+  });
+});
+
+// Гейт призового режима (ADR-012 §4, решение §0.3): createPrize и эффект
+// award.prize отклоняются PRIZES_DISABLED при PRIZE_MODE='off' (дефолт
+// TEST_CONFIG — покрывает первый кейс). fulfill/revoke/list НЕ гейтятся —
+// урегулирование существующих awards (REQ-RWD-009). Свой модуль и свой
+// testcontainer: основной сьют бежит при 'on' (рулинг C-pre.1).
+describe('prize_mode (ADR-012 §4, решение §0.3)', () => {
+  let db: TestDb;
+  let rewards: RewardsService;
+  let outbox: EventOutbox;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ConfigModule,
+        PrismaModule,
+        AppRegistryModule.register([]),
+        AppRuntimeModule.register([]),
+        MembershipModule,
+        RealtimeModule,
+        RewardsModule,
+      ],
+    })
+      .overrideProvider(APP_CONFIG)
+      .useValue(TEST_CONFIG) // PRIZE_MODE: 'off' — дефолт тестового конфига
+      .compile();
+    await moduleRef.init();
+    rewards = moduleRef.get(RewardsService);
+    outbox = moduleRef.get(EventOutbox);
+  }, 120_000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe(
+      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE',
+    );
+  });
+
+  async function seedRoom() {
+    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
+    const room = await db.prisma.room.create({
+      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+    });
+    await db.prisma.membership.create({
+      data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
+    });
+    return { org, room };
+  }
+
+  it('off: createPrize → PRIZES_DISABLED', async () => {
+    const { org, room } = await seedRoom();
+    await expect(rewards.createPrize(room.id, org.id, { name: 'X', quantity: 1 }))
+      .rejects.toMatchObject({ code: 'PRIZES_DISABLED' });
+    expect(await db.prisma.prize.count({ where: { roomId: room.id } })).toBe(0);
+  });
+
+  it('off: award.prize effect отклонён PRIZES_DISABLED, award НЕ создан, quantity не списан', async () => {
+    // Приз сеем напрямую через prisma: createPrize загейчен (кейс выше).
+    const { room } = await seedRoom();
+    const prize = await db.prisma.prize.create({
+      data: { roomId: room.id, name: 'Приз', quantityTotal: 1, quantity: 1 },
+    });
+    const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    await expect(
+      outbox.run((tx) =>
+        rewards.executeEffects(tx, room.id, 'lottery', [
+          { kind: 'award.prize', prizeId: prize.id, winnerId: winner.id },
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: 'PRIZES_DISABLED' });
+    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
+    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
+  });
+
+  it('off: fulfill/revoke существующего award НЕ гейтятся (урегулирование, REQ-RWD-009)', async () => {
+    const { org, room } = await seedRoom();
+    const prize = await db.prisma.prize.create({
+      data: { roomId: room.id, name: 'Приз', quantityTotal: 1, quantity: 0 },
+    });
+    const winner1 = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    const winner2 = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    // Существующие awards (выданные до выключения режима) — напрямую через prisma.
+    const award1 = await db.prisma.award.create({
+      data: { roomId: room.id, prizeId: prize.id, winnerId: winner1.id, sourceAppId: 'lottery' },
+    });
+    const award2 = await db.prisma.award.create({
+      data: { roomId: room.id, prizeId: prize.id, winnerId: winner2.id, sourceAppId: 'lottery' },
+    });
+
+    const fulfilled = await rewards.fulfill(room.id, award1.id, org.id);
+    expect(fulfilled.status).toBe('FULFILLED');
+    const revoked = await rewards.revoke(room.id, award2.id, org.id);
+    expect(revoked.status).toBe('REVOKED');
+    // Список тоже вне гейта: организатор видит оставшиеся награды (REQ-RWD-009).
+    expect(await rewards.listAwards(room.id, org.id)).toHaveLength(2);
   });
 });

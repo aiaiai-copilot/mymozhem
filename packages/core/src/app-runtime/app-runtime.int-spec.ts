@@ -642,7 +642,12 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
         ],
         effects: [effect, effect], // сетевой повтор в одном батче — не отказ
       });
-      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox);
+      // ADR-012 §4 (рулинг C-pre.1): реальный effect-execution — при PRIZE_MODE
+      // 'on', иначе гейт отклонил бы award.prize (PRIZES_DISABLED).
+      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox, {
+        ...TEST_CONFIG,
+        PRIZE_MODE: 'on',
+      });
       const rt = runtimeWith([mod], rewardsHandler);
 
       await rt.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
