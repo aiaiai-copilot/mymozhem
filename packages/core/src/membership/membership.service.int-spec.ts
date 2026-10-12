@@ -88,6 +88,28 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     expect(result.membership.role).toBe('PARTICIPANT');
   });
 
+  it('join без displayName: сервер назначает псевдоним «Слово-NN» (ADR-012 §3, Review Focus 2)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.1' });
+    expect(result.identity.displayName).toMatch(/^[А-ЯЁ][а-яё]+-\d+$/);
+    // JoinResult несёт фактическое имя — то же, что записано в identity.
+    expect(result.displayName).toBe(result.identity.displayName);
+  });
+
+  it('два безымянных гостя получают РАЗНЫЕ псевдонимы в одной комнате', async () => {
+    const room = await roomService.create(ORG);
+    const a = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.2' });
+    const b = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.3' });
+    expect(a.identity.displayName).not.toBe(b.identity.displayName);
+  });
+
+  it('заданное имя проходит без изменений (свободный ввод сохранён)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: 'Маша', ip: '10.0.0.4' });
+    expect(result.identity.displayName).toBe('Маша');
+    expect(result.displayName).toBe('Маша');
+  });
+
   it('stores joinIp on the membership row (REQ-ID-006 rejoin-блок)', async () => {
     const room = await roomService.create(ORG);
     const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });

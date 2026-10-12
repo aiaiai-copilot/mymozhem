@@ -3,7 +3,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
-import { tokenResponseSchema } from '@mymozhem/sdk';
+import { tokenResponseSchema, joinResponseSchema } from '@mymozhem/sdk';
 import {
   AppRegistryService,
   EventEmitLimiter,
@@ -176,7 +176,9 @@ describe('Transport HTTP (e2e)', () => {
       const res = await join(app, { code: room.code, displayName: 'Саша' });
       expect(res.statusCode).toBe(201); // Nest default для POST — пин осознанный
       // Тело валидно по SDK-схеме — контракт на проводе (REQ-SEC-006, REQ-ID-016).
-      const body = tokenResponseSchema.parse(res.json());
+      // ADR-012 §3: ответ join — JoinResponse (TokenResponse + фактический displayName).
+      const body = joinResponseSchema.parse(res.json());
+      expect(body.displayName).toBe('Саша');
       // REQ-ID-008: refresh живёт только в httpOnly-куке, не в теле.
       const setCookie = res.headers['set-cookie'];
       const cookieHeader = (Array.isArray(setCookie) ? setCookie.join('; ') : setCookie) ?? '';
@@ -208,9 +210,19 @@ describe('Transport HTTP (e2e)', () => {
     });
 
     it('невалидное тело → 400 {code: REQUEST_INVALID}', async () => {
-      const res = await join(app, { code: 'ABCDEFGH' }); // нет displayName
+      // ADR-012 §3: отсутствие displayName — НЕ ошибка (сервер назначит псевдоним),
+      // поэтому 400 проверяется на по-настоящему невалидном теле (пустое имя).
+      const res = await join(app, { code: 'ABCDEFGH', displayName: '' });
       expect(res.statusCode).toBe(400);
       expect(res.json()).toEqual({ code: 'REQUEST_INVALID' });
+    });
+
+    it('join без displayName → 201, сервер назначает псевдоним (ADR-012 §3, Review Focus 2)', async () => {
+      const room = await roomService.create(ORG);
+      const res = await join(app, { code: room.code }); // displayName не передан
+      expect(res.statusCode).toBe(201); // 400 быть не должно
+      const body = joinResponseSchema.parse(res.json());
+      expect(body.displayName).toMatch(/^[А-ЯЁ][а-яё]+-\d+$/);
     });
 
     it('refresh happy: ротация; повтор старого → 401 и ревок всего семейства (REQ-ID-007)', async () => {
@@ -382,7 +394,7 @@ describe('Transport HTTP (e2e)', () => {
       const room = await roomService.create(ORG);
       const joinRes = await join(app, { code: room.code, displayName: 'Гость' });
       expect(joinRes.statusCode).toBe(201);
-      const { accessToken } = tokenResponseSchema.parse(joinRes.json());
+      const { accessToken } = joinResponseSchema.parse(joinRes.json());
       const guestId = tokens.verifyAccessToken(accessToken).sub;
       return { room, guestId, guestToken: accessToken };
     }

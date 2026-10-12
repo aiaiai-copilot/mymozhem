@@ -7,6 +7,7 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { PinoLogger } from '../observability/pino-logger.module';
 import { JoinRateLimiter } from './join-rate-limiter';
+import { generatePseudonym } from './pseudonym';
 import {
   ActorNotMemberError,
   ActorNotOrganizerError,
@@ -20,6 +21,9 @@ import {
 export interface JoinResult {
   membership: Membership;
   identity: Identity;
+  // Фактическое имя — заданное гостем или назначенный сервером псевдоним (ADR-012 §3);
+  // join-ответ отдаёт его клиенту для авто-rejoin (потребитель — join-form).
+  displayName: string;
 }
 
 // void | Promise<void>: sync-обработчики (RealtimeGateway.revokeRoomAccess) остаются
@@ -190,16 +194,20 @@ export class MembershipService {
     return rows.map((r) => ({ identityId: r.identityId, kind: r.identity.kind }));
   }
 
-  // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
+  // Guest join by room code (REQ-ID-003; уточнение амендмента v1.5 / ADR-012 §3:
+  // displayName необязателен — безымянному гостю сервер назначает псевдоним).
+  // Порядок проверок значим (design §3):
   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
   // в один ROOM_JOIN_DENIED (REQ-ID-013).
-  async join(params: { code: string; displayName: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
+  async join(params: { code: string; displayName?: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
     if (!this.joinRateLimiter.tryAcquire(params.ip)) {
       throw new JoinRateLimitedError('Join rate limit exceeded');
     }
+    // Ранняя валидация — только заданного имени (до tx); отсутствие имени — не ошибка,
+    // а сигнал к генерации псевдонима внутри tx (ADR-012 §3).
     // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
-    const name = displayNameSchema.parse(params.displayName);
+    const providedName = params.displayName === undefined ? undefined : displayNameSchema.parse(params.displayName);
 
     const room = await this.prisma.room.findUnique({ where: { code: params.code } });
     if (!room) {
@@ -241,6 +249,9 @@ export class MembershipService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // Псевдоним генерируется ВНУТРИ tx: чтение ростера и createGuest в одной
+      // транзакции — retry видит свежие join этого же запроса.
+      const name = providedName ?? generatePseudonym(await this.takenDisplayNames(tx, room.id));
       const identity = await this.identity.createGuest(name, tx);
       const membership = await tx.membership.create({
         data: {
@@ -252,7 +263,17 @@ export class MembershipService {
           role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
         },
       });
-      return { membership, identity };
+      return { membership, identity, displayName: name };
     });
+  }
+
+  // Имена активного ростера комнаты — для retry псевдонима (решение §0.1).
+  // Чтение в той же tx, что и создание гостя: видим свежие join этого запроса.
+  private async takenDisplayNames(tx: Prisma.TransactionClient, roomId: string): Promise<Set<string>> {
+    const rows = await tx.membership.findMany({
+      where: { roomId, deletedAt: null },
+      select: { identity: { select: { displayName: true } } },
+    });
+    return new Set(rows.map((r) => r.identity.displayName).filter((n): n is string => n !== null));
   }
 }
