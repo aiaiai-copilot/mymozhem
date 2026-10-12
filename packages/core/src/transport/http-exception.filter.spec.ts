@@ -12,7 +12,6 @@ import {
   TargetNotExcludableError,
   TargetNotMemberError,
 } from '../membership/membership.errors';
-import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
 import { RoomConflictError, RoomNotConfiguredError, RoomOrganizerNotRegisteredError, RoomSettingsFrozenError, RoomTransitionError } from '../room/room.errors';
 import {
   ActorNotMemberError as RealtimeActorNotMemberError,
@@ -57,15 +56,9 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
     ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
-    // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7): core-код 1:1 в wire,
-    // статус из таблицы маппинга.
-    ['oauth not configured', new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'x'), 503, 'OAUTH_NOT_CONFIGURED'],
-    ['oauth redirect invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'x'), 400, 'OAUTH_REDIRECT_INVALID'],
-    ['oauth state invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'x'), 401, 'OAUTH_STATE_INVALID'],
-    ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
-    ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
-    ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
-    ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
+    // ADR-012 (T5): неверный setup-токен bootstrap'а — ContractError с wire-паритетом,
+    // 401 рядом с SESSION_INVALID; наружу ровно код, без различия «нет токена/неверный».
+    ['organizer setup invalid', new ContractError('ORGANIZER_SETUP_INVALID', 'x'), 401, 'ORGANIZER_SETUP_INVALID'],
     // RoomError — полное покрытие: ROOM_ORGANIZER_NOT_REGISTERED с POST /rooms
     // (REQ-ID-005), остальные — с lifecycle-контура UI-среза (решение №9); коды в
     // wire 1:1 (строковый паритет room.errors.ts), статус 409 — отказ из-за состояния.
@@ -82,6 +75,9 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
     ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
     ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
+    // ADR-012 §4: призовой режим выключен конфигурацией — отказ операции, не
+    // конфликт состояния и не отказ доступа к комнате: 403 рядом с ACTOR_NOT_*.
+    ['prizes disabled', new ContractError('PRIZES_DISABLED', 'x'), 403, 'PRIZES_DISABLED'],
     // Фаза 4 (C-8.1): награждение анонимизированной identity — конфликт состояния.
     ['identity anonymized', new ContractError('IDENTITY_ANONYMIZED', 'x'), 409, 'IDENTITY_ANONYMIZED'],
     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
@@ -160,16 +156,24 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
     });
 
-    it('logs 4xx OAuthError message at warn level (та же норма, что AuthError; message — фиксированные строки + sub)', () => {
-      const err = new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
+    it('logs ORGANIZER_SETUP_INVALID at warn level (ADR-012: брутфорс единственной креденшалы инстанса — security-сигнал переживает {code}-only wire, REQ-SEC-006)', () => {
+      const err = new ContractError('ORGANIZER_SETUP_INVALID', 'setup token mismatch internals');
       const { filter, reply, logger } = makeFilter();
       filter.catch(err, makeHost(reply));
       expect(logger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ requestId: 'req-1' }),
-        'state mismatch or code missing',
+        'organizer setup token mismatch',
       );
       expect(logger.error).not.toHaveBeenCalled();
-      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'OAUTH_STATE_INVALID' });
+      // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
+      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'ORGANIZER_SETUP_INVALID' });
+    });
+
+    it('does not warn-log other ContractError codes (blast radius warn-ветки — ровно ORGANIZER_SETUP_INVALID)', () => {
+      const { filter, reply, logger } = makeFilter();
+      filter.catch(new ContractError('PRIZE_UNKNOWN', 'x'), makeHost(reply));
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     });
 
     it('does not log non-auth 4xx at all', () => {

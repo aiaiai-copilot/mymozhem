@@ -8,8 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
-    "start": "node dist/main.js",
-    "create-room": "node scripts/create-room.mjs"
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

@@ -6,7 +6,7 @@ import type { drawCompletedPayload } from './lottery-events';
 // состояние наград в rewards, история в логе. Использованные drawId хранятся
 // здесь — идемпотентность команды (design §4).
 export interface LotteryState {
-  readonly draws: Readonly<Record<string, { readonly prizeId: string; readonly winnerId: string }>>;
+  readonly draws: Readonly<Record<string, { readonly prizeId: string | null; readonly winnerId: string }>>;
 }
 
 export function initialLotteryState(): LotteryState {

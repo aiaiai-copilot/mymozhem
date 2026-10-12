@@ -6,10 +6,11 @@ import { createPrize, listPrizes } from '../../api/endpoints';
 import { hostClient } from './host-session';
 
 // Попытка розыгрыша: drawId — клиентский uuid, ключ идемпотентности команды
-// lottery.draw.run (манифест app-lottery; дизайн ф.3 §4).
+// lottery.draw.run (манифест app-lottery; дизайн ф.3 §4). prizeId null —
+// безпризовой розыгрыш «Разыграть участника» (ADR-012 §4 / REQ-RWD-002b).
 export interface DrawAttempt {
   drawId: string;
-  prizeId: string;
+  prizeId: string | null;
 }
 
 // Селектор «приз доступен для розыгрыша» (бриф Task 15): остаток фонда > 0.
@@ -48,10 +49,37 @@ export const tryStartDrawAttempt = (
   }
 };
 
+// Безпризовая попытка («Разыграть участника»): приза нет — проверять остаток
+// фонда нечего, гард только pending (та же дисциплина идемпотентности).
+export const startParticipantDrawAttempt = (
+  pending: DrawAttempt | null,
+  makeDrawId: () => string,
+): DrawAttempt | null => {
+  if (pending !== null) return null;
+  return { drawId: makeDrawId(), prizeId: null };
+};
+
+// Тот же перехват синхронного броска crypto.randomUUID(), что tryStartDrawAttempt.
+export const tryStartParticipantDrawAttempt = (
+  pending: DrawAttempt | null,
+  makeDrawId: () => string,
+): { attempt: DrawAttempt | null; error: string | null } => {
+  try {
+    return { attempt: startParticipantDrawAttempt(pending, makeDrawId), error: null };
+  } catch {
+    return { attempt: null, error: DRAW_ID_GENERATION_FAILED };
+  }
+};
+
 // UX-маппинг ошибок REST/publish панели — тот же стиль, что commandErrorText
 // на console-page: человеческий глагол + честный код (REQ-SEC-006).
 const panelErrorText = (e: unknown): string => {
-  if (e instanceof ApiError) return `Действие не выполнено (${e.code}).`;
+  if (e instanceof ApiError) {
+    // Серверный гейт prize_mode=off (ADR-012 §4): клиент режим не знает —
+    // отказ createPrize/draw.run с призом приезжает этим кодом.
+    if (e.code === 'PRIZES_DISABLED') return 'Призовой режим выключен на этом сервере.';
+    return `Действие не выполнено (${e.code}).`;
+  }
   return 'Ошибка сети. Действие не выполнено.';
 };
 
@@ -77,6 +105,7 @@ interface PrizesPanelProps {
 // рефетч; в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
 // lottery.draw.run; результат приезжает draw.completed и виден в <Winners>.
 // draw.completed сам модуль коммитит — клиент его не публикует никогда.
+// ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw (без prizeId).
 export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: PrizesPanelProps) {
   const [prizes, setPrizes] = useState<PrizeResponse[] | null>(null);
   const [name, setName] = useState('');
@@ -148,10 +177,36 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: 
     if (!attempt) return; // повторный клик до ack — не попытка (идемпотентность)
     setPendingDraw(attempt);
     setError(null);
-    void publish('lottery.draw.run', { drawId: attempt.drawId, prizeId: attempt.prizeId })
+    // prizeId типизирован nullable (общий DrawAttempt), но призовая попытка его
+    // всегда несёт; null на wire недопустим (drawRunPayload: uuid optional) —
+    // шлём ключ только при наличии.
+    void publish(
+      'lottery.draw.run',
+      attempt.prizeId === null
+        ? { drawId: attempt.drawId }
+        : { drawId: attempt.drawId, prizeId: attempt.prizeId },
+    )
       .catch((e: unknown) => setError(panelErrorText(e)))
       // Ack ИЛИ ошибка — попытка завершена, кнопка снова доступна; результат
       // приезжает отдельно публичным draw.completed, его здесь не ждём.
+      .finally(() => setPendingDraw(null));
+  };
+
+  // Безпризовой розыгрыш (ADR-012 §4): publish БЕЗ prizeId — тот же
+  // tryStartDrawAttempt-паттерн (pending-гард, crypto.randomUUID).
+  const runParticipantDraw = () => {
+    const { attempt, error: startError } = tryStartParticipantDrawAttempt(pendingDraw, () =>
+      crypto.randomUUID(),
+    );
+    if (startError) {
+      setError(startError);
+      return;
+    }
+    if (!attempt) return;
+    setPendingDraw(attempt);
+    setError(null);
+    void publish('lottery.draw.run', { drawId: attempt.drawId })
+      .catch((e: unknown) => setError(panelErrorText(e)))
       .finally(() => setPendingDraw(null));
   };
 
@@ -184,6 +239,21 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: 
           Добавить приз
         </button>
       </form>
+      {/* ADR-012 §4: создание приза — юридическая ответственность организатора
+          (лотереи, налоги). Текст виден всегда: клиент режим не знает, серверный
+          гейт отвечает PRIZES_DISABLED при prize_mode=off. */}
+      <p>Призовой режим — юридическая ответственность организатора (лотереи, налоги).</p>
+      {isLottery ? (
+        <p>
+          <button
+            type="button"
+            disabled={disabled || pendingDraw !== null}
+            onClick={runParticipantDraw}
+          >
+            Разыграть участника
+          </button>
+        </p>
+      ) : null}
       {prizes === null ? <p>Загружаем призы…</p> : null}
       {prizes !== null && prizes.length === 0 ? <p>Призов пока нет.</p> : null}
       {prizes !== null && prizes.length > 0 ? (

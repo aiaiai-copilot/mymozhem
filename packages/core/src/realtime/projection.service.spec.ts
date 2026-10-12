@@ -20,7 +20,7 @@ const events = [
 const MANIFEST: AppManifest = {
   appId: 'quiz',
   manifestVersion: 1,
-  contractRange: '^1.0.0',
+  contractRange: '^2.0.0',
   appSettings: {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     type: 'object',

@@ -12,6 +12,13 @@ describe('joinRequest contract (REQ-ID-003)', () => {
     expect(joinRequestSchema.parse({ code: 'ABCDEFGH', displayName: '  Alex  ' }).displayName).toBe('Alex');
   });
 
+  // ADR-012 §3 / REQ-ID-003: имя необязательно — при отсутствии сервер назначает псевдоним.
+  it('accepts join without displayName (сервер назначит псевдоним)', () => {
+    const parsed = joinRequestSchema.safeParse({ code: 'ABCDEFGH' });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.displayName).toBeUndefined();
+  });
+
   it('accepts explicit spectator role', () => {
     expect(joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' }).success).toBe(true);
   });

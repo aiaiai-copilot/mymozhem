@@ -1,9 +1,15 @@
 import { useState, type FormEvent } from 'react';
-import { DISPLAY_NAME_MAX_LENGTH } from '@mymozhem/sdk';
+import { DISPLAY_NAME_MAX_LENGTH, type JoinRequest } from '@mymozhem/sdk';
 import { ApiError } from '../../api/api-error';
 import type { ApiClient } from '../../api/api-client';
 import { joinRoom } from '../../api/endpoints';
 import { decodeAccessClaims, SessionStore } from '../../state/session';
+
+// Тело join (ADR-012 §3): имя необязательно — пустое уходит БЕЗ ключа
+// displayName (пустая строка не прошла бы displayNameSchema.min(1)), сервер
+// назначит псевдоним и вернёт фактическое имя в ответе.
+export const buildJoinRequest = (code: string, trimmedName: string): JoinRequest =>
+  trimmedName ? { code, displayName: trimmedName } : { code };
 
 interface JoinFormProps {
   // Код из URL (:code): ссылка-приглашение — код показываем read-only, вводить
@@ -52,13 +58,15 @@ export function JoinForm({
     e.preventDefault();
     const trimmedCode = code.trim();
     const trimmedName = displayName.trim();
-    if (!trimmedCode || !trimmedName) {
-      setError('Введите код комнаты и имя.');
+    // Имя не обязательно (ADR-012 §3) — пустое уходит без displayName, сервер
+    // назначит псевдоним; обязателен только код комнаты.
+    if (!trimmedCode) {
+      setError('Введите код комнаты.');
       return;
     }
     setBusy(true);
     setError(null);
-    void joinRoom(client, { code: trimmedCode, displayName: trimmedName })
+    void joinRoom(client, buildJoinRequest(trimmedCode, trimmedName))
       .then((res) => {
         session.setAccessToken(res.accessToken);
         // roomId — только из claims токена (REQ-RT-009 по смыслу: идентичность —
@@ -69,7 +77,8 @@ export function JoinForm({
           return;
         }
         // Переживающая перезагрузку идентификация (дизайн §5): код+имя, не токен.
-        SessionStore.saveGuest({ code: trimmedCode, displayName: trimmedName });
+        // Сохраняем ФАКТИЧЕСКОЕ имя из ответа — оно могло быть псевдонимом.
+        SessionStore.saveGuest({ code: trimmedCode, displayName: res.displayName });
         onJoined(claims.roomId);
       })
       .catch((err: unknown) => setError(joinErrorText(err)))
@@ -95,11 +104,12 @@ export function JoinForm({
         </label>
       )}
       <label>
-        Ваше имя
+        Ваше имя (необязательно)
         <input
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
           maxLength={DISPLAY_NAME_MAX_LENGTH}
+          placeholder="Получите псевдоним, если пусто"
           autoComplete="off"
           disabled={busy}
         />

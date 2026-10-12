@@ -48,8 +48,11 @@ import { IdentityModule } from './identity.module';
 })
 class TestAnonymizationWiringModule {}
 
+// ADR-012: identity."Identity" тоже транкейтится — иначе REGISTERED-сиды тестов
+// накапливались бы и упирались в "Identity_single_registered_key" (один живой
+// REGISTERED на инстанс). Каждый тест сеет свои identity-строки сам.
 const TRUNCATE =
-  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE';
+  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE';
 
 describe('GuestSweepService (int, REQ-ID-003/014)', () => {
   let db: TestDb;
@@ -168,8 +171,10 @@ describe('GuestSweepService — приостановка при открытой
         TestAnonymizationWiringModule,
       ],
     })
+      // ADR-012 §4 (принцип рулинга C-pre.1): сьют исполняет эффект award.prize
+      // через RewardsService — призовый путь, работает при PRIZE_MODE='on'.
       .overrideProvider(APP_CONFIG)
-      .useValue(TEST_CONFIG)
+      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
       .compile();
     await moduleRef.init();
     sweep = moduleRef.get(GuestSweepService);
@@ -342,5 +347,122 @@ describe('GuestSweepService — окно гонки C-8.1: re-check откаты
     expect(after.deletedAt).toBeNull(); // свип откачен — REQ-RWD-013 победил
     const award = await db.prisma.award.findFirst({ where: { winnerId: target.winnerId, status: 'AWARDED' } });
     expect(award).not.toBeNull(); // «конкурирующая» награда — на месте
+  });
+});
+
+describe('ADR-012 §3: IP не живёт дольше события + guest_ttl', () => {
+  // Гард-фейк с управляемым множеством «открытых award» (по образцу guard-тестов
+  // этого файла): реальный RewardsModule не нужен — проверяется реакция свипа на
+  // приостановку, а не сама гарда (её логика покрыта сьютом REQ-RWD-013 выше).
+  class FakeGuard implements AnonymizationGuard {
+    readonly open = new Set<string>();
+    hasOpenAwards(_tx: Prisma.TransactionClient, ids: readonly string[]): Promise<Set<string>> {
+      return Promise.resolve(new Set(ids.filter((id) => this.open.has(id))));
+    }
+  }
+  const fakeGuard = new FakeGuard();
+
+  @Global()
+  @Module({
+    providers: [{ provide: ANONYMIZATION_GUARDS, useValue: [fakeGuard] }],
+    exports: [ANONYMIZATION_GUARDS],
+  })
+  class TestFakeGuardWiringModule {}
+
+  let db: TestDb;
+  let sweep: GuestSweepService;
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    const moduleRef = await Test.createTestingModule({
+      imports: [ConfigModule, PrismaModule, IdentityModule, TestFakeGuardWiringModule],
+    })
+      .overrideProvider(APP_CONFIG)
+      .useValue(TEST_CONFIG)
+      .compile();
+    await moduleRef.init();
+    sweep = moduleRef.get(GuestSweepService);
+  }, 120_000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    fakeGuard.open.clear();
+    await db.prisma.$executeRawUnsafe(TRUNCATE);
+  });
+
+  // Комната с организатором (одна на тест — "Identity_single_registered_key"
+  // запрещает второго живого REGISTERED) + гость с membership.joinIp и
+  // (опционально) Exclusion; expired — бэкдейт createdAt за GUEST_TTL (86400 с).
+  async function seedRoom() {
+    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
+    const room = await db.prisma.room.create({
+      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+    });
+    return { org, room };
+  }
+
+  async function seedGuestWithIp(
+    room: { id: string },
+    org: { id: string },
+    opts: { expired: boolean; ip: string; excluded?: boolean },
+  ) {
+    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+    if (opts.expired) {
+      await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
+    }
+    await db.prisma.membership.create({
+      data: { roomId: room.id, identityId: guest.id, role: 'PARTICIPANT', joinIp: opts.ip },
+    });
+    if (opts.excluded) {
+      await db.prisma.exclusion.create({
+        data: { roomId: room.id, identityId: guest.id, ip: opts.ip, excludedBy: org.id },
+      });
+    }
+    return guest;
+  }
+
+  it('свип обнуляет joinIp членств и удаляет Exclusion свипнутой identity', async () => {
+    const { org, room } = await seedRoom();
+    const guest = await seedGuestWithIp(room, org, { expired: true, ip: '10.1.2.3', excluded: true });
+    // Контрольная группа: свежий гость (createdAt > cutoff) в той же комнате.
+    const freshGuest = await seedGuestWithIp(room, org, { expired: false, ip: '10.9.9.9' });
+
+    const swept = await sweep.sweepExpiredGuests(new Date());
+
+    expect(swept).toBe(1);
+    const membership = await db.prisma.membership.findUniqueOrThrow({
+      where: { roomId_identityId: { roomId: room.id, identityId: guest.id } },
+    });
+    expect(membership.joinIp).toBeNull();
+    expect(await db.prisma.exclusion.count({ where: { identityId: guest.id } })).toBe(0);
+    // Живой контур не тронут (REQ-ID-006): IP свежего гостя на месте.
+    const fresh = await db.prisma.membership.findFirstOrThrow({ where: { identityId: freshGuest.id } });
+    expect(fresh.joinIp).toBe('10.9.9.9');
+  });
+
+  it('приостановленная гардой identity (открытый award) сохраняет joinIp и Exclusion до следующего свипа', async () => {
+    const { org, room } = await seedRoom();
+    const guest = await seedGuestWithIp(room, org, { expired: true, ip: '10.1.2.3', excluded: true });
+    fakeGuard.open.add(guest.id);
+
+    expect(await sweep.sweepExpiredGuests(new Date())).toBe(0);
+
+    let membership = await db.prisma.membership.findUniqueOrThrow({
+      where: { roomId_identityId: { roomId: room.id, identityId: guest.id } },
+    });
+    expect(membership.joinIp).toBe('10.1.2.3');
+    expect(await db.prisma.exclusion.count({ where: { identityId: guest.id } })).toBe(1);
+
+    // «Award разрешён» — следующий проход свипа анонимизирует и чистит IP-след.
+    fakeGuard.open.clear();
+    expect(await sweep.sweepExpiredGuests(new Date())).toBe(1);
+    membership = await db.prisma.membership.findUniqueOrThrow({
+      where: { roomId_identityId: { roomId: room.id, identityId: guest.id } },
+    });
+    expect(membership.joinIp).toBeNull();
+    expect(await db.prisma.exclusion.count({ where: { identityId: guest.id } })).toBe(0);
   });
 });

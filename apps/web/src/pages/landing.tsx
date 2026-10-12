@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
-// Лендинг (дизайн Task 13): два входа. Организатор — полная перезагрузка страницы
-// на /auth/google (backend владеет /auth, router Link здесь не подходит);
-// участник — по коду комнаты в /play.
+// Лендинг (дизайн Task 13): два входа. Организатор — страница ввода setup-токена
+// инстанса (ADR-012 §2; router-Link уместен: полная перезагрузка нужна была
+// только OAuth-флоу); участник — по коду комнаты в /play.
 export function LandingPage() {
   const navigate = useNavigate();
   const [code, setCode] = useState('');
@@ -23,19 +23,7 @@ export function LandingPage() {
       <section>
         <h2>Я организатор</h2>
         <p>
-          {/* redirect обязан быть АБСОЛЮТНЫМ URL: серверный allowlist
-              (OAUTH_REDIRECT_ALLOWLIST, REQ-ID-009) парсится как z.url() и
-              сверяется точным совпадением строки (OAuthService.validateRedirect)
-              — относительный '/host' не пройдёт ни при одной конфигурации.
-              Same-origin по дизайну §0.3, поэтому origin берём из location. */}
-          <a
-            href={
-              '/auth/google?redirect=' +
-              encodeURIComponent(`${window.location.origin}/host`)
-            }
-          >
-            Войти через Google
-          </a>
+          <Link to="/host/login">Войти по токену организатора</Link>
         </p>
       </section>
       <section>

@@ -2,8 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, type Identity } from '@prisma/client';
 import { displayNameSchema } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
-import { IDENTITY_ERROR_CODES, IdentityError } from './identity.errors';
 
+// Инвариант «change all or none» (трёх мест): предикат
+// kind='REGISTERED' AND deletedAt IS NULL — partial index "Identity_single_registered_key"
+// (миграция), guarded create в findOrCreateOrganizer (T5) и WHERE EXISTS в
+// RoomService.insertRoom (REQ-ID-005). Менять только вместе.
 @Injectable()
 export class IdentityService {
   constructor(private readonly prisma: PrismaService) {}
@@ -22,67 +25,25 @@ export class IdentityService {
     return tx.identity.create({ data: { kind: 'GUEST', displayName: name } });
   }
 
-  // REQ-ID-015: логин/регистрация по (provider, subject). Self-contained транзакция:
-  // retry при гонке несовместим с чужой (поэтому без tx-параметра, в отличие от createGuest).
-  // Email-политика (решение владельца, design §0.3): email пишется один раз при создании,
-  // автолинка по email НЕТ — конфликт с живым REGISTERED → EMAIL_CONFLICT.
-  //
-  // Инвариант «change both or neither» (теперь трёх мест): предикат
-  // kind='REGISTERED' AND deletedAt IS NULL — partial index "Identity_registered_email_key",
-  // guarded INSERT RoomService.create и проверка конфликта ниже. Менять только вместе.
-  async findOrCreateByProvider(input: {
-    provider: string;
-    subject: string;
-    email: string;
-    displayName?: string | undefined;
-  }): Promise<Identity> {
-    const where = { provider_subject: { provider: input.provider, subject: input.subject } };
-    const existing = await this.prisma.identityProvider.findUnique({
-      where,
-      include: { identity: true },
+  // ADR-012 §2: единственный REGISTERED инстанса, email = NULL. Гонка первых
+  // bootstrap'ов: проигравший ловит P2002 от "Identity_single_registered_key" и
+  // перечитывает победителя. create ВНЕ $transaction — catch P2002 не отравляет
+  // чужую tx (ловушка aborted-tx). Инвариант — см. комментарий у шапки сервиса.
+  async findOrCreateOrganizer(): Promise<Identity> {
+    const existing = await this.prisma.identity.findFirst({
+      where: { kind: 'REGISTERED', deletedAt: null },
     });
-    if (existing) {
-      if (existing.identity.deletedAt !== null) {
-        throw new IdentityError(
-          IDENTITY_ERROR_CODES.PROVIDER_IDENTITY_GONE,
-          `identity ${existing.identityId} deleted`,
-        );
-      }
-      return existing.identity;
-    }
-    const conflict = await this.prisma.identity.findFirst({
-      where: { kind: 'REGISTERED', deletedAt: null, email: { equals: input.email, mode: 'insensitive' } },
-    });
-    if (conflict) {
-      // Гонка первого логина, вторая форма: близнец закоммитился между нашим первым
-      // findUnique и этой проверкой — тогда конфликтующая identity наша собственная,
-      // и это повторный логин, а не чужой email (design §4). Read committed гарантирует:
-      // раз identity победителя видна, его provider-строка тоже закоммичена.
-      const twin = await this.prisma.identityProvider.findUnique({ where, include: { identity: true } });
-      if (twin && twin.identity.deletedAt === null) return twin.identity;
-      throw new IdentityError(
-        IDENTITY_ERROR_CODES.EMAIL_CONFLICT,
-        `email taken by identity ${conflict.id}`,
-      );
-    }
-    const parsedName = input.displayName === undefined ? null : displayNameSchema.safeParse(input.displayName);
-    const displayName = parsedName === null ? null : parsedName.success ? parsedName.data : null;
+    if (existing) return existing;
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        const identity = await tx.identity.create({
-          data: { kind: 'REGISTERED', email: input.email, displayName },
-        });
-        await tx.identityProvider.create({
-          data: { provider: input.provider, subject: input.subject, email: input.email, identityId: identity.id },
-        });
-        return identity;
+      return await this.prisma.identity.create({
+        data: { kind: 'REGISTERED', displayName: 'Организатор' },
       });
     } catch (err) {
-      // Гонка двух первых логинов одного аккаунта: проигравший ловит P2002 по
-      // (provider, subject) и превращается в повторный логин (design §4).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        const winner = await this.prisma.identityProvider.findUnique({ where, include: { identity: true } });
-        if (winner) return winner.identity;
+        const winner = await this.prisma.identity.findFirst({
+          where: { kind: 'REGISTERED', deletedAt: null },
+        });
+        if (winner) return winner;
       }
       throw err;
     }

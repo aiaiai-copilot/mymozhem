@@ -33,3 +33,11 @@ export class IdentityAnonymizedError extends ContractError {
     super('IDENTITY_ANONYMIZED', `identity ${identityId} is anonymized or unknown — prize would be orphaned`);
   }
 }
+
+// ADR-012 §4: призовой режим выключен конфигурацией (дефолт). Не гейтятся:
+// fulfill/revoke/list — урегулирование существующих awards (REQ-RWD-009).
+export class PrizesDisabledError extends ContractError {
+  constructor() {
+    super('PRIZES_DISABLED', 'prize mode is off (ADR-012)');
+  }
+}

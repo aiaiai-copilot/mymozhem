@@ -36,7 +36,7 @@ describe('registerManifest', () => {
   });
 
   it('rejects a range excluding the running version as CONTRACT_VERSION_INCOMPATIBLE', () => {
-    const manifest = { ...validManifests[0], contractRange: '^2.0.0' };
+    const manifest = { ...validManifests[0], contractRange: '^1.0.0' };
     expect(catchCode(() => registerManifest(manifest))).toBe('CONTRACT_VERSION_INCOMPATIBLE');
   });
 

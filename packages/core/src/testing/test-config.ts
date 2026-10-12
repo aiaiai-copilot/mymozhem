@@ -23,10 +23,10 @@ export const TEST_CONFIG: AppConfig = {
   RECONNECT_RATE_LIMIT_PER_MIN: 10,
   TRUST_PROXY: false,
   CORS_ORIGINS: [],
-  // Google-секция опциональна (all-or-none) — в тестовом конфиге отсутствует.
-  OAUTH_STATE_TTL: 600,
-  OAUTH_RATE_LIMIT: 10,
-  OAUTH_REDIRECT_ALLOWLIST: [],
+  // ADR-012: bootstrap организатора и призовой режим (тестовые значения инертны).
+  ORGANIZER_SETUP_TOKEN: 'test-only-organizer-setup-token!!',
+  ORGANIZER_RATE_LIMIT: 10,
+  PRIZE_MODE: 'off',
   LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
 };
 

@@ -43,7 +43,9 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
+    // ADR-012: второй живой REGISTERED в одной БД запрещён ("Identity_single_registered_key")
+    // — участник P1 посеян гостем; тесты ниже kind-агностичны (raw membership + lookup).
+    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST', email: 'p1@example.test' });
     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
@@ -84,6 +86,28 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     expect(result.membership.roomId).toBe(room.id);
     expect(result.membership.identityId).toBe(result.identity.id);
     expect(result.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('join без displayName: сервер назначает псевдоним «Слово-NN» (ADR-012 §3, Review Focus 2)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.1' });
+    expect(result.identity.displayName).toMatch(/^[А-ЯЁ][а-яё]+-\d+$/);
+    // JoinResult несёт фактическое имя — то же, что записано в identity.
+    expect(result.displayName).toBe(result.identity.displayName);
+  });
+
+  it('два безымянных гостя получают РАЗНЫЕ псевдонимы в одной комнате', async () => {
+    const room = await roomService.create(ORG);
+    const a = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.2' });
+    const b = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.3' });
+    expect(a.identity.displayName).not.toBe(b.identity.displayName);
+  });
+
+  it('заданное имя проходит без изменений (свободный ввод сохранён)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: 'Маша', ip: '10.0.0.4' });
+    expect(result.identity.displayName).toBe('Маша');
+    expect(result.displayName).toBe('Маша');
   });
 
   it('stores joinIp on the membership row (REQ-ID-006 rejoin-блок)', async () => {
@@ -297,10 +321,20 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       const swept = await service.join({ code: room.code, displayName: 'Сметённый', ip: IP2 });
       // Свип (GuestSweepService) анонимизирует identity строкой deletedAt + displayName=null,
       // membership гостя остаётся живым — без фильтра по identity swept-гость попадает в пул.
+      // Симуляция синхронизирована с реальным свипом (ADR-012 §3): тот же набор —
+      // joinIp=null на членствах и удаление Exclusion swept-identity. Реальный
+      // sweepExpiredGuests здесь не подходит: он выбирает по TTL от createdAt и
+      // смёл бы ОБОИХ свежесозданных гостей (и посеянного в beforeAll P1-GUEST),
+      // а тесту нужен ровно один swept-гость.
       await db.prisma.identity.update({
         where: { id: swept.identity.id },
         data: { deletedAt: new Date(), displayName: null },
       });
+      await db.prisma.membership.updateMany({
+        where: { identityId: swept.identity.id },
+        data: { joinIp: null },
+      });
+      await db.prisma.exclusion.deleteMany({ where: { identityId: swept.identity.id } });
       const pool = await service.listActiveParticipantPool(room.id);
       expect(pool.map((p) => p.identityId)).toEqual([alive.identity.id]);
     });
@@ -427,21 +461,10 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
     expect(sessions[0].revokedAt).not.toBeNull();
   });
 
-  it('REGISTERED-цель сохраняет сессии (дизайн §0.2)', async () => {
-    const room = await roomService2.create(ORG);
-    const registered = await seedIdentity(db2.prisma, { kind: 'REGISTERED', email: 'reg@example.test' });
-    await db2.prisma.membership.create({
-      data: { roomId: room.id, identityId: registered.id, role: 'PARTICIPANT', joinIp: IP },
-    });
-    const tokens = new TokenService(db2.prisma, TEST_CONFIG);
-    await tokens.issueGuestTokens(registered.id, room.id); // session row kind-агностичен
-
-    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: registered.id, actorId: ORG });
-
-    const sessions = await db2.prisma.session.findMany({ where: { identityId: registered.id } });
-    expect(sessions[0].revokedAt).toBeNull();
-  });
-
+  // ADR-012: сценарий «REGISTERED-цель сохраняет сессии» (дизайн §0.2) удалён —
+  // второй живой REGISTERED непредставим ("Identity_single_registered_key":
+  // единственный REGISTERED — организатор, а он неисключаем). Ветка
+  // kind !== 'GUEST' в MembershipService.exclude сохранена до возврата аккаунтов.
   it('актор-не-член → ActorNotMemberError', async () => {
     const { room, guest } = await roomWithGuest();
     await expect(

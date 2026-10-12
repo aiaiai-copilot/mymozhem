@@ -4,7 +4,7 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
 import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
-import { tokenResponseSchema, REALTIME_MESSAGES, type AppManifest, type AppRuntimeModule } from '@mymozhem/sdk';
+import { joinResponseSchema, REALTIME_MESSAGES, type AppManifest, type AppRuntimeModule } from '@mymozhem/sdk';
 import {
   APP_MANIFESTS,
   APP_RUNTIME_MODULES,
@@ -42,7 +42,7 @@ const ORG = '00000000-0000-4000-8000-000000000001';
 const TEST_APP: AppManifest = {
   appId: 'test-app',
   manifestVersion: 1,
-  contractRange: '^1.0.0',
+  contractRange: '^2.0.0',
   appSettings: {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     type: 'object',
@@ -224,7 +224,7 @@ describe('Realtime (e2e)', () => {
       payload: { code: room.code, displayName: 'Гостя' },
     });
     expect(res.statusCode).toBe(201);
-    const { accessToken } = tokenResponseSchema.parse(res.json());
+    const { accessToken } = joinResponseSchema.parse(res.json());
     return { room, accessToken };
   }
 
@@ -447,7 +447,7 @@ describe('Realtime (e2e)', () => {
       payload: { code: room.code, displayName: 'Гостя' },
     });
     expect(joinRes.statusCode).toBe(201);
-    const { accessToken } = tokenResponseSchema.parse(joinRes.json());
+    const { accessToken } = joinResponseSchema.parse(joinRes.json());
     const refreshCookie = joinRes.cookies.find((c) => c.name === 'mm_refresh');
     expect(refreshCookie).toBeDefined();
     const participantId = tokens.verifyAccessToken(accessToken).sub;

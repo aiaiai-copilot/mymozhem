@@ -26,19 +26,14 @@ import { RoomsLifecycleController } from './rooms-lifecycle.controller';
 const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
 
 // Зеркало appSettings реальной лотереи (packages/app-lottery/src/lottery-settings.ts):
-// единственный ключ defaulted → {} проходит verdict-only гейт (P1: toRegisteredSchema
-// в io:'input', REQ-RWD-014). Прямой импорт app-пакета ядру запрещён boundary-правилом,
+// v2 (ADR-012) — draw_eligibility удалена, схема пуста; {} проходит verdict-only
+// гейт (REQ-CORE-007). Прямой импорт app-пакета ядру запрещён boundary-правилом,
 // поэтому манифест собираем через defineApp — тем же путём, что само приложение.
 const lotteryManifest = defineApp({
   appId: 'lottery',
-  manifestVersion: 1,
+  manifestVersion: 2,
   capabilities: ['rewards'],
-  appSettings: z.strictObject({
-    drawEligibility: z
-      .enum(['guests_allowed', 'verified'])
-      .default('guests_allowed')
-      .meta({ 'x-visibility': 'public' }),
-  }),
+  appSettings: z.strictObject({}),
   events: {},
 });
 
@@ -126,13 +121,13 @@ describe('RoomsLifecycleController (int)', () => {
     expect(reread.appSettings).toEqual(QUIZ_SETTINGS);
   });
 
-  it('configure with {} for lottery app passes the gate (P1 end-to-end, REQ-RWD-014)', async () => {
+  it('configure with {} for lottery app passes the gate (ADR-012: appSettings лотереи v2 пусты)', async () => {
     const { room, token } = await orgRoom();
     const res = await app.inject({
       method: 'POST',
       url: `/rooms/${room.id}/configure`,
       headers: auth(token),
-      payload: { appId: 'lottery', manifestVersion: 1, settings: {} },
+      payload: { appId: 'lottery', manifestVersion: 2, settings: {} },
     });
     expect(res.statusCode).toBe(200);
     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });

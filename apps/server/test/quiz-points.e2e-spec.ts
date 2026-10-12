@@ -4,7 +4,7 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
 import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
-import { REALTIME_MESSAGES, tokenResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
+import { REALTIME_MESSAGES, joinResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
 import { QUIZ_APP_ID, QUIZ_MANIFEST_VERSION, type QuizSettings } from '@mymozhem/app-quiz';
 import {
   ConfigurableIoAdapter,
@@ -193,7 +193,7 @@ describe('Quiz points ↔ rewards ledger (e2e, приёмка фазы 3)', () =
       payload: { code: roomCode, displayName: name },
     });
     expect(res.statusCode).toBe(201);
-    const { accessToken } = tokenResponseSchema.parse(res.json());
+    const { accessToken } = joinResponseSchema.parse(res.json());
     const identityId = tokens.verifyAccessToken(accessToken).sub;
     return { socket: await connect(port, accessToken), token: accessToken, identityId };
   }

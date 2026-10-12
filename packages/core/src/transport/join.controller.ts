@@ -1,5 +1,5 @@
 import { Body, Controller, Inject, Post, Req, Res } from '@nestjs/common';
-import { joinRequestSchema, type TokenResponse } from '@mymozhem/sdk';
+import { joinRequestSchema, type JoinResponse } from '@mymozhem/sdk';
 import { MembershipService } from '../membership/membership.service';
 import { TokenService } from '../auth/token.service';
 import { APP_CONFIG } from '../config/config.tokens';
@@ -23,11 +23,18 @@ export class JoinController {
     @Body() body: unknown,
     @Req() req: RequestLike,
     @Res({ passthrough: true }) reply: ReplyLike,
-  ): Promise<TokenResponse> {
+  ): Promise<JoinResponse> {
     const { code, displayName, role } = joinRequestSchema.parse(body);
-    const { identity, membership } = await this.membership.join({ code, displayName, role, ip: req.ip });
-    const issued = await this.tokens.issueGuestTokens(identity.id, membership.roomId);
+    const result = await this.membership.join({ code, displayName, role, ip: req.ip });
+    const issued = await this.tokens.issueGuestTokens(result.identity.id, result.membership.roomId);
     setRefreshCookie(reply, issued.refreshToken, this.config, issued.kind);
-    return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
+    // displayName — фактический (заданный или серверный псевдоним, ADR-012 §3):
+    // клиент сохраняет его для авто-rejoin (потребитель — join-form).
+    return {
+      accessToken: issued.accessToken,
+      tokenType: 'Bearer',
+      expiresIn: issued.expiresIn,
+      displayName: result.displayName,
+    };
   }
 }

@@ -38,7 +38,7 @@ const racerId = (i: number) => `00000000-0000-0000-0000-00000000ac${i.toString(1
 const TEST_APP: AppManifest = {
   appId: 'test-app',
   manifestVersion: 1,
-  contractRange: '^1.0.0',
+  contractRange: '^2.0.0',
   appSettings: {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     type: 'object',
@@ -642,7 +642,12 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
         ],
         effects: [effect, effect], // сетевой повтор в одном батче — не отказ
       });
-      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox);
+      // ADR-012 §4 (рулинг C-pre.1): реальный effect-execution — при PRIZE_MODE
+      // 'on', иначе гейт отклонил бы award.prize (PRIZES_DISABLED).
+      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox, {
+        ...TEST_CONFIG,
+        PRIZE_MODE: 'on',
+      });
       const rt = runtimeWith([mod], rewardsHandler);
 
       await rt.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });

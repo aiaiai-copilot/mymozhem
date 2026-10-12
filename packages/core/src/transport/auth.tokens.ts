@@ -2,7 +2,6 @@
 // с join-лимитером.
 export const REFRESH_RATE_LIMITER = Symbol('REFRESH_RATE_LIMITER');
 
-// Отдельные инстансы лимитеров для OAuth-эндпоинтов (REQ-SEC-007): start и callback
-// не делят состояние ни между собой, ни с join/refresh.
-export const OAUTH_START_RATE_LIMITER = Symbol('OAUTH_START_RATE_LIMITER');
-export const OAUTH_CALLBACK_RATE_LIMITER = Symbol('OAUTH_CALLBACK_RATE_LIMITER');
+// ADR-012 (T5): отдельный инстанс лимитера для POST /auth/organizer (REQ-SEC-007,
+// §4 login_rate_limit) — не делит состояние ни с join-, ни с refresh-лимитером.
+export const ORGANIZER_BOOTSTRAP_RATE_LIMITER = Symbol('ORGANIZER_BOOTSTRAP_RATE_LIMITER');

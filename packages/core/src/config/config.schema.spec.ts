@@ -1,6 +1,10 @@
 import { configSchema, loadConfig } from './config.schema';
 
-const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db', JWT_SECRET: 's'.repeat(32) };
+const base = {
+  DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+  JWT_SECRET: 's'.repeat(32),
+  ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
+};
 
 describe('loadConfig', () => {
   it('applies defaults when only DATABASE_URL is provided', () => {
@@ -53,7 +57,10 @@ describe('loadConfig', () => {
 
   it('rejects a missing JWT_SECRET (REQ-SEC-002)', () => {
     expect(() =>
-      loadConfig({ DATABASE_URL: base.DATABASE_URL } as NodeJS.ProcessEnv),
+      loadConfig({
+        DATABASE_URL: base.DATABASE_URL,
+        ORGANIZER_SETUP_TOKEN: base.ORGANIZER_SETUP_TOKEN,
+      } as NodeJS.ProcessEnv),
     ).toThrow(/JWT_SECRET/);
   });
 
@@ -73,41 +80,33 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, REFRESH_TOKEN_TTL: '8000000' } as NodeJS.ProcessEnv)).toThrow(/REFRESH_TOKEN_TTL/);
   });
 
-  it('accepts absent Google section (optional, design §8)', () => {
-    const cfg = loadConfig(base as NodeJS.ProcessEnv);
-    expect(cfg.GOOGLE_CLIENT_ID).toBeUndefined();
-    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual([]);
-    expect(cfg.OAUTH_STATE_TTL).toBe(600);
-    expect(cfg.OAUTH_RATE_LIMIT).toBe(10);
-  });
+  describe('ADR-012 параметры', () => {
+    it('requires ORGANIZER_SETUP_TOKEN (fail-fast, образец JWT_SECRET/REQ-SEC-002)', () => {
+      expect(() =>
+        loadConfig({
+          DATABASE_URL: base.DATABASE_URL,
+          JWT_SECRET: base.JWT_SECRET,
+        } as NodeJS.ProcessEnv),
+      ).toThrow(/ORGANIZER_SETUP_TOKEN/);
+    });
 
-  it('rejects partial Google section (all-or-none, REQ-OPS-003)', () => {
-    expect(() => loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id' } as NodeJS.ProcessEnv)).toThrow(/GOOGLE/);
-    expect(() =>
-      loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 's' } as NodeJS.ProcessEnv),
-    ).toThrow(/GOOGLE/);
-  });
+    it('rejects ORGANIZER_SETUP_TOKEN shorter than 32 bytes', () => {
+      expect(() =>
+        loadConfig({ ...base, ORGANIZER_SETUP_TOKEN: 'short' } as NodeJS.ProcessEnv),
+      ).toThrow(/ORGANIZER_SETUP_TOKEN/);
+    });
 
-  it('requires non-empty OAUTH_REDIRECT_ALLOWLIST when Google is configured (REQ-ID-009)', () => {
-    expect(() =>
-      loadConfig({
-        ...base,
-        GOOGLE_CLIENT_ID: 'id',
-        GOOGLE_CLIENT_SECRET: 's',
-        OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
-      } as NodeJS.ProcessEnv),
-    ).toThrow(/OAUTH_REDIRECT_ALLOWLIST/);
-  });
+    it('defaults PRIZE_MODE to off and ORGANIZER_RATE_LIMIT to 10', () => {
+      const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+      expect(cfg.PRIZE_MODE).toBe('off');
+      expect(cfg.ORGANIZER_RATE_LIMIT).toBe(10);
+    });
 
-  it('parses full Google section and allowlist transform', () => {
-    const cfg = loadConfig({
-      ...base,
-      GOOGLE_CLIENT_ID: 'id',
-      GOOGLE_CLIENT_SECRET: 's',
-      OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
-      OAUTH_REDIRECT_ALLOWLIST: 'http://localhost:3000/app, http://localhost:3000/other',
-    } as NodeJS.ProcessEnv);
-    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual(['http://localhost:3000/app', 'http://localhost:3000/other']);
+    it('accepts PRIZE_MODE=on', () => {
+      expect(
+        loadConfig({ ...base, PRIZE_MODE: 'on' } as NodeJS.ProcessEnv).PRIZE_MODE,
+      ).toBe('on');
+    });
   });
 
   it('rejects CORS wildcard in production (REQ-SEC-008)', () => {
@@ -140,13 +139,18 @@ describe('loadConfig', () => {
     const cfg = configSchema.parse({
       DATABASE_URL: 'postgresql://x',
       JWT_SECRET: 'x'.repeat(32),
+      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
     });
     expect(cfg.EVENT_EMIT_RATE_LIMIT_PER_MIN).toBe(30);
     expect(cfg.MAX_EVENT_PAYLOAD_BYTES).toBe(16_384);
   });
 
   it('rejects out-of-range event emission params (REQ-RT-012/014, §4 bounds)', () => {
-    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+    const envBase = {
+      DATABASE_URL: 'postgresql://x',
+      JWT_SECRET: 'x'.repeat(32),
+      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
+    };
     expect(configSchema.safeParse({ ...envBase, EVENT_EMIT_RATE_LIMIT_PER_MIN: 0 }).success).toBe(false);
     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 512 }).success).toBe(false);
     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 300_000 }).success).toBe(false);
@@ -156,12 +160,17 @@ describe('loadConfig', () => {
     const cfg = configSchema.parse({
       DATABASE_URL: 'postgresql://x',
       JWT_SECRET: 'x'.repeat(32),
+      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
     });
     expect(cfg.RECONNECT_RATE_LIMIT_PER_MIN).toBe(10);
   });
 
   it('coerces RECONNECT_RATE_LIMIT_PER_MIN from string and rejects 0', () => {
-    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+    const envBase = {
+      DATABASE_URL: 'postgresql://x',
+      JWT_SECRET: 'x'.repeat(32),
+      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
+    };
     expect(
       configSchema.parse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: '5' })
         .RECONNECT_RATE_LIMIT_PER_MIN,

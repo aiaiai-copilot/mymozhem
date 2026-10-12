@@ -1,7 +1,6 @@
 import Ajv2020 from 'ajv/dist/2020';
 import {
   appManifestSchema,
-  readPropertyVisibility,
   type Visibility,
 } from '@mymozhem/sdk';
 import { buildLotteryManifest, LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION } from './lottery-manifest';
@@ -33,7 +32,7 @@ describe('lottery manifest', () => {
     expect(manifest.appId).toBe(LOTTERY_APP_ID);
     expect(manifest.appId).toBe('lottery');
     expect(manifest.manifestVersion).toBe(LOTTERY_MANIFEST_VERSION);
-    expect(manifest.manifestVersion).toBe(1);
+    expect(manifest.manifestVersion).toBe(2);
   });
 
   it('declares the rewards capability (REQ-RWD-001/005)', () => {
@@ -57,32 +56,25 @@ describe('lottery manifest', () => {
 describe('registered appSettings JSON Schema', () => {
   const validate = ajv.compile(manifest.appSettings);
 
-  // Зарегистрированный артефакт (z.toJSONSchema, io:'input' — решение владельца
-  // C-9.1, REQ-RWD-014): defaulted ключ drawEligibility НЕ required на входе —
-  // configure `{}` проходит verdict-only гейт ядра (REQ-CORE-007). Дефолт
-  // guests_allowed применяет zod-parse в handler'е модуля.
-  it('accepts an empty settings snapshot (drawEligibility defaulted, optional in the registered schema)', () => {
+  // v2 (ADR-012): draw_eligibility удалена (verified-ветка REQ-RWD-014
+  // приостановлена — REGISTERED только организатор). Зарегистрированный
+  // артефакт — пустой strict-объект: единственный валидный snapshot — `{}`,
+  // посторонние ключи отклоняются verdict-only гейтом ядра (REQ-CORE-007).
+  it('accepts an empty settings snapshot', () => {
     expect(validate({})).toBe(true);
   });
 
-  it.each([['guests_allowed'], ['verified']] as const)('accepts drawEligibility=%s', (drawEligibility) => {
-    expect(validate({ drawEligibility })).toBe(true);
-  });
-
-  it('rejects an unknown drawEligibility value', () => {
-    expect(validate({ drawEligibility: 'everyone' })).toBe(false);
+  it.each([['guests_allowed'], ['verified']] as const)('rejects the removed drawEligibility key (%s)', (drawEligibility) => {
+    expect(validate({ drawEligibility })).toBe(false);
   });
 
   it('rejects an unknown extra key', () => {
     expect(validate({ bogus: 1 })).toBe(false);
   });
 
-  it('defaults drawEligibility to guests_allowed (REQ-RWD-014)', () => {
-    expect(lotterySettingsSchema.parse({}).drawEligibility).toBe('guests_allowed');
-  });
-
-  it('exposes drawEligibility as public', () => {
-    expect(readPropertyVisibility(manifest.appSettings, 'drawEligibility')).toBe('public');
+  it('zod-схема strict: parse({ drawEligibility: ... }) → отказ (REQ-RWD-014 приостановлена)', () => {
+    expect(lotterySettingsSchema.safeParse({ drawEligibility: 'verified' }).success).toBe(false);
+    expect(lotterySettingsSchema.safeParse({}).success).toBe(true);
   });
 });
 
@@ -97,15 +89,30 @@ describe('registered event JSON Schemas', () => {
 
   const PAYLOAD_CASES: ReadonlyArray<readonly [string, string, unknown, boolean]> = [
     ['draw.run accepts a valid payload', 'draw.run', { drawId: D1, prizeId: P1 }, true],
+    // v2 (ADR-012 §4 / REQ-RWD-002b): prizeId необязателен — розыгрыш без
+    // сущности приза («выбор победителя»).
+    ['draw.run accepts a missing prizeId (безпризовой розыгрыш)', 'draw.run', { drawId: D1 }, true],
     ['draw.run rejects an invalid drawId uuid', 'draw.run', { drawId: 'not-a-uuid', prizeId: P1 }, false],
     ['draw.run rejects an invalid prizeId uuid', 'draw.run', { drawId: D1, prizeId: 'not-a-uuid' }, false],
-    ['draw.run rejects a missing prizeId', 'draw.run', { drawId: D1 }, false],
     ['draw.run rejects an extra key', 'draw.run', { drawId: D1, prizeId: P1, extra: 1 }, false],
     [
       'draw.completed accepts a valid payload',
       'draw.completed',
       { drawId: D1, prizeId: P1, winnerId: W1 },
       true,
+    ],
+    [
+      'draw.completed accepts prizeId=null (безпризовой розыгрыш)',
+      'draw.completed',
+      { drawId: D1, prizeId: null, winnerId: W1 },
+      true,
+    ],
+    // Ключ обязателен (nullable ≠ optional): безпризовость — явный факт кадра.
+    [
+      'draw.completed rejects a missing prizeId',
+      'draw.completed',
+      { drawId: D1, winnerId: W1 },
+      false,
     ],
     [
       'draw.completed rejects a missing winnerId',

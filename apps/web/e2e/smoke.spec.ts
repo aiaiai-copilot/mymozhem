@@ -1,84 +1,27 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { expect, test } from '@playwright/test';
 
-const execFileAsync = promisify(execFile);
-
-// Имя refresh-куки — константа REFRESH_COOKIE ядра
-// (packages/core/src/auth/auth.constants.ts). Хардкод осознанный: e2e — это
-// потребитель wire-контракта снаружи, импорт core из apps/web запрещён
-// границей (ADR-002); если константу переименуют, smoke упадёт — и правильно.
-const REFRESH_COOKIE = 'mm_refresh';
-const BASE = 'http://localhost:3000';
-// Лендинг шлёт ровно `${origin}/host` (landing.tsx); стенд обязан принять его
-// OAUTH_REDIRECT_ALLOWLIST'ом (exact match, z.array(z.url()) — config.schema).
-const HOST_REDIRECT = `${BASE}/host`;
-
-// Refresh-токен организатора: из env (CI прогоняет seed отдельным шагом) или
-// прямым вызовом seed-скрипта в контейнере (локальный прогон — compose не
-// публикует Postgres на хост by design, поэтому seed бежит внутри server).
-async function seedRefreshToken(): Promise<string> {
-  const fromEnv = process.env.E2E_REFRESH_TOKEN;
-  if (fromEnv) return fromEnv;
-  const { stdout } = await execFileAsync(
-    'docker',
-    [
-      'compose',
-      'exec',
-      '-T',
-      'server',
-      'node',
-      'apps/server/scripts/e2e-web-seed.mjs',
-      '--email=e2e@example.com',
-    ],
-    {
-      env: {
-        ...process.env,
-        // compose-CLI интерполирует окружение файла даже для exec (JWT_SECRET
-        // в compose помечен :? — fail-closed, REQ-SEC-002). Это значение видит
-        // только локальный интерполятор; контейнер работает на своём env.
-        JWT_SECRET: 'e2e-seed-cli-interpolation-only-0123456789abcdef',
-      },
-    },
-  );
-  const parsed = JSON.parse(stdout.trim()) as { refreshToken?: unknown };
-  if (typeof parsed.refreshToken !== 'string') {
-    throw new Error(`e2e-web-seed не вернул refreshToken: ${stdout}`);
-  }
-  return parsed.refreshToken;
+// Setup-токен стенда (ADR-012 §2): вход организатора идёт через UI той же
+// креденшалой, что задана стенду в ORGANIZER_SETUP_TOKEN (compose-директива :? —
+// без неё стенд не стартует). Прогон обязан передать то же значение явно;
+// без него smoke падает сразу, а не таймаутом на первом шаге.
+const SETUP_TOKEN = process.env.ORGANIZER_SETUP_TOKEN;
+if (!SETUP_TOKEN) {
+  throw new Error('ORGANIZER_SETUP_TOKEN is required for smoke (same value as the compose stand)');
 }
 
 // Единый smoke UI-среза (Task 16): организатор ведёт квиз, участник отвечает
 // верно и видит reveal-вердикт, экран показывает вопрос. Три browser-context'а
 // в одном test — общий код комнаты и строгая последовательность шагов.
-test('smoke: host → play → screen против compose-стенда', async ({ browser, request }) => {
-  // Шаг 0. OAuth-шов env↔UI (требование финревью батча 5): без реальных
-  // Google-кредов (compose несёт dummy-тройку) проверяем, что redirect лендинга
-  // проходит allowlist и сервер отвечает 302 на accounts.google.com, а не 400
-  // OAUTH_REDIRECT_INVALID. maxRedirects: 0 — за Google не ходим.
-  const oauthStart = await request.get(
-    `/auth/google?redirect=${encodeURIComponent(HOST_REDIRECT)}`,
-    { maxRedirects: 0 },
-  );
-  expect(oauthStart.status()).toBe(302);
-  expect(oauthStart.headers()['location']).toMatch(/^https:\/\/accounts\.google\.com\//);
-
-  // Шаг 1. Организатор: seed-кука mm_refresh → /host → гейт → setup → консоль.
+test('smoke: host → play → screen против compose-стенда', async ({ browser }) => {
+  // Шаг 1. Организатор: лендинг → «Войти по токену организатора» → /host/login
+  // → setup-токен → bootstrap (refresh-куку ставит сервер) → гейт → setup.
   const host = await (await browser.newContext()).newPage();
-  // Лендинг — вторая половина шва: ссылка обязана нести тот самый absolute URL.
   await host.goto('/');
-  await expect(host.getByRole('link', { name: 'Войти через Google' })).toHaveAttribute(
-    'href',
-    `/auth/google?redirect=${encodeURIComponent(HOST_REDIRECT)}`,
-  );
-  // Сервер ставит куку httpOnly, SameSite=Strict, Path=/auth (refresh-cookie.ts)
-  // — зеркалим path: refresh-эндпоинт единственный её потребитель. secure не
-  // ставим: стенд живёт на http://localhost.
-  await host.context().addCookies([
-    { name: REFRESH_COOKIE, value: await seedRefreshToken(), domain: 'localhost', path: '/auth' },
-  ]);
-  await host.goto('/host');
-  // Гейт: молчаливый refresh по куке → REGISTERED → setup (комнаты ещё нет).
+  await host.getByRole('link', { name: 'Войти по токену организатора' }).click();
+  await host.waitForURL('**/host/login');
+  await host.getByLabel('Токен организатора').fill(SETUP_TOKEN);
+  await host.getByRole('button', { name: 'Войти' }).click();
+  // Гейт: молчаливый refresh по свежей куке → REGISTERED → setup (комнаты ещё нет).
   await host.waitForURL('**/host/new');
   await expect(host.getByRole('heading', { name: 'Настройка комнаты' })).toBeVisible();
 
@@ -99,7 +42,7 @@ test('smoke: host → play → screen против compose-стенда', async 
   const player = await (await browser.newContext()).newPage();
   await player.goto(`/play/${roomCode}`);
   await expect(player.getByRole('heading', { name: 'Вход в игру' })).toBeVisible();
-  await player.getByLabel('Ваше имя').fill('Маша');
+  await player.getByLabel('Ваше имя (необязательно)').fill('Маша');
   await player.getByRole('button', { name: 'Играть' }).click();
   await expect(player.getByText('Игра идёт. Ждём вопрос…')).toBeVisible();
 

@@ -18,10 +18,10 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
     ]);
   });
 
-  // Сквозная проверка через реальную сериализацию pino (C-1 + I-1): refresh/OAuth
-  // секреты — в set-cookie ответа и в query OAuth callback — не покидают процесс
-  // в строке лога; query из url срезается, поле query отсутствует (REQ-SEC-009).
-  it('строка лога: set-cookie/authorization замаскированы, query (code/state) срезан из url и не логируется', () => {
+  // Сквозная проверка через реальную сериализацию pino (C-1 + I-1): секреты —
+  // в set-cookie ответа и в query запроса — не покидают процесс в строке лога;
+  // query из url срезается, поле query отсутствует (REQ-SEC-009).
+  it('строка лога: set-cookie/authorization замаскированы, query-секреты срезаны из url и не логируются', () => {
     const lines: string[] = [];
     const stream = new Writable({
       write(chunk, _enc, cb) {
@@ -35,7 +35,7 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
     const req = {
       id: 'r-1',
       method: 'GET',
-      url: '/auth/google/callback?code=SECRET-CODE&state=SECRET-STATE',
+      url: '/auth/callback?code=SECRET-CODE&state=SECRET-STATE',
       headers: { authorization: 'Bearer SECRET-TOKEN', cookie: 'mm_refresh=SECRET-COOKIE' },
       remoteAddress: '127.0.0.1',
     };
@@ -50,14 +50,14 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
     }
     expect(line).toContain('[redacted]');
     const parsed = JSON.parse(line);
-    expect(parsed.req.url).toBe('/auth/google/callback');
+    expect(parsed.req.url).toBe('/auth/callback');
     expect(parsed.req).not.toHaveProperty('query');
   });
 
   // Финревью батча D (Important #1): std-сериализатор res печатает заголовки
-  // ответа — 302 authorize несёт OAuth state/code_challenge в location, тот же
-  // класс, что I-1 (req.url). Query в location срезается, origin+path сохранены.
-  it('строка лога: query (state/code_challenge) срезан из res.headers.location на 302 authorize', () => {
+  // ответа — 302 редирект несёт query-секреты в location, тот же класс, что
+  // I-1 (req.url). Query в location срезается, origin+path сохранены.
+  it('строка лога: query-секреты срезаны из res.headers.location на 302 redirect', () => {
     const lines: string[] = [];
     const stream = new Writable({
       write(chunk, _enc, cb) {
@@ -74,8 +74,8 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
       headersSent: true,
       getHeaders: () => ({
         location:
-          'https://accounts.google.com/o/oauth2/v2/auth?client_id=C&state=SECRET-STATE&code_challenge=SECRET-CHALLENGE',
-        'set-cookie': 'mm_oauth_state=SECRET-STATE; HttpOnly; Path=/auth',
+          'https://idp.example.com/authorize?client_id=C&state=SECRET-STATE&code_challenge=SECRET-CHALLENGE',
+        'set-cookie': 'mm_state=SECRET-STATE; HttpOnly; Path=/auth',
       }),
     };
     logger.info({ res }, 'request completed');
@@ -84,7 +84,7 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
       expect(line).not.toContain(secret);
     }
     const parsed = JSON.parse(line);
-    expect(parsed.res.headers.location).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+    expect(parsed.res.headers.location).toBe('https://idp.example.com/authorize');
   });
 
   it('genReqId генерирует uuid и отражает его в заголовок x-request-id', () => {

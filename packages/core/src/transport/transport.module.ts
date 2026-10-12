@@ -5,27 +5,28 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { MembershipModule } from '../membership/membership.module';
 import { AuthModule } from '../auth/auth.module';
-import { OAuthModule } from '../oauth/oauth.module';
+import { IdentityModule } from '../identity/identity.module';
 import { PinoLoggerModule } from '../observability/pino-logger.module';
 import { RoomModule } from '../room/room.module';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
 import { JoinController } from './join.controller';
 import { AuthController } from './auth.controller';
 import { ExcludeController } from './exclude.controller';
-import { OAuthController } from './oauth.controller';
 import { RoomsController } from './rooms.controller';
 import { RoomsLifecycleController } from './rooms-lifecycle.controller';
 import { MembersController } from './members.controller';
 import { HttpExceptionFilter } from './http-exception.filter';
-import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER, REFRESH_RATE_LIMITER } from './auth.tokens';
+import { REFRESH_RATE_LIMITER, ORGANIZER_BOOTSTRAP_RATE_LIMITER } from './auth.tokens';
 
 @Module({
-  imports: [ConfigModule, MembershipModule, AuthModule, OAuthModule, RoomModule, PinoLoggerModule],
+  // IdentityModule в imports — ruling B-pre.1 (ADR-012, T5): IdentityService недостижим
+  // транзитивно (MembershipModule экспортирует только MembershipService), а AuthController
+  // инжектирует его для POST /auth/organizer. Прецедент прямого импорта — T7-шов Quiz-среза.
+  imports: [ConfigModule, MembershipModule, AuthModule, IdentityModule, RoomModule, PinoLoggerModule],
   controllers: [
     JoinController,
     AuthController,
     ExcludeController,
-    OAuthController,
     RoomsController,
     // UI-срез (решения №9/№10): HTTP-контур lifecycle комнаты и ростер.
     RoomsLifecycleController,
@@ -41,16 +42,10 @@ import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER, REFRESH_RATE_LIM
       useFactory: (config: AppConfig) => new JoinRateLimiter(config.REFRESH_RATE_LIMIT),
       inject: [APP_CONFIG],
     },
-    // Отдельные инстансы для OAuth start/callback (REQ-SEC-007) — состояние не
-    // делится ни между собой, ни с join/refresh.
+    // ADR-012 (T5): лимитер bootstrap'а организатора — свой инстанс (REQ-SEC-007).
     {
-      provide: OAUTH_START_RATE_LIMITER,
-      useFactory: (config: AppConfig) => new JoinRateLimiter(config.OAUTH_RATE_LIMIT),
-      inject: [APP_CONFIG],
-    },
-    {
-      provide: OAUTH_CALLBACK_RATE_LIMITER,
-      useFactory: (config: AppConfig) => new JoinRateLimiter(config.OAUTH_RATE_LIMIT),
+      provide: ORGANIZER_BOOTSTRAP_RATE_LIMITER,
+      useFactory: (config: AppConfig) => new JoinRateLimiter(config.ORGANIZER_RATE_LIMIT),
       inject: [APP_CONFIG],
     },
   ],

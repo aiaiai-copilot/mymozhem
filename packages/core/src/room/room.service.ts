@@ -79,8 +79,9 @@ export class RoomService {
   // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
   // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
   // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
-  // The same predicate lives in the "Identity_registered_email_key" index
-  // condition (design §7) — change both or neither.
+  // The same predicate lives in two more places — the "Identity_single_registered_key"
+  // partial index (migration) and IdentityService.findOrCreateOrganizer's guarded
+  // create (ADR-012 T5) — change all three or none.
   // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
   private async insertRoom(
     tx: Prisma.TransactionClient,
