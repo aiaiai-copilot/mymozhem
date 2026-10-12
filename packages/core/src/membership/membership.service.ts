@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { Identity, MemberRole, Membership, Prisma } from '@prisma/client';
 import { displayNameSchema, type DrawPoolEntry } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdentityService } from '../identity/identity.service';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
+import { PinoLogger } from '../observability/pino-logger.module';
 import { JoinRateLimiter } from './join-rate-limiter';
 import {
   ActorNotMemberError,
@@ -32,9 +33,11 @@ export class MembershipService {
     private readonly identity: IdentityService,
     private readonly joinRateLimiter: JoinRateLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(MembershipService.name);
+  }
 
-  private readonly logger = new Logger(MembershipService.name);
   // Реестр обработчиков отзыва доступа (REQ-SEC-003): realtime-модуль подписывает
   // RealtimeGateway.revokeRoomAccess при инициализации (паттерн RealtimeBus.subscribe).
   // In-memory легален при одной реплике (REQ-OPS-005); состояние — поле экземпляра
@@ -161,6 +164,7 @@ export class MembershipService {
         await handler(params.targetIdentityId, params.roomId);
       } catch (err) {
         this.logger.error(
+          { identityId: params.targetIdentityId, roomId: params.roomId },
           `access-revoked handler failed for ${params.targetIdentityId} in ${params.roomId}: ${(err as Error).message}`,
         );
       }

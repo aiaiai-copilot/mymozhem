@@ -73,6 +73,8 @@ export const configSchema = z.object({
   OAUTH_STATE_TTL: z.coerce.number().int().min(60).max(1800).default(600),
   // REQ-SEC-007 (§4 login_rate_limit): /auth/google и /auth/google/callback, 10/мин на IP.
   OAUTH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+  // REQ-OPS-004 (ф.4): уровень структурных логов (pino levels).
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 })
   .superRefine((cfg, ctx) => {
     if (cfg.NODE_ENV === 'production' && cfg.CORS_ORIGINS.includes('*')) {

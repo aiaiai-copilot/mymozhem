@@ -10,6 +10,7 @@ import { RoomNotActiveError } from '../realtime/realtime.errors';
 import type { AwardEffectHandler } from '../app-runtime/effects';
 import {
   AwardUnknownError,
+  IdentityAnonymizedError,
   PrizeFundExhaustedError,
   PrizeUnknownError,
   RewardAlreadyResolvedError,
@@ -70,6 +71,20 @@ export class RewardsService implements AwardEffectHandler {
   ): Promise<void> {
     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
     if (!prize) throw new PrizeUnknownError(prizeId);
+    // C-8.1 (ф.4, амендмент 2026-09-25): победитель не должен быть
+    // анонимизирован/отсутствовать. Чтение БЛОКИРУЮЩЕЕ (FOR NO KEY UPDATE), в той
+    // же tx, до INSERT: режим конфликтует сам с собой — в том числе с updateMany
+    // свипа на строке identity — пути сериализуются, кто первым взял блокировку,
+    // тот выиграл. Если строку держит свип, гард ждёт его коммита и перечитывает
+    // последнюю закоммиченную версию (READ COMMITTED, EPQ) → видит deletedAt.
+    // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY
+    // UPDATE она не конфликтует. Отказ — типизированный, откатывает tx без
+    // списания фонда (организатор перерозыгрышит).
+    const winnerRows = await tx.$queryRaw<{ deletedAt: Date | null }[]>`
+      SELECT "deletedAt" FROM identity."Identity" WHERE id = ${winnerId} FOR NO KEY UPDATE`;
+    if (winnerRows.length === 0 || winnerRows[0].deletedAt !== null) {
+      throw new IdentityAnonymizedError(winnerId);
+    }
     // НЕ try/catch P2002: unique-violation абортит Postgres-транзакцию (25P02 на
     // каждый следующий statement, COMMIT молча откатывает) — в батче эффектов это
     // убило бы sibling-эффекты и коммиты событий. Дубль — не-возбуждающим

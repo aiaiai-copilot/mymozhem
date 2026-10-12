@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { MetricsService } from '../observability/metrics.service';
 import type { OutwardLevel } from './projection.service';
 
 export interface Subscription {
@@ -17,16 +18,26 @@ export class SubscriptionRegistry {
   private readonly bySocket = new Map<string, Subscription>();
   private readonly socketsByMembership = new Map<string, Set<string>>();
 
+  // REQ-OPS-004: gauge активных соединений живёт здесь, а не в gateway — все
+  // пути очистки (disconnect, mid-subscribe cleanup, catch-пути, revoke) идут
+  // через remove(), и парность инкремент/декремент гарантирована построением.
+  constructor(private readonly metrics: MetricsService) {}
+
   private static key(identityId: string, roomId: string): string {
     return `${identityId}:${roomId}`;
   }
 
   add(sub: Subscription): void {
+    // Re-add того же socketId (идемпотентный re-subscribe в ту же комнату, контракт
+    // gateway) — перезапись, а не новое соединение: gauge не двигаем, иначе инкремент
+    // остался бы без парного декремента (Review Focus 1).
+    const isNew = !this.bySocket.has(sub.socketId);
     this.bySocket.set(sub.socketId, sub);
     const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
     const set = this.socketsByMembership.get(key) ?? new Set<string>();
     set.add(sub.socketId);
     this.socketsByMembership.set(key, set);
+    if (isNew) this.metrics.connectionAdded(sub.roomId);
   }
 
   get(socketId: string): Subscription | undefined {
@@ -41,6 +52,7 @@ export class SubscriptionRegistry {
     const set = this.socketsByMembership.get(key);
     set?.delete(socketId);
     if (set?.size === 0) this.socketsByMembership.delete(key);
+    this.metrics.connectionRemoved(sub.roomId);
   }
 
   socketsOf(identityId: string, roomId: string): readonly string[] {

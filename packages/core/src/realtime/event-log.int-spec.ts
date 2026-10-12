@@ -3,7 +3,7 @@ import { ContractError, validManifests } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -13,6 +13,7 @@ import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
 import { EventOutbox } from './event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 
 const ORG = '00000000-0000-0000-0000-000000000001';
 
@@ -25,7 +26,7 @@ describe('EventLogService.commitCoreEvent', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     rooms = new RoomService(
       db.prisma,
       new EventLogService(
@@ -41,6 +42,7 @@ describe('EventLogService.commitCoreEvent', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );

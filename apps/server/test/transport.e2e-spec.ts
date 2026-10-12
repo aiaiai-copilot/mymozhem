@@ -12,10 +12,12 @@ import {
   IdentityService,
   JoinRateLimiter,
   MembershipService,
+  MetricsService,
   RealtimeBus,
   RoomService,
   TEST_CONFIG,
   TokenService,
+  fakeLogger,
   loadConfig,
   seedIdentity,
   startTestDb,
@@ -116,7 +118,7 @@ describe('Transport HTTP (e2e)', () => {
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(
@@ -132,6 +134,7 @@ describe('Transport HTTP (e2e)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -160,6 +163,13 @@ describe('Transport HTTP (e2e)', () => {
 
     afterAll(async () => {
       await app.close();
+    });
+
+    it('ответ несёт x-request-id (REQ-OPS-004)', async () => {
+      const res = await app.inject({ method: 'GET', url: '/health/live' });
+      expect(res.headers['x-request-id']).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
     });
 
     it('join happy path: 201, SDK-валидное тело, refresh-кука, access claims', async () => {

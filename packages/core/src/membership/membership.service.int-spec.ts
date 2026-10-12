@@ -1,10 +1,11 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
 import { EventOutbox } from '../realtime/event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { RoomService } from '../room/room.service';
 import { IdentityService } from '../identity/identity.service';
@@ -36,13 +37,14 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       new IdentityService(db.prisma),
       new JoinRateLimiter(overrides.rateLimit ?? 1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+      fakeLogger,
     );
 
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
     await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(
@@ -58,6 +60,7 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -366,18 +369,19 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
       new IdentityService(db2.prisma),
       new JoinRateLimiter(1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+      fakeLogger,
     );
 
   beforeAll(async () => {
     db2 = await startTestDb();
     await seedIdentity(db2.prisma, { id: ORG, email: 'org2@example.test' });
-    const outbox = new EventOutbox(db2.prisma, new RealtimeBus());
+    const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
     roomService2 = new RoomService(
       db2.prisma,
       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
       outbox,
       new AppRegistryService([]),
-      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
       TEST_CONFIG,
     );
   }, 120000);

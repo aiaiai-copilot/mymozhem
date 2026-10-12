@@ -5,7 +5,7 @@ import { AppRejection, ContractError } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -15,6 +15,7 @@ import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
 import { RealtimeBus } from '../realtime/realtime-bus';
 import { EventOutbox } from '../realtime/event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 import { EventPayloadInvalidError, RoomNotActiveError } from '../realtime/realtime.errors';
 import { AppRuntimeService } from './app-runtime.service';
 import { AppProjectionCache } from './app-projection-cache';
@@ -238,13 +239,14 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
     }
     registry = new AppRegistryService([TEST_APP, TEST_APP_V2, TEST_APP_CAPABLE]);
     bus = new RealtimeBus();
-    outbox = new EventOutbox(db.prisma, bus);
+    outbox = new EventOutbox(db.prisma, bus, new MetricsService());
     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     membership = new MembershipService(
       db.prisma,
       new IdentityService(db.prisma),
       new JoinRateLimiter(1000),
       TEST_CONFIG,
+      fakeLogger,
     );
     rooms = new RoomService(db.prisma, eventLog, outbox, registry, membership, TEST_CONFIG);
   }, 120000);

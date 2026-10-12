@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config/config.schema';
+import type { PinoLogger } from '../observability/pino-logger.module';
 
 // Shared AppConfig for int-specs. Values are inert: DATABASE_URL is unused because
 // startTestDb() points PrismaService at a throwaway testcontainer.
@@ -26,4 +27,20 @@ export const TEST_CONFIG: AppConfig = {
   OAUTH_STATE_TTL: 600,
   OAUTH_RATE_LIMIT: 10,
   OAUTH_REDIRECT_ALLOWLIST: [],
+  LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
 };
+
+// Структурный no-op фейк PinoLogger (REQ-OPS-004) для прямых — вне DI — конструкций
+// сервисов в int/e2e-спеках: DI-деревья получают настоящий PinoLogger транзитивно
+// через PinoLoggerModule, а здесь поведение логов не ассертится, важна лишь
+// сигнатура конструктора. Поля покрывают методы, реально вызываемые сервисами.
+export const fakeLogger = {
+  setContext: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+  log: () => undefined,
+  debug: () => undefined,
+  trace: () => undefined,
+  fatal: () => undefined,
+} as unknown as PinoLogger;

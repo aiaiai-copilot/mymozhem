@@ -1,4 +1,4 @@
-import { Inject, Logger } from '@nestjs/common';
+import { Inject } from '@nestjs/common';
 import { OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import {
@@ -29,6 +29,8 @@ import { RealtimeError } from './realtime.errors';
 import { contractCodeFor } from './error-mapping';
 import { SubscriptionRegistry } from './subscription-registry';
 import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+import { MetricsService } from '../observability/metrics.service';
+import { PinoLogger } from '../observability/pino-logger.module';
 
 type Ack<T> = (result: T | ContractErrorPayload) => void;
 
@@ -44,7 +46,6 @@ const claimsOf = (socket: Socket): AccessClaims => socket.data.claims as AccessC
 // Наружу ровно {code} (REQ-SEC-006); причины — только в серверный лог.
 @WebSocketGateway()
 export class RealtimeGateway implements OnGatewayInit<Server> {
-  private readonly logger = new Logger(RealtimeGateway.name);
   private server!: Server;
 
   constructor(
@@ -58,19 +59,27 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
     private readonly bus: RealtimeBus,
     @Inject(RECONNECT_RATE_LIMITER) private readonly reconnectLimiter: JoinRateLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
-  ) {}
+    private readonly metrics: MetricsService,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(RealtimeGateway.name);
+  }
 
   afterInit(server: Server): void {
     this.server = server;
     server.use((socket, next) => this.authenticate(socket, next));
     server.on('connection', (socket) => {
+      this.logger.info({ socketId: socket.id, actorId: claimsOf(socket).sub }, 'socket connected');
       socket.on(REALTIME_MESSAGES.SUBSCRIBE, (payload: unknown, ack: Ack<SubscribeOkAck>) =>
         void this.handleSubscribe(socket, payload, ack),
       );
       socket.on(REALTIME_MESSAGES.PUBLISH, (payload: unknown, ack: Ack<PublishOkAck>) =>
         void this.handlePublish(socket, payload, ack),
       );
-      socket.on('disconnect', () => this.registry.remove(socket.id));
+      socket.on('disconnect', () => {
+        this.logger.info({ socketId: socket.id }, 'socket disconnected');
+        this.registry.remove(socket.id);
+      });
     });
     this.bus.subscribe((events) => this.fanOut(events));
     // REQ-SEC-003: срез исключения вызывает MembershipService.exclude → пост-коммит
@@ -87,7 +96,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       const token = (socket.handshake.auth as Record<string, unknown>).token;
       claims = this.tokens.verifyAccessToken(typeof token === 'string' ? token : '');
     } catch (err) {
-      this.logger.warn(`socket auth failed: ${(err as Error).message}`);
+      this.logger.warn({ socketId: socket.id }, `socket auth failed: ${(err as Error).message}`);
       next(new Error('SESSION_INVALID'));
       return;
     }
@@ -150,6 +159,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
       await socket.join(roomChannel(roomId));
       if (level === 'organizer') await socket.join(organizerChannel(roomId));
       const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+      const replayStart = performance.now();
       const events = await this.prisma.logEvent.findMany({
         where: { roomId },
         orderBy: { seq: 'asc' },
@@ -162,6 +172,8 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
         events: this.projection.projectEvents(events, level),
         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
       };
+      // REQ-OPS-004: длительность replay = чтение лога + построение snapshot.
+      this.metrics.observeReplayDuration(level, (performance.now() - replayStart) / 1000);
       // M-3: disconnect, прилетевший внутри subscribe (пока читался лог), уже прошёл
       // слушателем как no-op (записи не было). Без этой проверки запись мёртвого
       // сокета протухла бы в реестре. Disconnect ПОСЛЕ проверки обслужит штатный
@@ -173,6 +185,12 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
         return;
       }
       ack({ ok: true, snapshot });
+      // Лог после ack, чтобы ack не задерживать; payload событий не логируется
+      // никогда (REQ-SEC-009) — только корреляционные поля (REQ-OPS-004).
+      this.logger.info(
+        { socketId: socket.id, actorId: claims.sub, roomId, level },
+        'subscribed',
+      );
     } catch (err) {
       // Полуподписка недопустима: join теперь ДО чтения лога (design §4), поэтому
       // при сбое после registry.add чистим и реестр, и каналы — иначе клиент,
@@ -238,11 +256,18 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
           this.server.to(roomChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
         } else if (event.visibility === 'ORGANIZER') {
           this.server.to(organizerChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
+        } else {
+          // MODULE_PRIVATE: наружу не доставляется (REQ-CORE-005) — доставки нет, замера нет.
+          continue;
         }
-      } catch (err) {
-        this.logger.error(
-          `fan-out of ${event.type} (room ${event.roomId}, seq ${event.seq}) failed: ${(err as Error).message}`,
+        // REQ-OPS-004: латентность publish→deliver от коммита (recordedAt — DB now()).
+        this.metrics.observePublishToDeliver(
+          event.visibility.toLowerCase(),
+          (Date.now() - event.recordedAt.getTime()) / 1000,
         );
+      } catch (err) {
+        // payload сознательно НЕ в полях (REQ-SEC-009) — только корреляция.
+        this.logger.error({ roomId: event.roomId, seq: event.seq, type: event.type, err }, 'fan-out failed');
       }
     }
   }
@@ -266,7 +291,7 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
     if (err instanceof RealtimeError) return contractCodeFor(err);
     if (err instanceof ContractError) return err.code;
     // REQ-SEC-006: неизвестное — INTERNAL_ERROR, детали только в серверный лог.
-    this.logger.error(err);
+    this.logger.error({ err }, 'unmapped realtime error');
     return 'INTERNAL_ERROR';
   }
 }

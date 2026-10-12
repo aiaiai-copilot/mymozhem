@@ -2,7 +2,7 @@ import type { AppManifest } from '@mymozhem/sdk';
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
 import { readRoomLog } from '../testing/read-room-log';
-import { TEST_CONFIG } from '../testing/test-config';
+import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { AppRegistryService } from '../app-registry/app-registry.service';
 import { MembershipService } from '../membership/membership.service';
 import { JoinRateLimiter } from '../membership/join-rate-limiter';
@@ -12,6 +12,7 @@ import { EventLogService } from './event-log.service';
 import { EventEmitLimiter } from './event-emit-limiter';
 import { RealtimeBus } from './realtime-bus';
 import { EventOutbox } from './event-outbox';
+import { MetricsService } from '../observability/metrics.service';
 import {
   ActorNotMemberError,
   EventEmitRateLimitedError,
@@ -73,7 +74,7 @@ describe('EventLogService.commitAppEvent', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
@@ -85,6 +86,7 @@ describe('EventLogService.commitAppEvent', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -307,7 +309,7 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     limitedLog = new EventLogService(registry, new EventEmitLimiter(3), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
@@ -319,6 +321,7 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );
@@ -393,7 +396,7 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
     const registry = new AppRegistryService([TEST_APP]);
-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
+    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
     rooms = new RoomService(
       db.prisma,
@@ -405,6 +408,7 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
         new IdentityService(db.prisma),
         new JoinRateLimiter(1000),
         TEST_CONFIG,
+        fakeLogger,
       ),
       TEST_CONFIG,
     );

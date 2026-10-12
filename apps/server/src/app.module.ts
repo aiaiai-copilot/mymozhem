@@ -9,6 +9,7 @@ import {
   IdentityModule,
   IdentitySweepModule,
   MembershipModule,
+  ObservabilityModule,
   PrismaModule,
   RealtimeModule,
   RewardsModule,
@@ -24,6 +25,7 @@ const lottery = createLotteryApp();
   imports: [
     PrismaModule,
     HealthModule,
+    ObservabilityModule, // REQ-OPS-004: /metrics + pino (requestId, логи запросов)
     ScheduleModule.forRoot(), // REQ-ID-010: регламентные джобы; одна реплика (REQ-OPS-005)
     AppRegistryModule.register([quiz.manifest, lottery.manifest]),
     AppRuntimeModule.register([quiz.runtime, lottery.runtime]),

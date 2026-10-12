@@ -87,6 +87,23 @@ writeFileSync(
   "import '../../server/src/main';\nexport const probe = 1;\n",
 );
 
+// 9) Observability-leaf probe: observability импортирует доменный модуль
+// (forbidden: observability-is-leaf). Относительный импорт (прецедент probe 4).
+const obsLeafProbe = 'packages/core/src/observability/__probe-leaf.ts';
+writeFileSync(
+  obsLeafProbe,
+  "import '../room/room.module';\nexport const probe = 1;\n",
+);
+
+// 10) Observability-libs probe: prom-client вне observability
+// (forbidden: observability-libs-contained). Пакетный spec — правило матчится
+// по node_modules-пути резолва (прецедент probe 7).
+const obsLibsProbe = 'packages/core/src/room/__probe-obs-libs.ts';
+writeFileSync(
+  obsLibsProbe,
+  "import 'prom-client';\nexport const probe = 1;\n",
+);
+
 try {
   expectFailure(
     'sdk → core import (dependency-cruiser)',
@@ -128,6 +145,16 @@ try {
     `pnpm exec depcruise ${crossAppProbe} --config .dependency-cruiser.cjs`,
     'web-no-cross-app-imports',
   );
+  expectFailure(
+    'observability → core domain import (dependency-cruiser)',
+    `pnpm exec depcruise ${obsLeafProbe} --config .dependency-cruiser.cjs`,
+    'observability-is-leaf',
+  );
+  expectFailure(
+    'prom-client outside observability (dependency-cruiser)',
+    `pnpm exec depcruise ${obsLibsProbe} --config .dependency-cruiser.cjs`,
+    'observability-libs-contained',
+  );
 } finally {
   rmSync(boundaryProbe, { force: true });
   rmSync('scripts/__probe__', { recursive: true, force: true });
@@ -137,6 +164,8 @@ try {
   rmSync(webCoreProbe, { force: true });
   rmSync(webSocketProbe, { force: true });
   rmSync(crossAppProbe, { force: true });
+  rmSync(obsLeafProbe, { force: true });
+  rmSync(obsLibsProbe, { force: true });
 }
 
 if (process.exitCode) {

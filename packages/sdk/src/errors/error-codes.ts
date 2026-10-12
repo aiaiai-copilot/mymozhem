@@ -50,6 +50,9 @@ export const CONTRACT_ERROR_CODES = [
   'DRAW_POOL_EMPTY',
   'AWARD_UNKNOWN',
   'REWARD_ALREADY_RESOLVED',
+  // Фаза 4 (C-8.1): award по анонимизированной/неизвестной identity отклонён —
+  // приз не должен осиротеть (дизайн 2026-09-24 §4).
+  'IDENTITY_ANONYMIZED',
   'INTERNAL_ERROR',
 ] as const;
 

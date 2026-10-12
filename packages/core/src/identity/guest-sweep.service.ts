@@ -1,7 +1,8 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
+import { PinoLogger } from '../observability/pino-logger.module';
 import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
 
 // Свип анонимизации гостей (REQ-ID-003/014, догон фазы 3): истечение guest_ttl
@@ -9,52 +10,86 @@ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-g
 // и actorId в логе остаются валидными), не физическим удалением. База TTL —
 // createdAt (решение владельца, design §0.8). Приостановка при открытой награде —
 // через ANONYMIZATION_GUARDS (REQ-RWD-013); без подключённого rewards приостановки нет.
+// Внутренний сигнал отката при гонке C-8.1: не доменная ошибка, на провод не
+// маппится (свип вызывается только планировщиком); ловится в sweepExpiredGuests.
+class SweepSuspensionRaceError extends Error {
+  constructor(readonly racedCount: number) {
+    super(`concurrent award detected during sweep for ${racedCount} identit(ies)`);
+    this.name = new.target.name;
+  }
+}
+
 @Injectable()
 export class GuestSweepService {
-  private readonly logger = new Logger(GuestSweepService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(GuestSweepService.name);
+  }
 
   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
-  // самого свипа (выборка кандидатов + запись); перечитывание deletedAt в
-  // updateMany — вторая линия от гонки с ручным исключением. Гард читает ВНЕ
-  // транзакции (hasOpenAwards идёт через this.prisma, отдельное соединение):
-  // остаётся узкое окно «award закоммичен между гард-чеком и коммитом свипа» —
-  // принято как риск MVP (свип раз в CLEANUP_INTERVAL, окно миллисекунды).
-  // Закрытие окна — design-level решение (tx-aware гард / serializable+retry),
-  // зафиксировано в леджере для владельца.
+  // свипа; C-8.1 (ф.4, амендмент 2026-09-25) закрыто re-check'ом: гард опрашивается
+  // дважды ВНУТРИ tx — до анонимизации и после updateMany. READ COMMITTED делает
+  // видимым любой award, закоммитившийся до перепроверки → throw откатывает всю tx.
+  // С параллельным награждением пути сериализует блокирующее чтение award-гарды
+  // (RewardsService.awardPrize): FOR NO KEY UPDATE — тот же режим, что у updateMany
+  // свипа, а режим конфликтует сам с собой на строке identity → кто первым взял
+  // блокировку, тот выиграл; проигравший после ожидания перечитывает строку (EPQ).
+  // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY UPDATE
+  // она не конфликтует. Остаточное направление «анонимизирован → награждён»
+  // закрыто той же гардой identity.deletedAt.
   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
-    return this.prisma.$transaction(async (tx) => {
-      const candidates = await tx.identity.findMany({
-        where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
-        select: { id: true },
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const candidates = await tx.identity.findMany({
+          where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
+          select: { id: true },
+        });
+        if (candidates.length === 0) return 0;
+        const ids = candidates.map((c) => c.id);
+        const suspended = new Set<string>();
+        for (const guard of this.guards) {
+          for (const id of await guard.hasOpenAwards(tx, ids)) suspended.add(id);
+        }
+        const sweepIds = ids.filter((id) => !suspended.has(id));
+        if (sweepIds.length === 0) return 0;
+        const anonymized = await tx.identity.updateMany({
+          // deletedAt: null в where — вторая линия защиты от гонки с ручным
+          // исключением: concurrent exclusion мог успеть soft-delete'нуть
+          // identity между выборкой кандидатов и этим updateMany.
+          where: { id: { in: sweepIds }, deletedAt: null },
+          data: { displayName: null, email: null, deletedAt: now },
+        });
+        // Отзыв живых сессий гостя — по прецеденту среза исключения
+        // (membership.service.ts:147-153). Сессия гостя под приостановкой
+        // истекает по своему капу как обычно (design §5) — здесь её нет.
+        await tx.session.updateMany({
+          where: { identityId: { in: sweepIds }, revokedAt: null },
+          data: { revokedAt: now },
+        });
+        // C-8.1: re-check после updateMany — award, закоммитившийся между первым
+        // чеком и этой строкой, здесь виден → откат всей tx (анонимизация и
+        // отзыв сессий отменяются).
+        const raced = new Set<string>();
+        for (const guard of this.guards) {
+          for (const id of await guard.hasOpenAwards(tx, sweepIds)) raced.add(id);
+        }
+        if (raced.size > 0) throw new SweepSuspensionRaceError(raced.size);
+        this.logger.info({ anonymized: anonymized.count, suspended: suspended.size }, 'guest sweep');
+        return anonymized.count;
       });
-      if (candidates.length === 0) return 0;
-      const ids = candidates.map((c) => c.id);
-      const suspended = new Set<string>();
-      for (const guard of this.guards) {
-        for (const id of await guard.hasOpenAwards(ids)) suspended.add(id);
+    } catch (err) {
+      if (err instanceof SweepSuspensionRaceError) {
+        // Ожидаемый исход гонки, не алерт: следующий тик CLEANUP_INTERVAL
+        // обработает гостя как приостановленного (award уже виден первому чеку).
+        this.logger.warn({ raced: err.racedCount }, 'guest sweep rolled back: concurrent award (C-8.1)');
+        return 0;
       }
-      const sweepIds = ids.filter((id) => !suspended.has(id));
-      if (sweepIds.length === 0) return 0;
-      const anonymized = await tx.identity.updateMany({
-        where: { id: { in: sweepIds }, deletedAt: null },
-        data: { displayName: null, email: null, deletedAt: now },
-      });
-      // Отзыв живых сессий гостя — по прецеденту среза исключения
-      // (membership.service.ts:118-123). Сессия гостя под приостановкой истекает
-      // по своему капу как обычно (design §5) — здесь её нет.
-      await tx.session.updateMany({
-        where: { identityId: { in: sweepIds }, revokedAt: null },
-        data: { revokedAt: now },
-      });
-      this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
-      return anonymized.count;
-    });
+      throw err;
+    }
   }
 }
