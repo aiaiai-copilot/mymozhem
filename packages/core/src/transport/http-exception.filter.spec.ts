@@ -56,6 +56,9 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
     ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
     ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
+    // ADR-012 (T5): неверный setup-токен bootstrap'а — ContractError с wire-паритетом,
+    // 401 рядом с SESSION_INVALID; наружу ровно код, без различия «нет токена/неверный».
+    ['organizer setup invalid', new ContractError('ORGANIZER_SETUP_INVALID', 'x'), 401, 'ORGANIZER_SETUP_INVALID'],
     // RoomError — полное покрытие: ROOM_ORGANIZER_NOT_REGISTERED с POST /rooms
     // (REQ-ID-005), остальные — с lifecycle-контура UI-среза (решение №9); коды в
     // wire 1:1 (строковый паритет room.errors.ts), статус 409 — отказ из-за состояния.

@@ -23,6 +23,9 @@ const STATUS_BY_WIRE_CODE = {
   TARGET_NOT_EXCLUDABLE: 409,
   REQUEST_INVALID: 400,
   SESSION_INVALID: 401,
+  // ADR-012 (T5): отказ bootstrap'а организатора — тот же 401-класс, что SESSION_INVALID;
+  // ContractError wire-parity ветка ниже покрывает код членством в этой мапе.
+  ORGANIZER_SETUP_INVALID: 401,
   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
   ROOM_ORGANIZER_NOT_REGISTERED: 403,
   // UI-срез (lifecycle-контур, решение №9): остальные RoomError идут в wire 1:1

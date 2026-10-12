@@ -23,4 +23,28 @@ export class IdentityService {
     const name = displayNameSchema.parse(displayName);
     return tx.identity.create({ data: { kind: 'GUEST', displayName: name } });
   }
+
+  // ADR-012 §2: единственный REGISTERED инстанса, email = NULL. Гонка первых
+  // bootstrap'ов: проигравший ловит P2002 от "Identity_single_registered_key" и
+  // перечитывает победителя. create ВНЕ $transaction — catch P2002 не отравляет
+  // чужую tx (ловушка aborted-tx). Инвариант — см. комментарий у шапки сервиса.
+  async findOrCreateOrganizer(): Promise<Identity> {
+    const existing = await this.prisma.identity.findFirst({
+      where: { kind: 'REGISTERED', deletedAt: null },
+    });
+    if (existing) return existing;
+    try {
+      return await this.prisma.identity.create({
+        data: { kind: 'REGISTERED', displayName: 'Организатор' },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const winner = await this.prisma.identity.findFirst({
+          where: { kind: 'REGISTERED', deletedAt: null },
+        });
+        if (winner) return winner;
+      }
+      throw err;
+    }
+  }
 }

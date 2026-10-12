@@ -52,6 +52,7 @@ export * from './rewards/rewards-anonymization.guard';
 export * from './rewards/rewards.module';
 export * from './auth/auth.constants';
 export * from './auth/auth.errors';
+export * from './auth/setup-token';
 export * from './auth/token.service';
 export * from './auth/auth.module';
 export * from './transport/transport.module';
