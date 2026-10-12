@@ -27,6 +27,7 @@
 - requestId (uuid) в каждой строке запроса + отражение в `x-request-id`: `packages/core/src/observability/pino-options.spec.ts:57,67` (unit), `observability.int-spec.ts:75–89` (строка лога — JSON, `req.id === x-request-id`), прод-цепочка через реальный `dist/main.js` — `apps/server/test/bootstrap.e2e-spec.ts:48,79,95`.
 - redact `authorization`/`cookie` (+ `set-cookie` ответа — fix C-1 финревью батча C): `pino-options.spec.ts:12`; эмпирический негативный контроль — scoped re-review fix-волны (без пути утекает, с путём — `[redacted]`).
 - Query (OAuth `code`/`state`) срезан из url и не логируется (fix I-1): `pino-options.spec.ts:24`; кастомный `serializers.req` — `pino-logger.module.ts:72–86`.
+- Query (OAuth `state`/`code_challenge`) срезан из `res.headers.location` на 302 authorize (fix финревью батча D, коммит `6f0775a`): `pino-options.spec.ts` (тест «query (state/code_challenge) срезан из res.headers.location»); кастомный `serializers.res` — `pino-logger.module.ts` (зеркало req-фикса).
 - Корреляция socketId/actorId/roomId в операционных точках, payload не логируется: `packages/core/src/realtime/realtime.gateway.spec.ts:212–217` (+ тесты 'subscribed' строго после ack; 5 мигрированных точек — filter, guest-sweep, sweep-scheduler, membership, gateway).
 - LOG_LEVEL в конфиге: `packages/core/src/config/config.schema.ts` (Task 7), уровень из конфига — `pino-options.spec.ts:8`.
 
@@ -68,7 +69,8 @@ e2e-сьюты apps/server прогонялись зелёными в батча
 2. **Плановое сужение §2 (child-логеры не созданы)** — зафиксировано как решение в критерии 3 (трактовка ii).
 3. **Room-коды в логируемых URL** (`/rooms/:code/join`) — **РЕШЕНИЕ ВЛАДЕЛЬЦА (2026-10-12): принято для MVP.** Обоснование: код полупубличен по дизайну (проецируется организатором на экран), короткоживущ (мёртв после терминации комнаты), логи локальны (одна реплика REQ-OPS-005, stdout на сервере, архивация REQ-RT-008 отложена; читатель логов имеет доступ и к БД, где коды открыты). **Триггер пересмотра:** задача REQ-RT-008 (архивация/отгрузка логов наружу) обязана включить маскирование комнатного кода в логах.
 4. **Пин `pino@^9.14.0` в apps/server — load-bearing** для single-instance фикса батча C (`app.get(Logger)` резолвится по идентичности класса; два снапшота pino = падение прод-бутстрапа, невидимое для гейтов). Будущий бамп pino 10 двигать **в обоих пакетах вместе** (packages/observability-цепочка и apps/server). Страж класса дефекта: `apps/server/test/bootstrap.e2e-spec.ts`.
-5. **Standing rules (pino-std-serializers v7):** (а) res-сериализатор логирует заголовки ответа по умолчанию — redact-ревью **в обе стороны** при любом новом sensitive-заголовке (req и res); (б) err-сериализатор копирует все enumerable props — типы логируемых ошибок держать чистыми от request/config.
+5. **Standing rules (pino-std-serializers v7):** (а) res-сериализатор логирует заголовки ответа по умолчанию — redact-ревью **в обе стороны** при любом новом sensitive-заголовке (req и res); машинные пины обеих сторон: redact `set-cookie` (`pino-options.spec.ts:12`), strip query из `res.headers.location` (тест батча D, `6f0775a`); (б) err-сериализатор копирует все enumerable props — типы логируемых ошибок держать чистыми от request/config.
+6. **Финревью батча D (opus, целосрезовое):** фиделити аудита подтверждена, cross-batch композиция чистая, interleaving-матрица C-8.1 разобрана и признана закрытой. Один Important — утечка OAuth `state` через `res.headers.location` на 302 — **исправлен fix-волной батча D** (Ruling D-10.3, коммит `6f0775a`, тест RED→GREEN, build/typecheck/core unit/observability int-spec зелёные). Вердикт после фикса: ready to merge.
 
 ---
 
@@ -93,9 +95,10 @@ e2e-сьюты apps/server прогонялись зелёными в батча
 
 - **Ruling D-10.1:** имя файла аудита — `2026-10-12-…` по фактической дате финальной сессии (плановый плейсхолдер `2026-09-2X` предполагал сентябрь; сессия состоялась 2026-10-12). Стоимость ошибки: косметическая сортировка имён в docs/sessions.
 - **Ruling D-10.2:** документ аудита коммитится в ветку `phase-4-hardening` (часть среза, попадёт в main мерджем); обновление HANDOFF — отдельным коммитом в `main` по стоящей конвенции репозитория (handoff-коммиты между сессиями живут на main; плановый Step 4 объединял оба — разделено, чтобы main-HANDOFF не устаревал до мерджа). Стоимость ошибки: один cherry-pick/повторная правка HANDOFF.
+- **Ruling D-10.3:** Important #1 финревью батча D (утечка OAuth `state` через `res.headers.location`) — в fix-волну без эскалации владельцу, по прецеденту Ruling C-F.1: фикс реализует принятую норму дизайна §2 «токены не логируем» и standing rule §2.5(а), не пересматривает её. Выбран вариант (а) ревьюера — кастомный `serializers.res` со strip query (консистентно с I-1, сохраняет диагностическую ценность origin+path). Стоимость ошибки (если утечка была приемлема): один сериализатор с тестом, обратимо.
 
 ---
 
 ## 6. Вывод
 
-Все 5 критериев §7 подтверждены артефактами; материал финревью батча C разобран и зафиксирован (включая решение владельца по room-кодам); отложенное и deferred-миноры протриажены. **Харднинг-срез фазы 4 закрыт.** Рекомендация: мердж `phase-4-hardening` → `main` (решение владельца). Дальше по траектории: первое живое событие (чеклист `2026-09-23-ui-slice-smoke-checklist.md`, строки 0.2–0.3, 2–12), затем нагрузочная часть ф.4. Гейт 1 (юрист) открыт.
+Все 5 критериев §7 подтверждены артефактами; материал финревью батча C разобран и зафиксирован (включая решение владельца по room-кодам); целосрезовое финревью батча D пройдено (вердикт With fixes → fix-волна `6f0775a` → ready to merge); отложенное и deferred-миноры протриажены. **Харднинг-срез фазы 4 закрыт.** Рекомендация: мердж `phase-4-hardening` → `main` (решение владельца). Дальше по траектории: первое живое событие (чеклист `2026-09-23-ui-slice-smoke-checklist.md`, строки 0.2–0.3, 2–12), затем нагрузочная часть ф.4. Гейт 1 (юрист) открыт.
