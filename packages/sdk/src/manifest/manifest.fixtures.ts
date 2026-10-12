@@ -1,10 +1,12 @@
 import type { AppManifest } from './manifest.schema';
+import { CONTRACT_VERSION } from '../contract-version';
 
 export const validManifests: AppManifest[] = [
   {
     appId: 'quiz',
     manifestVersion: 1,
-    contractRange: '^1.0.0',
+    // Эпоха контракта выводится из CONTRACT_VERSION, чтобы бамп мажора не краснил фикстуры.
+    contractRange: `^${CONTRACT_VERSION}`,
     appSettings: {
       $schema: 'https://json-schema.org/draft/2020-12/schema',
       type: 'object',
@@ -39,7 +41,7 @@ export const validManifests: AppManifest[] = [
   {
     appId: 'lottery',
     manifestVersion: 1,
-    contractRange: '^1.0.0',
+    contractRange: `^${CONTRACT_VERSION}`,
     capabilities: ['rewards'],
     appSettings: {
       $schema: 'https://json-schema.org/draft/2020-12/schema',

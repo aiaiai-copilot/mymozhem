@@ -13,7 +13,7 @@ export const CONTRACT_ERROR_CODES = [
   'EVENT_RATE_LIMITED',
   'ROOM_LOG_SEALED',
   'ROOM_SETTINGS_FROZEN',
-  // OAuth-срез (REQ-ID-015): POST /rooms от REGISTERED-комнат без регистрации.
+  // Организатор комнаты — только REGISTERED (REQ-ID-005; ADR-012: контур больше не OAuth).
   'ROOM_ORGANIZER_NOT_REGISTERED',
   'ACTOR_NOT_MEMBER',
   // ADR-012 (срез zero-PII): bootstrap организатора и призовой режим.
