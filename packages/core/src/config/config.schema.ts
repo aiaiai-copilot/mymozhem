@@ -14,6 +14,14 @@ export const configSchema = z.object({
   JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
   // REQ-SEC-002: обязателен, ≥ 32 байта; дефолта нет — старт без секрета невозможен.
   JWT_SECRET: z.string().min(32),
+  // ADR-012 §2: bootstrap единственного организатора инстанса. Обязателен,
+  // ≥ 32 байта; дефолта нет — старт без токена невозможен (образец REQ-SEC-002).
+  ORGANIZER_SETUP_TOKEN: z.string().min(32),
+  // REQ-SEC-007 (§4 login_rate_limit): POST /auth/organizer, 10/мин на IP.
+  ORGANIZER_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+  // ADR-012 §4: призовой режим. off — создание призов и розыгрыш с призом
+  // отклоняются PRIZES_DISABLED; on — юридическая ответственность организатора.
+  PRIZE_MODE: z.enum(['off', 'on']).default('off'),
   // §4: access_token_ttl — 15 мин, 1 мин … 1 ч (секунды).
   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
@@ -54,25 +62,6 @@ export const configSchema = z.object({
   // UI-срез (дизайн §2): same-origin раздача собранного SPA из того же
   // Docker-артефакта. Не задан → статика не раздаётся, поведение прежнее (dev/test).
   WEB_STATIC_DIR: z.string().min(1).optional(),
-  // REQ-ID-015/009: Google OAuth — опциональная секция, all-or-none (superRefine ниже).
-  // Без неё приложение бутится, эндпоинты /auth/google* отдают OAUTH_NOT_CONFIGURED.
-  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
-  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
-  OAUTH_REDIRECT_URI: z.url().optional(),
-  OAUTH_REDIRECT_ALLOWLIST: z
-    .string()
-    .default('')
-    .transform((s) =>
-      s
-        .split(',')
-        .map((o) => o.trim())
-        .filter(Boolean),
-    )
-    .pipe(z.array(z.url())),
-  // TTL state/PKCE/redirect кук OAuth-флоу (секунды).
-  OAUTH_STATE_TTL: z.coerce.number().int().min(60).max(1800).default(600),
-  // REQ-SEC-007 (§4 login_rate_limit): /auth/google и /auth/google/callback, 10/мин на IP.
-  OAUTH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
   // REQ-OPS-004 (ф.4): уровень структурных логов (pino levels).
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 })
@@ -82,22 +71,6 @@ export const configSchema = z.object({
         code: 'custom',
         path: ['CORS_ORIGINS'],
         message: 'CORS wildcard is forbidden in production (REQ-SEC-008)',
-      });
-    }
-    const googleSet = [cfg.GOOGLE_CLIENT_ID, cfg.GOOGLE_CLIENT_SECRET, cfg.OAUTH_REDIRECT_URI];
-    const googlePresent = googleSet.filter((v) => v !== undefined).length;
-    if (googlePresent > 0 && googlePresent < 3) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['GOOGLE_CLIENT_ID'],
-        message: 'Google OAuth is all-or-none: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI (REQ-ID-015)',
-      });
-    }
-    if (googlePresent === 3 && cfg.OAUTH_REDIRECT_ALLOWLIST.length === 0) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['OAUTH_REDIRECT_ALLOWLIST'],
-        message: 'OAUTH_REDIRECT_ALLOWLIST must be non-empty when Google OAuth is configured (REQ-ID-009)',
       });
     }
   });
