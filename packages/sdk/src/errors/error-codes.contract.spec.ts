@@ -20,6 +20,8 @@ describe('contract errors', () => {
       'ROOM_SETTINGS_FROZEN',
       'ROOM_ORGANIZER_NOT_REGISTERED',
       'ACTOR_NOT_MEMBER',
+      'ORGANIZER_SETUP_INVALID',
+      'PRIZES_DISABLED',
       'ACTOR_NOT_ORGANIZER',
       'TARGET_NOT_MEMBER',
       'TARGET_NOT_EXCLUDABLE',
@@ -28,13 +30,6 @@ describe('contract errors', () => {
       'RATE_LIMITED',
       'REQUEST_INVALID',
       'SESSION_INVALID',
-      'OAUTH_NOT_CONFIGURED',
-      'OAUTH_REDIRECT_INVALID',
-      'OAUTH_STATE_INVALID',
-      'OAUTH_ACCESS_DENIED',
-      'OAUTH_EXCHANGE_FAILED',
-      'OAUTH_EMAIL_UNVERIFIED',
-      'OAUTH_EMAIL_CONFLICT',
       'MODULE_UNAVAILABLE',
       'PUBLISH_FORBIDDEN',
       'ANSWER_TOO_FAST',
@@ -79,6 +74,10 @@ describe('contract errors', () => {
   });
 
   it.each(['IDENTITY_ANONYMIZED'] as const)('accepts phase-4 code %s', (code) => {
+    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+  });
+
+  it.each(['ORGANIZER_SETUP_INVALID', 'PRIZES_DISABLED'] as const)('accepts ADR-012 code %s', (code) => {
     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
   });
 

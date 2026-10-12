@@ -23,11 +23,11 @@ describe('contract version', () => {
     expect(pkg.version).toBe(CONTRACT_VERSION);
   });
 
-  it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
+  it.each(['^2.0.0', '>=2.0.0 <3.0.0', '2.x'])('accepts a compatible range: %s', (range) => {
     expect(isContractRangeSatisfied(range)).toBe(true);
   });
 
-  it.each(['^2.0.0', '>=2.0.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
+  it.each(['^1.0.0', '>=3.0.0', '1.x'])('rejects an incompatible range: %s', (range) => {
     expect(isContractRangeSatisfied(range)).toBe(false);
   });
 
@@ -62,9 +62,9 @@ describe('contract version', () => {
   });
 
   it('asserts with a typed error the core can return outward', () => {
-    expect(() => assertContractRangeSatisfied('^1.0.0')).not.toThrow();
+    expect(() => assertContractRangeSatisfied('^2.0.0')).not.toThrow();
     try {
-      assertContractRangeSatisfied('^2.0.0');
+      assertContractRangeSatisfied('^1.0.0');
       throw new Error('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(ContractError);

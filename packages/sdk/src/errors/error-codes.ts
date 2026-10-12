@@ -16,6 +16,9 @@ export const CONTRACT_ERROR_CODES = [
   // OAuth-срез (REQ-ID-015): POST /rooms от REGISTERED-комнат без регистрации.
   'ROOM_ORGANIZER_NOT_REGISTERED',
   'ACTOR_NOT_MEMBER',
+  // ADR-012 (срез zero-PII): bootstrap организатора и призовой режим.
+  'ORGANIZER_SETUP_INVALID',
+  'PRIZES_DISABLED',
   // Membership exclusion (срез исключения, REQ-ID-006): отказы endpoint'а exclude.
   'ACTOR_NOT_ORGANIZER',
   'TARGET_NOT_MEMBER',
@@ -26,14 +29,6 @@ export const CONTRACT_ERROR_CODES = [
   'RATE_LIMITED',
   'REQUEST_INVALID',
   'SESSION_INVALID',
-  // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
-  'OAUTH_NOT_CONFIGURED',
-  'OAUTH_REDIRECT_INVALID',
-  'OAUTH_STATE_INVALID',
-  'OAUTH_ACCESS_DENIED',
-  'OAUTH_EXCHANGE_FAILED',
-  'OAUTH_EMAIL_UNVERIFIED',
-  'OAUTH_EMAIL_CONFLICT',
   // Quiz-срез (фаза 2, design 2026-09-09): диспетчер app-runtime и отказы модуля.
   'MODULE_UNAVAILABLE',
   'PUBLISH_FORBIDDEN',

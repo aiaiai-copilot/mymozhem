@@ -6,7 +6,8 @@ import { displayNameSchema } from '../identity/display-name';
 // ORGANIZER/MODERATOR через флаг не получить структурно. Отсутствие = participant.
 export const joinRequestSchema = z.strictObject({
   code: z.string().trim().min(1),
-  displayName: displayNameSchema,
+  // ADR-012 §3: имя необязательно — при отсутствии сервер назначает псевдоним.
+  displayName: displayNameSchema.optional(),
   role: z.enum(['participant', 'spectator']).optional(),
 });
 export type JoinRequest = z.infer<typeof joinRequestSchema>;

@@ -2,10 +2,11 @@ export const validJoinRequests: unknown[] = [
   { code: 'ABCDEFGH', displayName: 'Alex' },
   { code: 'x', displayName: '  Аня  ' },
   { code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' },
+  // ADR-012 §3: имя необязательно — при отсутствии сервер назначает псевдоним.
+  { code: 'ABCDEFGH' },
 ];
 export const invalidJoinRequests: unknown[] = [
   {},
-  { code: 'ABCDEFGH' },
   { displayName: 'Alex' },
   { code: '', displayName: 'Alex' },
   { code: 'ABCDEFGH', displayName: '' },
