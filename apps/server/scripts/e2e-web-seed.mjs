@@ -12,8 +12,7 @@
 // индексу, каждый прогон создаёт новую независимую сессию (новое familyId).
 //
 // Импорты — точечные subpath из dist, НЕ barrel '@mymozhem/core': его
-// dist/index.js на require-time подтягивает тестовый харнес testcontainers
-// (та же причина, что в create-room.mjs).
+// dist/index.js на require-time подтягивает тестовый харнес testcontainers.
 import 'reflect-metadata';
 import { loadConfig } from '@mymozhem/core/dist/config/config.schema.js';
 import { PrismaService } from '@mymozhem/core/dist/prisma/prisma.service.js';
@@ -31,14 +30,14 @@ const prisma = new PrismaService();
 await prisma.onModuleInit();
 try {
   // Reuse по частичному уникальному индексу "Identity_registered_email_key"
-  // (kind=REGISTERED, deletedAt IS NULL) — паттерн create-room.mjs: повторный
+  // (kind=REGISTERED, deletedAt IS NULL): повторный
   // seed с тем же email не создаёт второго организатора.
   let identity = await prisma.identity.findFirst({
     where: { email, kind: 'REGISTERED', deletedAt: null },
   });
   identity ??= await prisma.identity.create({ data: { kind: 'REGISTERED', email } });
 
-  // Ручная сборка (как в create-room.mjs и core int-спеках): @Inject-декоратор
+  // Ручная сборка (по паттерну core int-спек): @Inject-декоратор
   // TokenService вне Nest-контекста — чистая метка, позиционные аргументы решают.
   const tokens = new TokenService(prisma, config);
   const issued = await tokens.issueRegisteredTokens(identity.id);

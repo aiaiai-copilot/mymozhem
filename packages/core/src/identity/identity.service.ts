@@ -3,9 +3,10 @@ import { Prisma, type Identity } from '@prisma/client';
 import { displayNameSchema } from '@mymozhem/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 
-// Инвариант «change both or neither» (двух мест): предикат
+// Инвариант «change all or none» (трёх мест): предикат
 // kind='REGISTERED' AND deletedAt IS NULL — partial index "Identity_single_registered_key"
-// и guarded create в findOrCreateOrganizer (T5). Менять только вместе.
+// (миграция), guarded create в findOrCreateOrganizer (T5) и WHERE EXISTS в
+// RoomService.insertRoom (REQ-ID-005). Менять только вместе.
 @Injectable()
 export class IdentityService {
   constructor(private readonly prisma: PrismaService) {}

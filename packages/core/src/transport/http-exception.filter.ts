@@ -80,6 +80,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
       // токена не оставляет следа для расследования. Message класса безопасен:
       // фиксированные строки + familyId, без token-материала.
       this.logger.warn({ requestId }, exception.message);
+    } else if (exception instanceof ContractError && exception.code === 'ORGANIZER_SETUP_INVALID') {
+      // ADR-012: setup-токен — единственная креденшала инстанса, POST /auth/organizer
+      // унаследовал роль угрозы удалённого OAuth-контура (брутфорс), warn-логирование
+      // — нет. Security-сигнал обязан пережить {code}-only wire (REQ-SEC-006), как у
+      // AuthError выше. Message фиксированная: ничего из запроса не логируем.
+      this.logger.warn({ requestId }, 'organizer setup token mismatch');
     }
     void reply.status(status).send({ code });
   }

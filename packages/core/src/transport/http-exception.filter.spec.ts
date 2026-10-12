@@ -153,6 +153,26 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
     });
 
+    it('logs ORGANIZER_SETUP_INVALID at warn level (ADR-012: брутфорс единственной креденшалы инстанса — security-сигнал переживает {code}-only wire, REQ-SEC-006)', () => {
+      const err = new ContractError('ORGANIZER_SETUP_INVALID', 'setup token mismatch internals');
+      const { filter, reply, logger } = makeFilter();
+      filter.catch(err, makeHost(reply));
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: 'req-1' }),
+        'organizer setup token mismatch',
+      );
+      expect(logger.error).not.toHaveBeenCalled();
+      // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
+      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'ORGANIZER_SETUP_INVALID' });
+    });
+
+    it('does not warn-log other ContractError codes (blast radius warn-ветки — ровно ORGANIZER_SETUP_INVALID)', () => {
+      const { filter, reply, logger } = makeFilter();
+      filter.catch(new ContractError('PRIZE_UNKNOWN', 'x'), makeHost(reply));
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
     it('does not log non-auth 4xx at all', () => {
       const { filter, reply, logger } = makeFilter();
       filter.catch(new RoomJoinDeniedError('no room for code'), makeHost(reply));
