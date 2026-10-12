@@ -71,6 +71,17 @@ export class GuestSweepService {
           where: { identityId: { in: sweepIds }, revokedAt: null },
           data: { revokedAt: now },
         });
+        // ADR-012 §3: IP живёт не дольше события + guest_ttl — обнуление joinIp
+        // членств и удаление Exclusion свипнутых identity в той же tx. Rejoin-блок
+        // снимается вместе с записью — осознанно (ADR); живой контур (REQ-ID-006)
+        // не тронут: до свипа joinIp/Exclusion работают как прежде.
+        await tx.membership.updateMany({
+          where: { identityId: { in: sweepIds } },
+          data: { joinIp: null },
+        });
+        await tx.exclusion.deleteMany({
+          where: { identityId: { in: sweepIds } },
+        });
         // C-8.1: re-check после updateMany — award, закоммитившийся между первым
         // чеком и этой строкой, здесь виден → откат всей tx (анонимизация и
         // отзыв сессий отменяются).

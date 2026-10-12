@@ -321,10 +321,20 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
       const swept = await service.join({ code: room.code, displayName: 'Сметённый', ip: IP2 });
       // Свип (GuestSweepService) анонимизирует identity строкой deletedAt + displayName=null,
       // membership гостя остаётся живым — без фильтра по identity swept-гость попадает в пул.
+      // Симуляция синхронизирована с реальным свипом (ADR-012 §3): тот же набор —
+      // joinIp=null на членствах и удаление Exclusion swept-identity. Реальный
+      // sweepExpiredGuests здесь не подходит: он выбирает по TTL от createdAt и
+      // смёл бы ОБОИХ свежесозданных гостей (и посеянного в beforeAll P1-GUEST),
+      // а тесту нужен ровно один swept-гость.
       await db.prisma.identity.update({
         where: { id: swept.identity.id },
         data: { deletedAt: new Date(), displayName: null },
       });
+      await db.prisma.membership.updateMany({
+        where: { identityId: swept.identity.id },
+        data: { joinIp: null },
+      });
+      await db.prisma.exclusion.deleteMany({ where: { identityId: swept.identity.id } });
       const pool = await service.listActiveParticipantPool(room.id);
       expect(pool.map((p) => p.identityId)).toEqual([alive.identity.id]);
     });
