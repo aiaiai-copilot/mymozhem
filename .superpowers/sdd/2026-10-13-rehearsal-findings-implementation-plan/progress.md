@@ -75,3 +75,39 @@ Task 5: minor (deferred, plan-mandated): wiring onSessionDead→rejoin покр�
 Триаж deferred-миноров финревьюм: все 7 stay-deferred (2×T3, 2×T4, 3×T5). Условие леджера по T4-минору («при T6 подтвердить гейт по roomId») снято досрочно: console-page никогда не обнуляет roomId за жизнь страницы (useState initial-only, console-page.tsx:32) — joinError переходит null→код однократно.
 Recommendations финревью (не гейтят): T6 — помнить однократность перехода joinError в консоли; строку 12.2 чеклиста прогнать с вниманием к вспышке JoinForm и баннеру «вы вошли заново» (единственное немашинное место батча).
 Опыт сессии: watchdog-смертей субагентов не было; имплементеры haiku (T3/T4, транскрипция полного кода плана) и sonnet (T5, интеграция в хуки) — диспозиция моделей окупилась; таск-ревью sonnet, финревью fable — оба детальны.
+
+---
+
+Батч C (задачи T6–T8), сессия 41. Тот же worktree `.worktrees/rehearsal-fixes-a`, ветка `rehearsal-fixes` (HEAD батча B = `718f93a`). Леджер общий на пакет — дописывается.
+Spec: тот же дизайн (§6 рефетч, §7 стейл-roomId, §3+§8.2 LAN-автоматика) — читал контроллер; REQ-разметка §10.
+
+Baseline (до T6): web lint PASS; web typecheck PASS; web 14 suites / 92 tests PASS. Worktree setup батчей A/B действует.
+
+## Pre-flight scan (перед T6)
+
+| Пара/задача | Что производит → что потребляет | Находка |
+|---|---|---|
+| T3/T4 → T6 | `SessionStore.clearHostRoom()` (session.ts:102) и `binding.joinError` (use-room-binding.ts:29,96) → потребители T6 | На месте. console-page.tsx:96-103 — комментарий «Все хуки выше» + ветка `if (!roomId)` verbatim как в плане (roomGone-ветка сразу после); roomId — useState initial-only (:32), joinError переходит null→код однократно (условие леджера батча B, снятое досрочно финревьюм) — эффект T6 сработает ровно раз. useEffect/useState импортированы (:1) |
+| T7 внутри | members-panel.tsx exclude (:41-49) — verbatim цель замены; excludeErrorText (:10), excludingId/setError/disabled/onChanged — на месте; `listMembers` экспортирован (endpoints.ts:70); type-only импорт RosterEntry уже есть (:2) | Согласовано. Плановое тело exclude структурно совпадает с существующим (guard/finally идентичны — замена касается только оркестрации) |
+| T7 → use-room-feed | `refetchMembers` — useCallback, стабилен (:32-39) → deps [roomId, refetchMembers] фокус-эффекта корректны; место вставки — после событийного эффекта (:58-62) | Согласовано. Тестируется чистая фабрика (node-environment vitest, DOM не нужен); wiring — typecheck/lint + ручная приёмка 11.1 (I-3-паттерн) |
+| T8 внутри | vite.config.ts include (:17) — verbatim цель; playwright.config.ts БЕЗ testMatch сейчас (добавляется в оба конфига); e2e/ содержит ровно smoke.spec.ts + playwright.config.ts; checklist §0.3 кончается :33, §1 начинается :35 — блок 0.4 после 0.3; таблица протокола с :153 | Согласовано. Суффикс .vitest.spec.ts + testMatch 'smoke.spec.ts' устраняют пересечение vitest/playwright двумя ходами, как в плане |
+| T6–T8 vs Global Constraints | тест первым в каждой задаче; wire/SDK не тронуты; новых зависимостей нет; vitest include правит только T8 (санкционировано планом) | Соблюдено планом |
+
+Ruling: конфликтов план↔план и план↔код не найдено; скан чист.
+Ride-along кандидаты (refresh-cookie pin, RF5-усиление) НЕ берутся: задачи батча C не касаются refresh-cookie.spec.ts / room-connection.spec.ts — нет естественного касания файлов. Остаются кандидатами владельцу.
+
+## Ход исполнения (батч C)
+Task 6: complete (commits 718f93a..9091d01, review clean — spec ✅, quality approved, findings нет, ⚠️ нет; санкционированное отклонение: += Co-Authored-By строка в коммите, раскрыто в отчёте).
+Task 7: complete (commits 9091d01..c04af02, review clean — spec ✅, quality approved; санкционированное отклонение: мок-параметры `_roomId`/`_identityId` опущены из-за eslint no-unused-vars без argsIgnorePattern — покрытие неизменно, ревьюер подтвердил).
+Task 7: minor (deferred): моки не захватывают аргументы — wrong-id форвардинг тестом не ловится (унаследовано от брифа; кандидат на усиление, не запрошено).
+Task 8: complete (commits c04af02..9d2ad16, review clean — spec ✅, quality approved; оба concern'а разрешены ревьюером: порядок protocol-before-host соответствует запинанному брифом юнит-спеку (нарратив шага 4 брифа внутренне противоречив — отказ fail-closed в любом случае); dummy ORGANIZER_SETUP_TOKEN для --list — pre-existing top-level throw smoke.spec.ts:7-10, диффом не внесён).
+Task 8: minor (deferred): маркер 'URL' в кейсе 'not-a-url' слабый — каждое сообщение функции начинается с 'LAN_BASE_URL' (содержит подстроку URL), ветка parse-ошибки специфически не ассертится (унаследовано verbatim от брифа).
+Task 8: minor (deferred, косметика): строка протокола 0.4 добавлена в конец таблицы (после 12.1–12.2), не в числовую позицию — бриф пинил текст, не позицию.
+
+## Финальное целобранчевое ревью пакета (fable, range 346d275..9d2ad16, 10 коммитов)
+
+Вердикт: **Ready to merge — Yes**. Стадия 1 (spec-compliance по §10): все 9 строк ✅ с артефактами файл:строка; все 6 находок закрыты способом дизайна (№2/№4/№5/№6/№3 код+пин, №7 регламент). Стадия 2: Critical нет, Important 1 процессный (консолидация леджера батча C — исполняется этим коммитом), Minor новых нет.
+Эмпирика ревьюера: web 18/111 PASS, core 21/230 PASS, server lint/typecheck PASS, guardrails 10/10, boundary 0 нарушений (742 modules), XFF e2e 4/4 живьём (testcontainers), compose-дефолт COOKIE_SECURE=auto подтверждён, LAN fail-closed подтверждён обоими --list.
+Сквозной сценарий refresh→onSessionDead→rejoin→rebind прослежен ревьюером: петля стерильна (refreshAttempted/conn + rejoinInFlight/страница + терминальные fail-пути), Review Focus 1 закрыт промежуточным setRoomId(null), обратная совместимость 2/3-аргументных вызовов сохранена.
+Триаж deferred-миноров: все 14 stay-deferred (A: 4, B: 7, C: 3 — обоснования в вердикте ревьюера). Ride-along кандидаты владельцу (вне объёма пакета): пин полного набора атрибутов refresh-куки (REQ-ID-008); усиление RF5-негативного теста resolving-хуком (room-connection.spec.ts:317-331).
+Финревью: Important (процесс) — вложенный .superpowers/sdd/.gitignore (*) снова создан sdd-скриптами и игнорирует артефакты батча C → снят, леджер коммитится (прецедент 1cfbcce/718f93a, решение владельца 329a942).
