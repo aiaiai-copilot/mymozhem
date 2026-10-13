@@ -24,6 +24,7 @@ import {
   type TestDb,
 } from '@mymozhem/core';
 import { AppModule } from '../src/app.module';
+import { HELMET_OPTIONS } from '../src/security-headers';
 
 jest.setTimeout(120_000);
 
@@ -62,7 +63,7 @@ async function createApp(envOverrides: Record<string, string> = {}): Promise<Nes
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.register(fastifyCookie);
-    await app.register(fastifyHelmet);
+    await app.register(fastifyHelmet, HELMET_OPTIONS);
     await app.register(fastifyCors, { origin: corsOrigins });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -258,6 +259,23 @@ describe('Transport HTTP (e2e)', () => {
       const res = await join(app, { code: room.code, displayName: 'A' });
       expect(res.statusCode).toBe(201);
       expect(res.headers['x-dns-prefetch-control']).toBe('off');
+    });
+
+    // Пин репетиции первого события (2026-10-13): дефолтный CSP helmet нёс
+    // upgrade-insecure-requests, и по plain-HTTP LAN (http://<ip>:3000) браузер
+    // уводил сабресурсы SPA на несуществующий https-порт — белый экран на всех
+    // телефонах. UIR исполняется по HTTP (в отличие от HSTS); при появлении
+    // TLS-терминатора апгрейд обеспечит HSTS. Директива снята в HELMET_OPTIONS.
+    it('helmet: CSP без upgrade-insecure-requests, ядро директив на месте (REQ-SEC-008)', async () => {
+      const room = await roomService.create(ORG);
+      const res = await join(app, { code: room.code, displayName: 'A' });
+      expect(res.statusCode).toBe(201);
+      const csp = res.headers['content-security-policy'];
+      expect(typeof csp).toBe('string');
+      expect(csp as string).not.toContain('upgrade-insecure-requests');
+      expect(csp as string).toContain("default-src 'self'");
+      expect(csp as string).toContain("object-src 'none'");
+      expect(csp as string).toContain("script-src 'self'");
     });
 
     it('терминальная комната: refresh → 401 (REQ-ID-016 на проводе)', async () => {

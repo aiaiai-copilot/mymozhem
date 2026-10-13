@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrismaService, loadConfig } from '@mymozhem/core';
 import { AppModule } from '../src/app.module';
+import { HELMET_OPTIONS } from '../src/security-headers';
 import { registerStaticWeb } from '../src/static-web';
 
 // Маркер отличает раздачу SPA от любого API-ответа: SPA-fallback срабатывает
@@ -46,7 +47,7 @@ describe('Static web (same-origin SPA, e2e)', () => {
       .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.register(fastifyCookie);
-    await app.register(fastifyHelmet);
+    await app.register(fastifyHelmet, HELMET_OPTIONS);
     await app.register(fastifyCors, { origin: [] });
     await app.init();
     // Тот же production-helper, что вызывает main.ts: e2e пинит реальный код

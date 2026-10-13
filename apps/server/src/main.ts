@@ -7,6 +7,7 @@ import fastifyHelmet from '@fastify/helmet';
 import { Logger } from 'nestjs-pino';
 import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
 import { AppModule } from './app.module';
+import { HELMET_OPTIONS } from './security-headers';
 import { registerStaticWeb } from './static-web';
 
 async function bootstrap(): Promise<void> {
@@ -24,7 +25,8 @@ async function bootstrap(): Promise<void> {
   // Обязателен: transport-контроллеры читают req.cookies по структурному типу —
   // без плагина refresh вернёт 500 вместо 401.
   await app.register(fastifyCookie);
-  await app.register(fastifyHelmet);
+  // HELMET_OPTIONS — единая точка с e2e-boot'ами (security-headers.ts).
+  await app.register(fastifyHelmet, HELMET_OPTIONS);
   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
   // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
