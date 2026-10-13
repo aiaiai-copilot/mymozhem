@@ -1,0 +1,48 @@
+# Review package: bcce15a..b2cacb7
+
+## Commits
+b2cacb7 feat(core): export and register RealtimeModule in server (REQ-RT-010)
+
+## Files changed
+ apps/server/src/app.module.ts | 10 ++++++++--
+ packages/core/src/index.ts    |  2 ++
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 6d4d9ba..b3220e1 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,7 +1,13 @@
+ import { Module } from '@nestjs/common';
+-import { AppRegistryModule, HealthModule, PrismaModule, RoomModule } from '@mymozhem/core';
++import {
++  AppRegistryModule,
++  HealthModule,
++  PrismaModule,
++  RealtimeModule,
++  RoomModule,
++} from '@mymozhem/core';
+ 
+ @Module({
+-  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule],
++  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule, RealtimeModule],
+ })
+ export class AppModule {}
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index d530392..a4eeba6 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -4,10 +4,12 @@ export * from './prisma/prisma.module';
+ export * from './health/health.controller';
+ export * from './health/health.module';
+ export * from './app-registry/app-registry';
+ export * from './app-registry/app-registry.tokens';
+ export * from './app-registry/app-registry.service';
+ export * from './app-registry/app-registry.module';
+ export * from './room/room.errors';
+ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
++export * from './realtime/event-log.service';
++export * from './realtime/realtime.module';

@@ -1,0 +1,172 @@
+# Review package: e376385..HEAD
+
+## Commits
+9036b96 feat(core): join с самоназначением SPECTATOR (REQ-ID-011); зритель не занимает лимит участников
+
+## Files changed
+ .../src/membership/membership.service.int-spec.ts  | 40 ++++++++++++++++++++++
+ packages/core/src/membership/membership.service.ts | 25 ++++++++++----
+ packages/core/src/transport/join.controller.ts     |  4 +--
+ 3 files changed, 60 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 05b33d1..b595db0 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -180,20 +180,60 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   it('does not count the ORGANIZER membership toward the participant limit', async () => {
+     const room = await roomService.create(ORG); // создаёт ORGANIZER-membership
+     const result = await makeMembership({ participantLimit: 1 }).join({
+       code: room.code,
+       displayName: 'A',
+       ip: IP,
+     });
+     expect(result.membership.role).toBe('PARTICIPANT');
+   });
+ 
++  it('join with role spectator creates SPECTATOR membership (REQ-ID-011)', async () => {
++    const room = await roomService.create(ORG);
++    const { membership } = await makeMembership().join({
++      code: room.code,
++      displayName: 'Зритель',
++      ip: '10.0.0.9',
++      role: 'spectator',
++    });
++    expect(membership.role).toBe('SPECTATOR');
++  });
++
++  it('spectator does not consume the participant limit (REQ-ID-011)', async () => {
++    const room = await roomService.create(ORG);
++    const service = makeMembership({ participantLimit: 1 });
++    // Комната заполнена до лимита участниками (существующий харнесс лимита).
++    await service.join({ code: room.code, displayName: 'Игрок', ip: IP });
++    const spectator = await service.join({
++      code: room.code,
++      displayName: 'Зритель',
++      ip: IP2,
++      role: 'spectator',
++    });
++    expect(spectator.membership.role).toBe('SPECTATOR');
++    const err = await service
++      .join({ code: room.code, displayName: 'Лишний', ip: '10.0.0.10' })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomParticipantLimitReachedError);
++    expect((err as RoomParticipantLimitReachedError).code).toBe('ROOM_PARTICIPANT_LIMIT_REACHED');
++  });
++
++  it('default join (no role) stays PARTICIPANT (regression)', async () => {
++    const room = await roomService.create(ORG);
++    const { membership } = await makeMembership().join({
++      code: room.code,
++      displayName: 'Игрок',
++      ip: IP,
++    });
++    expect(membership.role).toBe('PARTICIPANT');
++  });
++
+   it('refuses the (limit+1)-th attempt from one IP with JOIN_RATE_LIMITED', async () => {
+     const room = await roomService.create(ORG);
+     const service = makeMembership({ rateLimit: 2 });
+     await service.join({ code: room.code, displayName: 'A', ip: IP });
+     await service.join({ code: room.code, displayName: 'B', ip: IP });
+     const err = await service
+       .join({ code: room.code, displayName: 'C', ip: IP })
+       .catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(JoinRateLimitedError);
+     expect((err as JoinRateLimitedError).code).toBe('JOIN_RATE_LIMITED');
+diff --git a/packages/core/src/membership/membership.service.ts b/packages/core/src/membership/membership.service.ts
+index 179ed08..0732dbf 100644
+--- a/packages/core/src/membership/membership.service.ts
++++ b/packages/core/src/membership/membership.service.ts
+@@ -135,21 +135,21 @@ export class MembershipService {
+         );
+       }
+     }
+     return { excluded: true };
+   }
+ 
+   // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
+   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
+   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
+   // в один ROOM_JOIN_DENIED (REQ-ID-013).
+-  async join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult> {
++  async join(params: { code: string; displayName: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
+     if (!this.joinRateLimiter.tryAcquire(params.ip)) {
+       throw new JoinRateLimitedError('Join rate limit exceeded');
+     }
+     // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
+     const name = displayNameSchema.parse(params.displayName);
+ 
+     const room = await this.prisma.room.findUnique({ where: { code: params.code } });
+     if (!room) {
+       throw new RoomJoinDeniedError('no room for code');
+     }
+@@ -170,26 +170,37 @@ export class MembershipService {
+       where: { roomId: room.id, ip: params.ip },
+     });
+     if (excluded) {
+       throw new RoomJoinDeniedError(`ip excluded from room ${room.id}`);
+     }
+ 
+     // Гонка count-then-insert принята (design §1, развилка (б)): лимит анти-накруточный,
+     // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
+     // Считаются только живые membership (deletedAt: null) — исключённый участник
+     // не занимает слот лимита навсегда (REQ-SEC-003, ruling контроллера).
+-    const participantCount = await this.prisma.membership.count({
+-      where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
+-    });
+-    if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
+-      throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
++    // Лимит — только на участников (REQ-ID-011): зритель слота не занимает и вход
++    // в заполненную участниками комнату ему не закрыт (зритель не нагружает арбитраж).
++    if (params.role !== 'spectator') {
++      const participantCount = await this.prisma.membership.count({
++        where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
++      });
++      if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
++        throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
++      }
+     }
+ 
+     return this.prisma.$transaction(async (tx) => {
+       const identity = await this.identity.createGuest(name, tx);
+       const membership = await tx.membership.create({
+-        data: { roomId: room.id, identityId: identity.id, joinIp: params.ip, role: 'PARTICIPANT' },
++        data: {
++          roomId: room.id,
++          identityId: identity.id,
++          joinIp: params.ip,
++          // REQ-ID-011: самоназначение зрителем (фаза 2). Только два wire-значения
++          // (SDK-схема), маппинг здесь — единственная точка.
++          role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
++        },
+       });
+       return { membership, identity };
+     });
+   }
+ }
+diff --git a/packages/core/src/transport/join.controller.ts b/packages/core/src/transport/join.controller.ts
+index 8798f74..b3b482a 100644
+--- a/packages/core/src/transport/join.controller.ts
++++ b/packages/core/src/transport/join.controller.ts
+@@ -17,17 +17,17 @@ export class JoinController {
+ 
+   // actorId НЕ принимается из payload — актор определяется только выданным токеном
+   // (REQ-RT-009 по духу для HTTP). ZodError/доменные ошибки уходят в фильтр —
+   // контроллер статусов не знает (design §5).
+   @Post('rooms/join')
+   async join(
+     @Body() body: unknown,
+     @Req() req: RequestLike,
+     @Res({ passthrough: true }) reply: ReplyLike,
+   ): Promise<TokenResponse> {
+-    const { code, displayName } = joinRequestSchema.parse(body);
+-    const { identity, membership } = await this.membership.join({ code, displayName, ip: req.ip });
++    const { code, displayName, role } = joinRequestSchema.parse(body);
++    const { identity, membership } = await this.membership.join({ code, displayName, role, ip: req.ip });
+     const issued = await this.tokens.issueGuestTokens(identity.id, membership.roomId);
+     setRefreshCookie(reply, issued.refreshToken, this.config, issued.kind);
+     return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
+   }
+ }

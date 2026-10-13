@@ -1,0 +1,311 @@
+# Review package: 72b5dad..HEAD
+
+## Commits
+730d646 feat(sdk): zod authoring surface with fail-closed conversion guard (REQ-CTR-008, ADR-006, ADR-008)
+
+## Files changed
+ packages/sdk/src/index.ts                          |   2 +
+ .../sdk/src/manifest/define-app.contract.spec.ts   | 138 +++++++++++++++++++++
+ packages/sdk/src/manifest/define-app.fixtures.ts   |  21 ++++
+ packages/sdk/src/manifest/define-app.ts            | 104 ++++++++++++++++
+ 4 files changed, 265 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 26e25ee..ce665fe 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -4,10 +4,12 @@ export * from './visibility/visibility';
+ export * from './visibility/visibility.fixtures';
+ export * from './events/event-type';
+ export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
+ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+ export * from './manifest/manifest.schema';
+ export * from './manifest/manifest.fixtures';
+ export * from './manifest/app-settings-visibility';
++export * from './manifest/define-app';
++export * from './manifest/define-app.fixtures';
+diff --git a/packages/sdk/src/manifest/define-app.contract.spec.ts b/packages/sdk/src/manifest/define-app.contract.spec.ts
+new file mode 100644
+index 0000000..f9a1201
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.contract.spec.ts
+@@ -0,0 +1,138 @@
++import { z } from 'zod';
++import { ContractError } from '../errors/error-codes';
++import { CONTRACT_VERSION } from '../contract-version';
++import { appManifestSchema } from './manifest.schema';
++import { readPropertyVisibility } from './app-settings-visibility';
++import { defineApp, toRegisteredSchema } from './define-app';
++import { representableSchemas, unrepresentableSchemas } from './define-app.fixtures';
++
++const quizSettings = z.object({
++  title: z.string().meta({ 'x-visibility': 'public' }),
++  correctAnswers: z.array(z.number()),
++});
++
++const defineQuiz = () =>
++  defineApp({
++    appId: 'quiz',
++    manifestVersion: 1,
++    appSettings: quizSettings,
++    events: {
++      'answer.submitted': {
++        schema: z.object({ roundId: z.string(), choice: z.number().int() }),
++        visibility: 'module-private',
++      },
++    },
++  });
++
++describe('conversion guard', () => {
++  it.each(representableSchemas.map((c) => [c.name, c.schema] as const))(
++    'converts a legal schema: %s',
++    (_name, schema) => {
++      expect(() => toRegisteredSchema(schema)).not.toThrow();
++    },
++  );
++
++  // Design §6: the loss is SILENT, which is the ADR-008 class of defect — the app
++  // believes the core enforces a rule the core never received. Reject instead.
++  it.each(unrepresentableSchemas.map((c) => [c.name, c.schema] as const))(
++    'refuses a schema that would not survive conversion: %s',
++    (_name, schema) => {
++      expect(() => toRegisteredSchema(schema)).toThrow(ContractError);
++      try {
++        toRegisteredSchema(schema);
++      } catch (err) {
++        expect((err as ContractError).code).toBe('SCHEMA_NOT_REPRESENTABLE');
++      }
++    },
++  );
++
++  // This is the fixture that guards the guard (design §6). It rests on a zod
++  // internal (_zod.def.checks); a zod upgrade that breaks detection must fail CI
++  // loudly rather than quietly open the gate. Do not silence it — fix the detector.
++  it('still detects that zod drops .refine() silently', () => {
++    const refined = z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b);
++    const converted = JSON.stringify(z.toJSONSchema(refined));
++
++    expect(converted).not.toContain('refine');
++    expect(() => toRegisteredSchema(refined)).toThrow(ContractError);
++  });
++
++  it('keeps the checks that DO convert', () => {
++    const json = toRegisteredSchema(z.object({ nick: z.string().min(1) }));
++    expect(JSON.stringify(json)).toContain('minLength');
++  });
++});
++
++describe('defineApp', () => {
++  it('produces a manifest that satisfies the manifest contract', () => {
++    expect(appManifestSchema.safeParse(defineQuiz()).success).toBe(true);
++  });
++
++  it('defaults contractRange to the current major of the contract', () => {
++    expect(defineQuiz().contractRange).toBe(`^${CONTRACT_VERSION}`);
++  });
++
++  it('keeps an explicit contractRange', () => {
++    const manifest = defineApp({
++      appId: 'quiz',
++      manifestVersion: 2,
++      contractRange: '>=1.0.0 <2.0.0',
++      appSettings: quizSettings,
++      events: {},
++    });
++    expect(manifest.contractRange).toBe('>=1.0.0 <2.0.0');
++  });
++
++  it('registers events under short names and carries their ceiling', () => {
++    const manifest = defineQuiz();
++    expect(Object.keys(manifest.events)).toEqual(['answer.submitted']);
++    expect(manifest.events['answer.submitted'].visibility).toBe('module-private');
++  });
++
++  it('snapshots appSettings with visibility annotations intact (ADR-008)', () => {
++    const manifest = defineQuiz();
++    expect(readPropertyVisibility(manifest.appSettings, 'title')).toBe('public');
++    // Never annotated → module-private, and that is what the outcome-deciding data
++    // must be (REQ-CORE-008).
++    expect(readPropertyVisibility(manifest.appSettings, 'correctAnswers')).toBe('module-private');
++  });
++
++  // REQ-CTR-002: what the registry stores must be serializable — no live zod.
++  it('produces a JSON-serializable manifest with no live objects in it', () => {
++    const manifest = defineQuiz();
++    expect(JSON.parse(JSON.stringify(manifest))).toEqual(manifest);
++  });
++
++  it('refuses an app that would take the core namespace', () => {
++    expect(() =>
++      defineApp({ appId: 'core', manifestVersion: 1, appSettings: quizSettings, events: {} }),
++    ).toThrow(ContractError);
++  });
++
++  it('refuses an unrepresentable event schema with a typed error', () => {
++    expect(() =>
++      defineApp({
++        appId: 'quiz',
++        manifestVersion: 1,
++        appSettings: quizSettings,
++        events: {
++          'answer.submitted': {
++            schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b),
++            visibility: 'module-private',
++          },
++        },
++      }),
++    ).toThrow(ContractError);
++  });
++
++  it('refuses a misspelled visibility annotation', () => {
++    expect(() =>
++      defineApp({
++        appId: 'quiz',
++        manifestVersion: 1,
++        appSettings: z.object({ title: z.string().meta({ 'x-visibility': 'publik' }) }),
++        events: {},
++      }),
++    ).toThrow(ContractError);
++  });
++});
+diff --git a/packages/sdk/src/manifest/define-app.fixtures.ts b/packages/sdk/src/manifest/define-app.fixtures.ts
+new file mode 100644
+index 0000000..75201a2
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.fixtures.ts
+@@ -0,0 +1,21 @@
++import { z } from 'zod';
++
++// Schemas an app may legally author: everything here survives conversion intact.
++export const representableSchemas: { name: string; schema: z.ZodType }[] = [
++  { name: 'string bounds and regex', schema: z.object({ nick: z.string().min(1).max(32), code: z.string().regex(/^[A-Z]+$/) }) },
++  { name: 'integer bounds', schema: z.object({ choice: z.number().int().min(0).max(3) }) },
++  { name: 'enum and optional', schema: z.object({ kind: z.enum(['a', 'b']), note: z.string().optional() }) },
++  { name: 'nested object and array', schema: z.object({ rounds: z.array(z.object({ id: z.string() })) }) },
++  { name: 'visibility annotation', schema: z.object({ title: z.string().meta({ 'x-visibility': 'public' }) }) },
++];
++
++// Schemas that must be refused: each would either vanish silently or fail to convert.
++export const unrepresentableSchemas: { name: string; schema: z.ZodType }[] = [
++  { name: 'top-level .refine()', schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) },
++  { name: 'nested .refine()', schema: z.object({ inner: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) }) },
++  { name: '.refine() inside an array', schema: z.object({ xs: z.array(z.string().refine((s) => s.length > 2)) }) },
++  { name: '.superRefine()', schema: z.object({ s: z.string() }).superRefine(() => {}) },
++  { name: 'z.date()', schema: z.object({ at: z.date() }) },
++  { name: 'z.bigint()', schema: z.object({ n: z.bigint() }) },
++  { name: '.transform()', schema: z.object({ s: z.string().transform((s) => s.length) }) },
++];
+diff --git a/packages/sdk/src/manifest/define-app.ts b/packages/sdk/src/manifest/define-app.ts
+new file mode 100644
+index 0000000..3562d3f
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.ts
+@@ -0,0 +1,104 @@
++import { z } from 'zod';
++import { CONTRACT_VERSION } from '../contract-version';
++import { ContractError } from '../errors/error-codes';
++import type { Visibility } from '../visibility/visibility';
++import { assertVisibilityAnnotations } from './app-settings-visibility';
++import {
++  appManifestSchema,
++  type AppManifest,
++  type JsonSchemaObject,
++} from './manifest.schema';
++
++// The authoring surface (design §4.6): an app writes zod — types and DX — while the
++// REGISTERED artifact is JSON Schema. That is what makes REQ-RT-004 an invariant
++// held by data: the snapshot sits in the core's storage under
++// (appId, manifestVersion), so a module cannot break an active room's validation by
++// deleting last version's code.
++export type AppDefinition = {
++  appId: string;
++  manifestVersion: number;
++  // Defaults to the current major of the contract (REQ-CTR-004).
++  contractRange?: string;
++  appSettings: z.ZodType;
++  // Short names; the core prefixes the namespace itself (design §4.1).
++  events: Record<string, { schema: z.ZodType; visibility: Visibility }>;
++};
++
++type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
++type CheckInternals = { _zod?: { def?: { check?: string } } };
++
++// A custom refinement reports check === 'custom'; ordinary checks report their own
++// kind ('min_length', 'greater_than', …) and convert fine. Testing for a non-empty
++// checks array would reject legal schemas.
++const hasCustomCheck = (schema: unknown): boolean =>
++  ((schema as ZodInternals)?._zod?.def?.checks ?? []).some(
++    (check) => (check as CheckInternals)?._zod?.def?.check === 'custom',
++  );
++
++// The conversion guard (design §6).
++//
++// z.toJSONSchema drops .refine()/.superRefine() SILENTLY while throwing on
++// date/bigint/transform. Silent loss is the defect class ADR-008 exists to prevent:
++// the app is convinced the core enforces its rule, and the core never received it.
++// So a manifest carrying one is refused outright.
++//
++// This reads a zod internal (_zod.def.checks) on purpose. The cure is the project's
++// own principle: the guard is covered by a fixture, so a zod upgrade that breaks
++// detection turns CI red instead of quietly opening the gate.
++export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
++  try {
++    // `override` is invoked for every subschema, so it walks the tree for us —
++    // nested refinements and refinements inside arrays included.
++    const json = z.toJSONSchema(schema, {
++      override: (ctx) => {
++        if (hasCustomCheck(ctx.zodSchema)) {
++          throw new ContractError(
++            'SCHEMA_NOT_REPRESENTABLE',
++            'custom refinement (.refine/.superRefine) cannot be represented in JSON Schema and would be dropped silently',
++          );
++        }
++      },
++    });
++    return { ...json } as JsonSchemaObject;
++  } catch (err) {
++    if (err instanceof ContractError) {
++      throw err;
++    }
++    // date / bigint / transform: zod throws by itself — re-wrap as a typed code so
++    // nothing raw reaches the caller (REQ-SEC-006).
++    throw new ContractError(
++      'SCHEMA_NOT_REPRESENTABLE',
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++};
++
++// Where zod stops being the artifact and JSON Schema starts. The core validates the
++// FORM from this snapshot; semantics that need room state stay with the app
++// (design §4.6, REQ-RT-013).
++export const defineApp = (definition: AppDefinition): AppManifest => {
++  const appSettings = toRegisteredSchema(definition.appSettings);
++  assertVisibilityAnnotations(appSettings);
++
++  const events = Object.fromEntries(
++    Object.entries(definition.events).map(([shortName, event]) => [
++      shortName,
++      { schema: toRegisteredSchema(event.schema), visibility: event.visibility },
++    ]),
++  );
++
++  const manifest = {
++    appId: definition.appId,
++    manifestVersion: definition.manifestVersion,
++    contractRange: definition.contractRange ?? `^${CONTRACT_VERSION}`,
++    appSettings,
++    events,
++  };
++
++  const parsed = appManifestSchema.safeParse(manifest);
++  if (!parsed.success) {
++    throw new ContractError('MANIFEST_INVALID', parsed.error.message);
++  }
++
++  return parsed.data;
++};

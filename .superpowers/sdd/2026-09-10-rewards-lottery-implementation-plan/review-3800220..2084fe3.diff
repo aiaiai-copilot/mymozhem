@@ -1,0 +1,775 @@
+# Review package: 3800220..2084fe3
+
+## Commits
+2084fe3 feat(core): TTL-свип гостей с приостановкой при открытой награде — ANONYMIZATION_GUARDS, GuestSweepService, scheduler
+
+## Files changed
+ packages/core/package.json                         |   1 +
+ packages/core/src/identity/anonymization-guards.ts |  10 +
+ packages/core/src/identity/guest-sweep.int-spec.ts | 243 +++++++++++++++++++++
+ packages/core/src/identity/guest-sweep.service.ts  |  56 +++++
+ .../core/src/identity/identity-sweep.module.ts     |  42 ++++
+ packages/core/src/identity/identity.module.ts      |  11 +-
+ packages/core/src/index.ts                         |   4 +
+ .../src/rewards/rewards-anonymization.guard.ts     |  20 ++
+ packages/core/src/rewards/rewards.module.ts        |   8 +-
+ pnpm-lock.yaml                                     |  35 +++
+ 10 files changed, 424 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index c619708..0935045 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -10,20 +10,21 @@
+     "lint": "eslint src",
+     "test": "jest",
+     "test:int": "jest -c jest.integration.config.js",
+     "prisma:generate": "prisma generate"
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-socket.io": "^11.1.28",
++    "@nestjs/schedule": "^6.1.3",
+     "@nestjs/websockets": "^11.1.28",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "ajv": "^8.20.0",
+     "ajv-formats": "^3.0.1",
+     "jsonwebtoken": "^9.0.3",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "socket.io": "^4.8.3",
+diff --git a/packages/core/src/identity/anonymization-guards.ts b/packages/core/src/identity/anonymization-guards.ts
+new file mode 100644
+index 0000000..fe4a0ef
+--- /dev/null
++++ b/packages/core/src/identity/anonymization-guards.ts
+@@ -0,0 +1,10 @@
++// Приостановка TTL гостя через hook, не импортом (design 2026-09-10 §5,
++// REQ-RWD-001/013): identity объявляет токен; rewards регистрирует guard в
++// composition root. Паттерн — по прецеденту onAccessRevoked (membership).
++export interface AnonymizationGuard {
++  // Возвращает подмножество identityIds, у которых есть нерешённая награда
++  // (AWARDED). identity про rewards не знает.
++  hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>>;
++}
++
++export const ANONYMIZATION_GUARDS = Symbol('ANONYMIZATION_GUARDS');
+diff --git a/packages/core/src/identity/guest-sweep.int-spec.ts b/packages/core/src/identity/guest-sweep.int-spec.ts
+new file mode 100644
+index 0000000..7a25658
+--- /dev/null
++++ b/packages/core/src/identity/guest-sweep.int-spec.ts
+@@ -0,0 +1,243 @@
++import { randomUUID } from 'node:crypto';
++import { Global, Module } from '@nestjs/common';
++import { Test } from '@nestjs/testing';
++import type { AppEffect } from '@mymozhem/sdk';
++import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
++import { AuthModule } from '../auth/auth.module';
++import { TokenService } from '../auth/token.service';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import { MembershipModule } from '../membership/membership.module';
++import { PrismaModule } from '../prisma/prisma.module';
++import { EventOutbox } from '../realtime/event-outbox';
++import { RealtimeModule } from '../realtime/realtime.module';
++import { RewardsAnonymizationGuard } from '../rewards/rewards-anonymization.guard';
++import { RewardsModule } from '../rewards/rewards.module';
++import { RewardsService } from '../rewards/rewards.service';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import { TEST_CONFIG } from '../testing/test-config';
++import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
++import { GuestSweepService } from './guest-sweep.service';
++import { IdentityModule } from './identity.module';
++
++// Бутстрап — по образцу rewards.int-spec.ts (Task 5): DI-контейнер, startTestDb()
++// ДО compile() (PrismaService читает DATABASE_URL при конструировании), TEST_CONFIG
++// через overrideProvider (GUEST_TTL = 86400 с — backdate на 25 ч делает гостя expired).
++// IdentitySweepModule здесь НЕ импортируется: расписание — composition root (Task 11),
++// логика свипа покрывается прямым вызовом sweepExpiredGuests.
++
++// Связка ANONYMIZATION_GUARDS — миниатюра composition root (Task 11): identity не
++// импортирует rewards (REQ-RWD-001), массив гардов из экспортированного провайдера
++// собирает глобальный wiring-модуль (@Global — единственный способ дотянуться из
++// IdentityModule без обратного импорта: DI-резолюция ограничена скоупом модуля).
++@Global()
++@Module({
++  imports: [RewardsModule],
++  providers: [
++    {
++      provide: ANONYMIZATION_GUARDS,
++      useFactory: (guard: RewardsAnonymizationGuard): AnonymizationGuard[] => [guard],
++      inject: [RewardsAnonymizationGuard],
++    },
++  ],
++  exports: [ANONYMIZATION_GUARDS],
++})
++class TestAnonymizationWiringModule {}
++
++const TRUNCATE =
++  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE';
++
++describe('GuestSweepService (int, REQ-ID-003/014)', () => {
++  let db: TestDb;
++  let sweep: GuestSweepService;
++  let tokens: TokenService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      // RewardsModule сознательно НЕ подключён: гардов нет, приостанавливать некому
++      // (ветка REQ-RWD-001 — identity работает без rewards).
++      imports: [ConfigModule, PrismaModule, IdentityModule, AuthModule],
++    })
++      // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    await moduleRef.init();
++    sweep = moduleRef.get(GuestSweepService);
++    tokens = moduleRef.get(TokenService);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(TRUNCATE);
++  });
++
++  // seedIdentity не принимает displayName (контракт хелпера) — PII выставляем прямым
++  // апдейтом; createdAt бэкдейтим за GUEST_TTL (86400 с) сырым SQL.
++  async function expiredGuest(displayName: string, email?: string) {
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST', email: email ?? null });
++    await db.prisma.identity.update({ where: { id: guest.id }, data: { displayName } });
++    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
++    return guest;
++  }
++
++  it('гость с истёкшим TTL анонимизируется: displayName/email → NULL, deletedAt выставлен, живые сессии отозваны', async () => {
++    const guest = await expiredGuest('Гость Свипа', `guest-${randomUUID()}@example.test`);
++    await tokens.issueGuestTokens(guest.id, randomUUID());
++
++    const anonymized = await sweep.sweepExpiredGuests();
++
++    expect(anonymized).toBe(1);
++    const after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest.id } });
++    expect(after.id).toBe(guest.id); // анонимизация, не удаление (REQ-ID-014)
++    expect(after.displayName).toBeNull();
++    expect(after.email).toBeNull();
++    expect(after.deletedAt).not.toBeNull();
++    const sessions = await db.prisma.session.findMany({ where: { identityId: guest.id } });
++    expect(sessions).toHaveLength(1);
++    expect(sessions[0].revokedAt).not.toBeNull();
++  });
++
++  it('гость с неистёкшим TTL и REGISTERED с истёкшим не тронуты', async () => {
++    const freshGuest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const registered = await seedIdentity(db.prisma, {
++      kind: 'REGISTERED',
++      email: `reg-${randomUUID()}@example.test`,
++    });
++    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${registered.id}::uuid`;
++
++    await sweep.sweepExpiredGuests();
++
++    const guestAfter = await db.prisma.identity.findUniqueOrThrow({ where: { id: freshGuest.id } });
++    expect(guestAfter.deletedAt).toBeNull();
++    const regAfter = await db.prisma.identity.findUniqueOrThrow({ where: { id: registered.id } });
++    expect(regAfter.deletedAt).toBeNull();
++    expect(regAfter.email).toBe(registered.email);
++  });
++
++  it('без подключённых гардов приостановки нет (rewards не подключён — REQ-RWD-001)', async () => {
++    const guest = await expiredGuest('Гость Без Гардов');
++    // Открытая награда напрямую в БД — sweep её не видит: гард не зарегистрирован.
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: 1, quantity: 1 },
++    });
++    await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: guest.id, status: 'AWARDED', sourceAppId: 'lottery' },
++    });
++
++    const anonymized = await sweep.sweepExpiredGuests();
++
++    expect(anonymized).toBe(1);
++    const after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest.id } });
++    expect(after.deletedAt).not.toBeNull();
++  });
++});
++
++describe('GuestSweepService — приостановка при открытой награде (REQ-RWD-013)', () => {
++  let db: TestDb;
++  let sweep: GuestSweepService;
++  let rewards: RewardsService;
++  let outbox: EventOutbox;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        // RealtimeGateway (провайдер RealtimeModule) разрешает AppRuntimeService
++        // через global-провайдер — без register DI не собирается.
++        AppRuntimeModule.register([]),
++        MembershipModule,
++        RealtimeModule,
++        RewardsModule,
++        IdentityModule,
++        TestAnonymizationWiringModule,
++      ],
++    })
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    await moduleRef.init();
++    sweep = moduleRef.get(GuestSweepService);
++    rewards = moduleRef.get(RewardsService);
++    outbox = moduleRef.get(EventOutbox);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(TRUNCATE);
++  });
++
++  async function expiredGuest(displayName: string) {
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.identity.update({ where: { id: guest.id }, data: { displayName } });
++    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
++    return guest;
++  }
++
++  // Хелпер продублирован из rewards.int-spec.ts (бриф Task 8): комната DRAFT с
++  // организатором (membership нужен assertOrganizer в fulfill/revoke) + приз с фондом.
++  async function seedPrize(quantity: number) {
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: quantity, quantity },
++    });
++    return { org, room, prize };
++  }
++  const prizeEffect = (prizeId: string, winnerId: string): AppEffect => ({
++    kind: 'award.prize',
++    prizeId,
++    winnerId,
++  });
++
++  it('гость с открытой AWARDED не анонимизируется; после fulfill/revoke — анонимизируется следующим проходом', async () => {
++    const { org, room, prize } = await seedPrize(2);
++
++    // Ветка fulfill: открытая награда приостанавливает свип.
++    const guest1 = await expiredGuest('Гость-победитель 1');
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, guest1.id)]));
++    expect(await sweep.sweepExpiredGuests()).toBe(0);
++    let after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest1.id } });
++    expect(after.deletedAt).toBeNull();
++    expect(after.displayName).toBe('Гость-победитель 1');
++    const award1 = await db.prisma.award.findFirstOrThrow({ where: { winnerId: guest1.id } });
++    await rewards.fulfill(room.id, award1.id, org.id);
++    expect(await sweep.sweepExpiredGuests()).toBe(1);
++    after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest1.id } });
++    expect(after.deletedAt).not.toBeNull();
++    expect(after.displayName).toBeNull();
++
++    // Ветка revoke: то же через отзыв.
++    const guest2 = await expiredGuest('Гость-победитель 2');
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, guest2.id)]));
++    expect(await sweep.sweepExpiredGuests()).toBe(0);
++    after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
++    expect(after.deletedAt).toBeNull();
++    const award2 = await db.prisma.award.findFirstOrThrow({ where: { winnerId: guest2.id } });
++    await rewards.revoke(room.id, award2.id, org.id);
++    expect(await sweep.sweepExpiredGuests()).toBe(1);
++    after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
++    expect(after.deletedAt).not.toBeNull();
++  });
++});
+diff --git a/packages/core/src/identity/guest-sweep.service.ts b/packages/core/src/identity/guest-sweep.service.ts
+new file mode 100644
+index 0000000..b7540a0
+--- /dev/null
++++ b/packages/core/src/identity/guest-sweep.service.ts
+@@ -0,0 +1,56 @@
++import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
++import { PrismaService } from '../prisma/prisma.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
++
++// Свип анонимизации гостей (REQ-ID-003/014, догон фазы 3): истечение guest_ttl
++// реализуется анонимизацией строки (обнуление PII, сохранение id — внешние ключи
++// и actorId в логе остаются валидными), не физическим удалением. База TTL —
++// createdAt (решение владельца, design §0.8). Приостановка при открытой награде —
++// через ANONYMIZATION_GUARDS (REQ-RWD-013); без подключённого rewards приостановки нет.
++@Injectable()
++export class GuestSweepService {
++  private readonly logger = new Logger(GuestSweepService.name);
++
++  constructor(
++    private readonly prisma: PrismaService,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++    @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
++  ) {}
++
++  // Возвращает число анонимизированных identity. Вся выборка/гард/запись — одна
++  // транзакция: гард-чек внутри неё закрывает окно гонки «награда создана между
++  // чтением кандидатов и анонимизацией» (перечитывание deletedAt в updateMany —
++  // вторая линия от гонки с ручным исключением).
++  async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
++    const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
++    return this.prisma.$transaction(async (tx) => {
++      const candidates = await tx.identity.findMany({
++        where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
++        select: { id: true },
++      });
++      if (candidates.length === 0) return 0;
++      const ids = candidates.map((c) => c.id);
++      const suspended = new Set<string>();
++      for (const guard of this.guards) {
++        for (const id of await guard.hasOpenAwards(ids)) suspended.add(id);
++      }
++      const sweepIds = ids.filter((id) => !suspended.has(id));
++      if (sweepIds.length === 0) return 0;
++      const anonymized = await tx.identity.updateMany({
++        where: { id: { in: sweepIds }, deletedAt: null },
++        data: { displayName: null, email: null, deletedAt: now },
++      });
++      // Отзыв живых сессий гостя — по прецеденту среза исключения
++      // (membership.service.ts:118-123). Сессия гостя под приостановкой истекает
++      // по своему капу как обычно (design §5) — здесь её нет.
++      await tx.session.updateMany({
++        where: { identityId: { in: sweepIds }, revokedAt: null },
++        data: { revokedAt: now },
++      });
++      this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
++      return anonymized.count;
++    });
++  }
++}
+diff --git a/packages/core/src/identity/identity-sweep.module.ts b/packages/core/src/identity/identity-sweep.module.ts
+new file mode 100644
+index 0000000..cebb51c
+--- /dev/null
++++ b/packages/core/src/identity/identity-sweep.module.ts
+@@ -0,0 +1,42 @@
++import { Inject, Injectable, Logger, Module, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
++import { SchedulerRegistry } from '@nestjs/schedule';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { ConfigModule } from '../config/config.module';
++import { IdentityModule } from './identity.module';
++import { GuestSweepService } from './guest-sweep.service';
++
++// Регистрация интервала свипа — только в composition root (этот модуль не
++// импортируется тестами: логика свипа покрыта прямым вызовом sweepExpiredGuests).
++// SchedulerRegistry резолвится из ScheduleModule.forRoot() composition root'а
++// (глобальный после forRoot). Одна реплика (REQ-OPS-005) — дублей джобы нет.
++@Injectable()
++class GuestSweepScheduler implements OnApplicationBootstrap, OnApplicationShutdown {
++  private readonly logger = new Logger(GuestSweepScheduler.name);
++
++  constructor(
++    private readonly sweep: GuestSweepService,
++    private readonly registry: SchedulerRegistry,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  onApplicationBootstrap(): void {
++    const interval = setInterval(() => {
++      this.sweep.sweepExpiredGuests().catch((err) => {
++        // Отказ прохода — error-лог, следующий проход повторит; джоба не роняет процесс.
++        this.logger.error('guest sweep failed', err);
++      });
++    }, this.config.CLEANUP_INTERVAL * 1000);
++    this.registry.addInterval('guest-sweep', interval);
++  }
++
++  onApplicationShutdown(): void {
++    this.registry.deleteInterval('guest-sweep');
++  }
++}
++
++@Module({
++  imports: [ConfigModule, IdentityModule],
++  providers: [GuestSweepScheduler],
++})
++export class IdentitySweepModule {}
+diff --git a/packages/core/src/identity/identity.module.ts b/packages/core/src/identity/identity.module.ts
+index 379f1ad..2e6351e 100644
+--- a/packages/core/src/identity/identity.module.ts
++++ b/packages/core/src/identity/identity.module.ts
+@@ -1,10 +1,15 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
++import { ConfigModule } from '../config/config.module';
+ import { IdentityService } from './identity.service';
++import { GuestSweepService } from './guest-sweep.service';
+ 
++// ConfigModule — APP_CONFIG для GuestSweepService (GUEST_TTL), по прецеденту
++// AuthModule (TokenService). ConfigModule — статический синглтон по метатипу:
++// повторный импорт в модулях-потребителях не плодит провайдер.
+ @Module({
+-  imports: [PrismaModule],
+-  providers: [IdentityService],
+-  exports: [IdentityService],
++  imports: [PrismaModule, ConfigModule],
++  providers: [IdentityService, GuestSweepService],
++  exports: [IdentityService, GuestSweepService],
+ })
+ export class IdentityModule {}
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 44a2def..dcbdab9 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -15,20 +15,23 @@ export * from './app-runtime/effects';
+ export * from './app-runtime/room-serializer';
+ export * from './app-runtime/app-projection-cache';
+ export * from './app-runtime/app-runtime.service';
+ export * from './app-runtime/app-runtime.module';
+ export * from './room/room.errors';
+ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
+ export * from './identity/identity.service';
+ export * from './identity/identity.module';
++export * from './identity/anonymization-guards';
++export * from './identity/guest-sweep.service';
++export * from './identity/identity-sweep.module';
+ export * from './membership/membership.errors';
+ export * from './membership/join-rate-limiter';
+ export * from './membership/membership.service';
+ export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
+ export * from './realtime/event-emit-limiter';
+ export * from './realtime/realtime.errors';
+ // Срез исключения: membership.errors тоже экспортирует ActorNotMemberError
+ // (MembershipError-подкласс, design 2026-08-18 §«Гейт актора») — star-export двух
+ // модулей даёт TS2308. Явный re-export снимает неоднозначность в пользу realtime-
+@@ -38,20 +41,21 @@ export * from './realtime/realtime.module';
+ export * from './realtime/realtime-bus';
+ export * from './realtime/event-outbox';
+ export * from './realtime/projection.service';
+ export * from './realtime/subscription-registry';
+ export * from './realtime/realtime.tokens';
+ export * from './realtime/error-mapping';
+ export * from './realtime/io-adapter';
+ export * from './realtime/realtime.gateway';
+ export * from './rewards/rewards.errors';
+ export * from './rewards/rewards.service';
++export * from './rewards/rewards-anonymization.guard';
+ export * from './rewards/rewards.module';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
+ export * from './oauth/oauth.constants';
+ export * from './oauth/oauth.errors';
+ export { OAUTH_PROVIDER_CLIENT } from './oauth/oauth-provider.client';
+ export type { OAuthProviderClient, ProviderProfile } from './oauth/oauth-provider.client';
+ export * from './oauth/oauth.module';
+diff --git a/packages/core/src/rewards/rewards-anonymization.guard.ts b/packages/core/src/rewards/rewards-anonymization.guard.ts
+new file mode 100644
+index 0000000..eea9fcc
+--- /dev/null
++++ b/packages/core/src/rewards/rewards-anonymization.guard.ts
+@@ -0,0 +1,20 @@
++import { Injectable } from '@nestjs/common';
++import type { AnonymizationGuard } from '../identity/anonymization-guards';
++import { PrismaService } from '../prisma/prisma.service';
++
++// REQ-RWD-013: гость с нерешённой наградой (AWARDED; FULFILLED/REVOKED — решённые)
++// не анонимизируется до разрешения — иначе приз осиротеет из-за обнуления имени
++// победителя до вручения.
++@Injectable()
++export class RewardsAnonymizationGuard implements AnonymizationGuard {
++  constructor(private readonly prisma: PrismaService) {}
++
++  async hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>> {
++    if (identityIds.length === 0) return new Set();
++    const rows = await this.prisma.award.findMany({
++      where: { winnerId: { in: [...identityIds] }, status: 'AWARDED' },
++      select: { winnerId: true },
++    });
++    return new Set(rows.map((r) => r.winnerId));
++  }
++}
+diff --git a/packages/core/src/rewards/rewards.module.ts b/packages/core/src/rewards/rewards.module.ts
+index c1d362e..de0ece7 100644
+--- a/packages/core/src/rewards/rewards.module.ts
++++ b/packages/core/src/rewards/rewards.module.ts
+@@ -1,18 +1,20 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { RewardsService } from './rewards.service';
+ import { RewardsController } from './rewards.controller';
++import { RewardsAnonymizationGuard } from './rewards-anonymization.guard';
+ 
+ // Контур rewards (design 2026-09-10 §2). Handler-провайдер диспетчера эффектов
+ // и @Global — Task 11. AuthModule — TokenService для Bearer-аутентификации
+-// контроллера (прецедент TransportModule).
++// контроллера (прецедент TransportModule). RewardsAnonymizationGuard экспортируется
++// для связки ANONYMIZATION_GUARDS в composition root (REQ-RWD-013, hook, не импорт).
+ @Module({
+   imports: [PrismaModule, MembershipModule, RealtimeModule, AuthModule],
+   controllers: [RewardsController],
+-  providers: [RewardsService],
+-  exports: [RewardsService],
++  providers: [RewardsService, RewardsAnonymizationGuard],
++  exports: [RewardsService, RewardsAnonymizationGuard],
+ })
+ export class RewardsModule {}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 3b15a76..f7d270f 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -132,20 +132,23 @@ importers:
+         version: link:../sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/platform-socket.io':
+         specifier: ^11.1.28
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(rxjs@7.8.2)
++      '@nestjs/schedule':
++        specifier: ^6.1.3
++        version: 6.1.3(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@nestjs/websockets':
+         specifier: ^11.1.28
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@prisma/adapter-pg':
+         specifier: ^7.6.0
+         version: 7.8.0
+       '@prisma/client':
+         specifier: ^7.6.0
+         version: 7.8.0(prisma@7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3))(typescript@5.9.3)
+       ajv:
+@@ -687,20 +690,26 @@ packages:
+       '@fastify/view':
+         optional: true
+ 
+   '@nestjs/platform-socket.io@11.1.28':
+     resolution: {integrity: sha512-vY+GmU2jBcymvgm5rEnftUx4qNxK8cDJmXjl1/1NcpITTNJo0vg07xYR43MwXHcMqe7b0jwqt5+UCTzxqQFIqA==}
+     peerDependencies:
+       '@nestjs/common': ^11.0.0
+       '@nestjs/websockets': ^11.0.0
+       rxjs: ^7.1.0
+ 
++  '@nestjs/schedule@6.1.3':
++    resolution: {integrity: sha512-RflMFOpR16Dwd1jAUbeB4mfGTCh65fvEdL4mSjQPJChpkRGRjIXjb+6YQcK2faQrVT60c9DmLmoVR7/ONCtuYQ==}
++    peerDependencies:
++      '@nestjs/common': ^10.0.0 || ^11.0.0
++      '@nestjs/core': ^10.0.0 || ^11.0.0
++
+   '@nestjs/testing@11.1.28':
+     resolution: {integrity: sha512-B+VgRxeLaH7jkOMgAyUP3N3rpFlisQ7JRxixRbgHvG6a0VgKbbkNSofKExexCgKmQQak80undb3+2kE1lUBmRQ==}
+     peerDependencies:
+       '@nestjs/common': ^11.0.0
+       '@nestjs/core': ^11.0.0
+       '@nestjs/microservices': ^11.0.0
+       '@nestjs/platform-express': ^11.0.0
+     peerDependenciesMeta:
+       '@nestjs/microservices':
+         optional: true
+@@ -983,20 +992,23 @@ packages:
+ 
+   '@types/jest@29.5.14':
+     resolution: {integrity: sha512-ZN+4sdnLUbo8EVvVc2ao0GFW6oVrQRPn4K2lglySj7APvSrgzxHiNNK99us4WDMi57xxA2yggblIAMNhXOotLQ==}
+ 
+   '@types/json-schema@7.0.15':
+     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+ 
+   '@types/jsonwebtoken@9.0.10':
+     resolution: {integrity: sha512-asx5hIG9Qmf/1oStypjanR7iKTv0gXQ1Ov/jfrX6kS/EO0OFni8orbmGCn0672NHR3kXHwpAwR+B368ZGN/2rA==}
+ 
++  '@types/luxon@3.7.5':
++    resolution: {integrity: sha512-jJ41Q4z6ZVO260MNDdHfW7+7a5iMiX8Mr6ZJHcmgrvhZha6dz5704o/lF2kKl6URjH6ivEL97w9xS/MgpJEphg==}
++
+   '@types/ms@2.1.0':
+     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
+ 
+   '@types/node@18.19.130':
+     resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
+ 
+   '@types/node@24.13.3':
+     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+ 
+   '@types/pg@8.20.0':
+@@ -1458,20 +1470,24 @@ packages:
+ 
+   crc32-stream@6.0.0:
+     resolution: {integrity: sha512-piICUB6ei4IlTv1+653yq5+KoqfBYmj9bw6LqXoOneTMDXk5nM1qt12mFW1caG3LlJXEKW1Bp0WggEmIfQB34g==}
+     engines: {node: '>= 14'}
+ 
+   create-jest@29.7.0:
+     resolution: {integrity: sha512-Adz2bdH0Vq3F53KEMJOoftQFutWCukm6J24wbPWRO4k1kMY7gS7ds/uoJkNuV8wDCtWWnuwGcJwpWcih+zEW1Q==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+     hasBin: true
+ 
++  cron@4.4.0:
++    resolution: {integrity: sha512-fkdfq+b+AHI4cKdhZlppHveI/mgz2qpiYxcm+t5E5TsxX7QrLS1VE0+7GENEk9z0EeGPcpSciGv6ez24duWhwQ==}
++    engines: {node: '>=18.x'}
++
+   cross-spawn@7.0.6:
+     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
+     engines: {node: '>= 8'}
+ 
+   csstype@3.2.3:
+     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
+ 
+   debug@4.4.3:
+     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
+     engines: {node: '>=6.0'}
+@@ -2274,20 +2290,24 @@ packages:
+   lru-cache@10.4.3:
+     resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
+ 
+   lru-cache@5.1.1:
+     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+ 
+   lru.min@1.1.4:
+     resolution: {integrity: sha512-DqC6n3QQ77zdFpCMASA1a3Jlb64Hv2N2DciFGkO/4L9+q/IpIAuRlKOvCXabtRW6cQf8usbmM6BE/TOPysCdIA==}
+     engines: {bun: '>=1.0.0', deno: '>=1.30.0', node: '>=8.0.0'}
+ 
++  luxon@3.7.2:
++    resolution: {integrity: sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==}
++    engines: {node: '>=12'}
++
+   make-dir@4.0.0:
+     resolution: {integrity: sha512-hXdUTZYIVOt1Ex//jAQi+wTZZpUpwBj/0QsOzqegb3rGMMeJiSEu5xLHnYfBrRV4RH2+OCSOO95Is/7x1WJ4bw==}
+     engines: {node: '>=10'}
+ 
+   make-error@1.3.6:
+     resolution: {integrity: sha512-s8UhlNe7vPKomQhC1qFelMokr/Sc3AgNbso3n74mVPA5LTZwkB9NlXf4XPamLxJE8h0gh73rM94xvwRT2CVInw==}
+ 
+   makeerror@1.0.12:
+     resolution: {integrity: sha512-JmqCvUhmt43madlpFzG4BQzG2Z3m6tvQDNKdClZnO3VbIudJYmxsT0FNJMeiB2+JTSlTQTSbU8QdesVmwJcmLg==}
+ 
+@@ -3776,20 +3796,26 @@ snapshots:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/websockets': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       rxjs: 7.8.2
+       socket.io: 4.8.3
+       tslib: 2.8.1
+     transitivePeerDependencies:
+       - bufferutil
+       - supports-color
+       - utf-8-validate
+ 
++  '@nestjs/schedule@6.1.3(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)':
++    dependencies:
++      '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      cron: 4.4.0
++
+   '@nestjs/testing@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)':
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       tslib: 2.8.1
+ 
+   '@nestjs/websockets@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+@@ -4086,20 +4112,22 @@ snapshots:
+       expect: 29.7.0
+       pretty-format: 29.7.0
+ 
+   '@types/json-schema@7.0.15': {}
+ 
+   '@types/jsonwebtoken@9.0.10':
+     dependencies:
+       '@types/ms': 2.1.0
+       '@types/node': 24.13.3
+ 
++  '@types/luxon@3.7.5': {}
++
+   '@types/ms@2.1.0': {}
+ 
+   '@types/node@18.19.130':
+     dependencies:
+       undici-types: 5.26.5
+ 
+   '@types/node@24.13.3':
+     dependencies:
+       undici-types: 7.18.2
+ 
+@@ -4616,20 +4644,25 @@ snapshots:
+       graceful-fs: 4.2.11
+       jest-config: 29.7.0(@types/node@24.13.3)
+       jest-util: 29.7.0
+       prompts: 2.4.2
+     transitivePeerDependencies:
+       - '@types/node'
+       - babel-plugin-macros
+       - supports-color
+       - ts-node
+ 
++  cron@4.4.0:
++    dependencies:
++      '@types/luxon': 3.7.5
++      luxon: 3.7.2
++
+   cross-spawn@7.0.6:
+     dependencies:
+       path-key: 3.1.1
+       shebang-command: 2.0.0
+       which: 2.0.2
+ 
+   csstype@3.2.3: {}
+ 
+   debug@4.4.3:
+     dependencies:
+@@ -5627,20 +5660,22 @@ snapshots:
+   long@5.3.2: {}
+ 
+   lru-cache@10.4.3: {}
+ 
+   lru-cache@5.1.1:
+     dependencies:
+       yallist: 3.1.1
+ 
+   lru.min@1.1.4: {}
+ 
++  luxon@3.7.2: {}
++
+   make-dir@4.0.0:
+     dependencies:
+       semver: 7.8.5
+ 
+   make-error@1.3.6: {}
+ 
+   makeerror@1.0.12:
+     dependencies:
+       tmpl: 1.0.5
+ 

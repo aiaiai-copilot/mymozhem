@@ -1,0 +1,1260 @@
+# Review package: efdc606..HEAD
+
+## Commits
+320e3d5 feat(realtime): instrument REQ-OPS-004 metrics — connections gauge, commit errors, publish→deliver, replay
+
+## Files changed
+ apps/server/test/realtime.e2e-spec.ts              |  3 +-
+ apps/server/test/transport.e2e-spec.ts             |  3 +-
+ .../core/src/app-runtime/app-runtime.int-spec.ts   |  3 +-
+ packages/core/src/auth/token.service.int-spec.ts   |  3 +-
+ .../src/membership/membership.service.int-spec.ts  |  5 +-
+ packages/core/src/realtime/db-down.int-spec.ts     |  3 +-
+ .../core/src/realtime/event-commit.int-spec.ts     |  7 ++-
+ packages/core/src/realtime/event-log.int-spec.ts   |  3 +-
+ .../core/src/realtime/event-outbox.int-spec.ts     | 28 ++++++++-
+ packages/core/src/realtime/event-outbox.ts         | 24 +++++++-
+ .../core/src/realtime/realtime.gateway.spec.ts     | 68 +++++++++++++++++++---
+ packages/core/src/realtime/realtime.gateway.ts     | 13 +++++
+ packages/core/src/realtime/realtime.module.ts      |  3 +-
+ .../src/realtime/subscription-registry.spec.ts     | 26 +++++++--
+ .../core/src/realtime/subscription-registry.ts     |  8 +++
+ packages/core/src/room/room.service.int-spec.ts    |  5 +-
+ 16 files changed, 174 insertions(+), 31 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index 72202f2..238c4a6 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -9,20 +9,21 @@ import {
+   APP_MANIFESTS,
+   APP_RUNTIME_MODULES,
+   AppRegistryService,
+   ConfigurableIoAdapter,
+   EventEmitLimiter,
+   EventLogService,
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
++  MetricsService,
+   RealtimeBus,
+   RealtimeGateway,
+   RoomService,
+   TEST_CONFIG,
+   TokenService,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+   type TestDb,
+ } from '@mymozhem/core';
+@@ -165,21 +166,21 @@ describe('Realtime (e2e)', () => {
+   let savedDatabaseUrl: string | undefined;
+   let savedJwtSecret: string | undefined;
+ 
+   beforeAll(async () => {
+     savedDatabaseUrl = process.env.DATABASE_URL;
+     savedJwtSecret = process.env.JWT_SECRET;
+     db = await startTestDb();
+     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     const bus = new RealtimeBus();
+-    const outbox = new EventOutbox(db.prisma, bus);
++    const outbox = new EventOutbox(db.prisma, bus, new MetricsService());
+     const registry = new AppRegistryService([TEST_APP]);
+     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     roomService = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+       TEST_CONFIG,
+     );
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index b888300..1f6fda6 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -5,20 +5,21 @@ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { tokenResponseSchema } from '@mymozhem/sdk';
+ import {
+   AppRegistryService,
+   EventEmitLimiter,
+   EventLogService,
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
++  MetricsService,
+   RealtimeBus,
+   RoomService,
+   TEST_CONFIG,
+   TokenService,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+   type TestDb,
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+@@ -109,21 +110,21 @@ describe('Transport HTTP (e2e)', () => {
+ 
+   beforeAll(async () => {
+     savedDatabaseUrl = process.env.DATABASE_URL;
+     savedJwtSecret = process.env.JWT_SECRET;
+     db = await startTestDb(); // выставляет DATABASE_URL — её подхватят app'ы ниже
+     // Access-токены верифицируем тем же секретом, которым подписывают boot'нутые app'ы.
+     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
+     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
+-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+diff --git a/packages/core/src/app-runtime/app-runtime.int-spec.ts b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+index dcf204e..f7df071 100644
+--- a/packages/core/src/app-runtime/app-runtime.int-spec.ts
++++ b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+@@ -8,20 +8,21 @@ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { RealtimeBus } from '../realtime/realtime-bus';
+ import { EventOutbox } from '../realtime/event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ import { EventPayloadInvalidError, RoomNotActiveError } from '../realtime/realtime.errors';
+ import { AppRuntimeService } from './app-runtime.service';
+ import { AppProjectionCache } from './app-projection-cache';
+ import { PublishForbiddenError, AppModuleUnavailableError } from './app-runtime.errors';
+ import type { AwardEffectHandler } from './effects';
+ import { RewardsService } from '../rewards/rewards.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-0000000000a1';
+ const P2 = '00000000-0000-0000-0000-0000000000b2';
+@@ -231,21 +232,21 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: P3, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: SPEC, kind: 'GUEST' });
+     for (let i = 0; i < 20; i++) {
+       await seedIdentity(db.prisma, { id: racerId(i), kind: 'GUEST' });
+     }
+     registry = new AppRegistryService([TEST_APP, TEST_APP_V2, TEST_APP_CAPABLE]);
+     bus = new RealtimeBus();
+-    outbox = new EventOutbox(db.prisma, bus);
++    outbox = new EventOutbox(db.prisma, bus, new MetricsService());
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     membership = new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+     );
+     rooms = new RoomService(db.prisma, eventLog, outbox, registry, membership, TEST_CONFIG);
+   }, 120000);
+ 
+diff --git a/packages/core/src/auth/token.service.int-spec.ts b/packages/core/src/auth/token.service.int-spec.ts
+index d16ed6e..6cdc7f9 100644
+--- a/packages/core/src/auth/token.service.int-spec.ts
++++ b/packages/core/src/auth/token.service.int-spec.ts
+@@ -1,17 +1,18 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { RealtimeBus } from '../realtime/realtime-bus';
+ import { EventOutbox } from '../realtime/event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { TokenService } from './token.service';
+ import { AUTH_ERROR_CODES, AuthError } from './auth.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const IP = '203.0.113.7';
+@@ -32,21 +33,21 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     membership = new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+     );
+-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index c67349d..299c03a 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -1,17 +1,18 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { RealtimeBus } from '../realtime/realtime-bus';
+ import { EventOutbox } from '../realtime/event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from './membership.service';
+ import { JoinRateLimiter } from './join-rate-limiter';
+ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+@@ -35,21 +36,21 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+     );
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
+-    const outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+@@ -364,21 +365,21 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
+     new MembershipService(
+       db2.prisma,
+       new IdentityService(db2.prisma),
+       new JoinRateLimiter(1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+     );
+ 
+   beforeAll(async () => {
+     db2 = await startTestDb();
+     await seedIdentity(db2.prisma, { id: ORG, email: 'org2@example.test' });
+-    const outbox = new EventOutbox(db2.prisma, new RealtimeBus());
++    const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
+     roomService2 = new RoomService(
+       db2.prisma,
+       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+       outbox,
+       new AppRegistryService([]),
+       new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+diff --git a/packages/core/src/realtime/db-down.int-spec.ts b/packages/core/src/realtime/db-down.int-spec.ts
+index c2dcb52..a7266f4 100644
+--- a/packages/core/src/realtime/db-down.int-spec.ts
++++ b/packages/core/src/realtime/db-down.int-spec.ts
+@@ -6,20 +6,21 @@ import { TEST_CONFIG } from '../testing/test-config';
+ import type { PrismaService } from '../prisma/prisma.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-0000000000a1';
+ 
+ // Тот же фикстурный манифест, что в event-commit.int-spec (design §7).
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+   contractRange: '^1.0.0',
+   appSettings: {
+@@ -68,21 +69,21 @@ describe('Fail-closed при недоступной БД (REQ-DEV-008)', () => {
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+   function wire(p: PrismaService) {
+     const registry = new AppRegistryService([TEST_APP]);
+-    const outbox = new EventOutbox(p, new RealtimeBus());
++    const outbox = new EventOutbox(p, new RealtimeBus(), new MetricsService());
+     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     const membership = new MembershipService(
+       p,
+       new IdentityService(p),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+     );
+     const rooms = new RoomService(p, eventLog, outbox, registry, membership, TEST_CONFIG);
+     return { registry, outbox, eventLog, membership, rooms };
+   }
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+index f7fd0d8..957e71b 100644
+--- a/packages/core/src/realtime/event-commit.int-spec.ts
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -5,20 +5,21 @@ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ import {
+   ActorNotMemberError,
+   EventEmitRateLimitedError,
+   EventPayloadInvalidError,
+   EventPayloadTooLargeError,
+   EventTypeUnknownError,
+   EventVisibilityExceededError,
+   RoomNotActiveError,
+ } from './realtime.errors';
+ 
+@@ -66,21 +67,21 @@ describe('EventLogService.commitAppEvent', () => {
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+   let outbox: EventOutbox;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
+     const registry = new AppRegistryService([TEST_APP]);
+-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     rooms = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+@@ -300,21 +301,21 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
+   let rooms: RoomService;
+   let limitedLog: EventLogService;
+   let outbox: EventOutbox;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
+     const registry = new AppRegistryService([TEST_APP]);
+-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     limitedLog = new EventLogService(registry, new EventEmitLimiter(3), TEST_CONFIG, outbox);
+     rooms = new RoomService(
+       db.prisma,
+       limitedLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+@@ -386,21 +387,21 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+   let outbox: EventOutbox;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+     await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
+     const registry = new AppRegistryService([TEST_APP]);
+-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     rooms = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index c4613fa..f64696c 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -6,33 +6,34 @@ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('EventLogService.commitCoreEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+   let outbox: EventOutbox;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    outbox = new EventOutbox(db.prisma, new RealtimeBus());
++    outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     rooms = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([validManifests[0]]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([validManifests[0]]),
+diff --git a/packages/core/src/realtime/event-outbox.int-spec.ts b/packages/core/src/realtime/event-outbox.int-spec.ts
+index 83bee83..e9d81f4 100644
+--- a/packages/core/src/realtime/event-outbox.int-spec.ts
++++ b/packages/core/src/realtime/event-outbox.int-spec.ts
+@@ -1,21 +1,22 @@
+-import type { AppManifest } from '@mymozhem/sdk';
++import { ContractError, type AppManifest } from '@mymozhem/sdk';
+ import type { LogEvent } from '@prisma/client';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
++import { MetricsService } from '../observability/metrics.service';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import {
+   EventOutbox,
+   EventOutboxMissingContextError,
+   EventOutboxNestedRunError,
+ } from './event-outbox';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+@@ -41,30 +42,32 @@ const TEST_APP: AppManifest = {
+       visibility: 'public',
+       clientInitiated: true,
+     },
+   },
+ };
+ 
+ describe('EventOutbox', () => {
+   let db: TestDb;
+   let bus: RealtimeBus;
+   let outbox: EventOutbox;
++  let metrics: MetricsService;
+   let eventLog: EventLogService;
+   let rooms: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
+     const registry = new AppRegistryService([TEST_APP]);
+     bus = new RealtimeBus();
+-    outbox = new EventOutbox(db.prisma, bus);
++    metrics = new MetricsService();
++    outbox = new EventOutbox(db.prisma, bus, metrics);
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     rooms = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
+       TEST_CONFIG,
+     );
+   }, 120000);
+@@ -128,20 +131,41 @@ describe('EventOutbox', () => {
+     bus.subscribe((events) => delivered.push(...events));
+ 
+     await outbox.run((tx) => eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1));
+ 
+     // INSERT ... RETURNING * отдаёт сырую DB-метку enum ('public'); staged событие
+     // обязано быть нормализовано до Prisma-enum — fan-out gateway сравнивает
+     // visibility с 'PUBLIC' (вскрыто realtime e2e, Task 8: live-доставка пропадала).
+     expect(delivered.map((e) => e.visibility)).toEqual(['PUBLIC']);
+   });
+ 
++  // Метрики этих двух тестов — свои per-test инстансы: общий `metrics` живёт в
++  // beforeAll, и серия UNKNOWN от первого теста протекла бы в рендер второго.
++  it('откат tx по нетипизированному сбою инкрементирует mymozhem_event_commit_errors_total (REQ-OPS-004)', async () => {
++    const localMetrics = new MetricsService();
++    const localOutbox = new EventOutbox(db.prisma, bus, localMetrics);
++    await expect(localOutbox.run(() => Promise.reject(new Error('db gone')))).rejects.toThrow('db gone');
++    expect(await localMetrics.render()).toContain('mymozhem_event_commit_errors_total{code="UNKNOWN"} 1');
++  });
++
++  it('типизированный отказ (ContractError) — штатный отказ гейтов, счётчик не трогаем', async () => {
++    const localMetrics = new MetricsService();
++    const localOutbox = new EventOutbox(db.prisma, bus, localMetrics);
++    await expect(
++      localOutbox.run(() => Promise.reject(new ContractError('PRIZE_FUND_EXHAUSTED', 'x'))),
++    ).rejects.toMatchObject({ code: 'PRIZE_FUND_EXHAUSTED' });
++    // prom-client рендерит HELP/TYPE даже для пустого счётчика — отсутствие серий
++    // проверяем по '{': ни одной серии быть не должно (бриф-assert по имени метрики
++    // неосуществим: HELP-строка содержит имя всегда).
++    expect(await localMetrics.render()).not.toContain('mymozhem_event_commit_errors_total{');
++  });
++
+   it('rollback delivers nothing and writes nothing (REQ-DEV-008)', async () => {
+     const room = await activeRoom();
+     await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
+     let publishCalls = 0;
+     bus.subscribe(() => {
+       publishCalls += 1;
+     });
+ 
+     await expect(
+       outbox.run(async (tx) => {
+diff --git a/packages/core/src/realtime/event-outbox.ts b/packages/core/src/realtime/event-outbox.ts
+index 34c9a75..e01d4b4 100644
+--- a/packages/core/src/realtime/event-outbox.ts
++++ b/packages/core/src/realtime/event-outbox.ts
+@@ -1,51 +1,71 @@
+ import { AsyncLocalStorage } from 'node:async_hooks';
+ import { Injectable } from '@nestjs/common';
+-import type { LogEvent, Prisma } from '@prisma/client';
++import { ContractError } from '@mymozhem/sdk';
++import { Prisma, type LogEvent } from '@prisma/client';
+ import { PrismaService } from '../prisma/prisma.service';
++import { MetricsService } from '../observability/metrics.service';
+ import { RealtimeBus } from './realtime-bus';
++import { RealtimeError } from './realtime.errors';
+ 
+ // Внутренние ошибки механизма (design §5): обе означают баг вызывающего, на провод
+ // не маппятся (через gateway-фильтр уйдут как INTERNAL_ERROR).
+ export class EventOutboxMissingContextError extends Error {
+   constructor() {
+     super('commit*Event called outside EventOutbox.run: a committed event would have no delivery path');
+     this.name = new.target.name;
+   }
+ }
+ 
+ export class EventOutboxNestedRunError extends Error {
+   constructor() {
+     super('EventOutbox.run cannot be nested: Prisma has no nested interactive transactions');
+     this.name = new.target.name;
+   }
+ }
+ 
++// Label счётчика ошибок фиксации: P-код Prisma (ограниченное множество) либо UNKNOWN.
++function commitErrorLabel(err: unknown): string {
++  return err instanceof Prisma.PrismaClientKnownRequestError ? err.code : 'UNKNOWN';
++}
++
+ // Tx-scoped outbox (design §5, подход A): commit*Event складывает событие в
+ // ALS-контекст транзакции; run() после УСПЕШНОГО коммита отдаёт буфер в шину; при
+ // откате буфер умирает вместе с контекстом — откаченное событие недоставимо
+ // структурно. Контекста нет → fail-closed: «забыл доставить» исключено структурно.
+ @Injectable()
+ export class EventOutbox {
+   private readonly als = new AsyncLocalStorage<{ events: LogEvent[] }>();
+ 
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly bus: RealtimeBus,
++    private readonly metrics: MetricsService,
+   ) {}
+ 
+   async run<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+     if (this.als.getStore() !== undefined) {
+       throw new EventOutboxNestedRunError();
+     }
+     const store = { events: [] as LogEvent[] };
+-    const result = await this.prisma.$transaction((tx) => this.als.run(store, () => fn(tx)));
++    let result: T;
++    try {
++      result = await this.prisma.$transaction((tx) => this.als.run(store, () => fn(tx)));
++    } catch (err) {
++      // REQ-OPS-004: откат tx по СБОЮ фиксации (БД, баг) — считаем. Типизированные
++      // отказы домена (ContractError/RealtimeError) — штатные отказы гейтов, их
++      // rollback — не сбой: не считаем (дизайн ф.4 §3).
++      if (!(err instanceof ContractError) && !(err instanceof RealtimeError)) {
++        this.metrics.incCommitError(commitErrorLabel(err));
++      }
++      throw err;
++    }
+     // Flush строго после resolves $transaction: до этой строки события видны только
+     // буферу — подписчики никогда не наблюдают то, что может откатиться.
+     this.bus.publish(store.events);
+     return result;
+   }
+ 
+   stage(event: LogEvent): void {
+     const store = this.als.getStore();
+     if (store === undefined) {
+       throw new EventOutboxMissingContextError();
+diff --git a/packages/core/src/realtime/realtime.gateway.spec.ts b/packages/core/src/realtime/realtime.gateway.spec.ts
+index 0b0cc1f..7cd917d 100644
+--- a/packages/core/src/realtime/realtime.gateway.spec.ts
++++ b/packages/core/src/realtime/realtime.gateway.spec.ts
+@@ -23,52 +23,68 @@ function fakeSocket(claims: AccessClaims = GUEST_CLAIMS) {
+     disconnected: false as boolean | unknown,
+     join(room: string) { this.joined.push(room); },
+     leave(room: string) { this.left.push(room); },
+     disconnect(close?: boolean) { this.disconnected = close ?? true; },
+   };
+ }
+ type FakeSocket = ReturnType<typeof fakeSocket>;
+ 
+ type Ack = (value: unknown) => void;
+ 
++// Фейк метрик для реестров, которые тесты конструируют вне makeGateway.
++const fakeRegistryMetrics = () =>
++  ({
++    connectionAdded: jest.fn(),
++    connectionRemoved: jest.fn(),
++  }) as never;
++
+ function makeGateway(overrides: {
+   membership?: { findActiveMembership: jest.Mock; onAccessRevoked?: jest.Mock };
+   prisma?: { room: { findUnique: jest.Mock }; logEvent: { findMany: jest.Mock } };
+   appRuntime?: { dispatch: jest.Mock };
+   registry?: SubscriptionRegistry;
+   tokens?: { verifyAccessToken: jest.Mock };
+   reconnectLimiter?: { tryAcquire: jest.Mock };
+ }) {
+   const membership = overrides.membership ?? {
+     findActiveMembership: jest.fn().mockResolvedValue({ role: 'PARTICIPANT' }),
+     onAccessRevoked: jest.fn(),
+   };
+   const prisma = overrides.prisma ?? {
+     room: { findUnique: jest.fn().mockResolvedValue({ appId: 'quiz', manifestVersion: 1, appSettings: null }) },
+     logEvent: { findMany: jest.fn().mockResolvedValue([]) },
+   };
+   const appRuntime = overrides.appRuntime ?? { dispatch: jest.fn().mockResolvedValue(undefined) };
+   const tokens = overrides.tokens ?? { verifyAccessToken: jest.fn().mockReturnValue(GUEST_CLAIMS) };
+   const reconnectLimiter = overrides.reconnectLimiter ?? { tryAcquire: jest.fn().mockReturnValue(true) };
++  const fakeMetrics = {
++    observePublishToDeliver: jest.fn(),
++    observeReplayDuration: jest.fn(),
++    connectionAdded: jest.fn(),
++    connectionRemoved: jest.fn(),
++    incCommitError: jest.fn(),
++  };
++  const bus = { subscribe: jest.fn(), publish: jest.fn() };
+   const gateway = new RealtimeGateway(
+     tokens as never,
+     prisma as never,
+     membership as never,
+     { getManifest: jest.fn().mockReturnValue(undefined), getEventDefinition: jest.fn().mockReturnValue(undefined) } as never,
+     appRuntime as never,
+     new ProjectionService(),
+-    overrides.registry ?? new SubscriptionRegistry(),
+-    { subscribe: jest.fn(), publish: jest.fn() } as never,
++    overrides.registry ?? new SubscriptionRegistry(fakeMetrics as never),
++    bus as never,
+     reconnectLimiter as never,
+     {} as never,
++    fakeMetrics as never,
+   );
+-  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter };
++  return { gateway, membership, prisma, appRuntime, tokens, reconnectLimiter, metrics: fakeMetrics, bus };
+ }
+ 
+ const ackOf = () => {
+   const calls: unknown[] = [];
+   const ack: Ack = (v) => calls.push(v);
+   return { ack, calls };
+ };
+ 
+ describe('RealtimeGateway.handleSubscribe', () => {
+   it('rejects malformed payloads with REQUEST_INVALID', async () => {
+@@ -107,93 +123,101 @@ describe('RealtimeGateway.handleSubscribe', () => {
+       gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack),
+     ).resolves.toBeUndefined();
+     expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
+     expect(logger.error).toHaveBeenCalledTimes(1);
+   });
+ 
+   // Join-first (design §4, final-review fix I-1): join теперь внутри try до чтения
+   // лога — сбой join ПОСЛЕ registry.add обязан откатить полуподписку (реестр +
+   // каналы), иначе клиент с ack-ошибкой продолжал бы получать live-поток.
+   it('join failure after registry.add leaves no stale subscription', async () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     const { gateway } = makeGateway({ registry });
+     const logger = { error: jest.fn(), warn: jest.fn() };
+     (gateway as unknown as { logger: unknown }).logger = logger;
+     const socket = fakeSocket();
+     socket.join = () => {
+       throw new Error('adapter down');
+     };
+     const { ack, calls } = ackOf();
+     await expect(
+       gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack),
+     ).resolves.toBeUndefined();
+     expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
+     expect(registry.get('socket-1')).toBeUndefined();
+     expect(socket.left).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
+   });
+ 
+   it('participant joins the room channel with a public snapshot', async () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     const { gateway } = makeGateway({ registry });
+     const socket = fakeSocket();
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+     expect(socket.joined).toEqual([`room:${ROOM}`]);
+     expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
+     expect(registry.get('socket-1')).toMatchObject({ identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
+   });
+ 
+   it('organizer joins both channels at organizer level', async () => {
+     const { gateway } = makeGateway({ membership: { findActiveMembership: jest.fn().mockResolvedValue({ role: 'ORGANIZER' }) } });
+     const socket = fakeSocket();
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+     expect(socket.joined).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
+     expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
+   });
+ 
+   it('second subscription of the same socket to another room is REQUEST_INVALID', async () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
+     const { gateway } = makeGateway({ registry });
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack); // re-subscribe в ту же — ок
+     expect(calls[0]).toMatchObject({ ok: true });
+     const claims2 = { ...GUEST_CLAIMS, roomId: ROOM };
+     void claims2;
+     // чужая комната для того же сокета:
+     const other = fakeSocket({ ...GUEST_CLAIMS, roomId: '99999999-9999-4999-8999-999999999999' });
+     const { ack: ack2, calls: calls2 } = ackOf();
+     await gateway.handleSubscribe(other as never, { roomId: '99999999-9999-4999-8999-999999999999' }, ack2);
+     expect(calls2).toEqual([{ code: 'REQUEST_INVALID' }]);
+   });
+ 
+   // M-3: disconnect внутри subscribe (между registry.add и ack) — слушатель disconnect
+   // уже сделал remove no-op'ом; без проверки connected запись мёртвого сокета протухала
+   // бы в реестре. Фикс: финальная проверка socket.connected до ack.
+   it('disconnect mid-subscribe leaves no registry entry and sends no ack (M-3)', async () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     const { gateway } = makeGateway({ registry });
+     const socket = fakeSocket();
+     socket.connected = false; // disconnect прилетел, пока subscribe читал лог
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+     expect(registry.get(socket.id)).toBeUndefined();
+     expect(calls).toEqual([]);
+   });
++
++  it('subscribe замеряет длительность replay (REQ-OPS-004)', async () => {
++    const { gateway, metrics } = makeGateway({});
++    const socket = fakeSocket();
++    // через публичный handleSubscribe (паттерн существующих subscribe-тестов файла):
++    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, jest.fn() as never);
++    expect(metrics.observeReplayDuration).toHaveBeenCalledWith('public', expect.any(Number));
++  });
+ });
+ 
+ describe('RealtimeGateway.handlePublish', () => {
+   const SUBSCRIBED_ROOM = ROOM;
+ 
+   function subscribedGateway(overrides: Parameters<typeof makeGateway>[0] = {}) {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: SUBSCRIBED_ROOM, level: 'public' });
+     return makeGateway({ ...overrides, registry });
+   }
+ 
+   it('rejects malformed payloads with REQUEST_INVALID', async () => {
+     const { gateway } = subscribedGateway();
+     const { ack, calls } = ackOf();
+     await gateway.handlePublish(fakeSocket() as never, { type: 'bad', payload: {} }, ack);
+     expect(calls).toEqual([{ code: 'REQUEST_INVALID' }]);
+   });
+@@ -258,21 +282,21 @@ describe('RealtimeGateway.handlePublish', () => {
+ describe('RealtimeGateway fan-out and revoke', () => {
+   function gatewayWithServer() {
+     const emitted: { room: string; event: string; payload: unknown }[] = [];
+     const sockets = new Map<string, FakeSocket>();
+     const server = {
+       sockets: { sockets },
+       to(room: string) {
+         return { emit: (event: string, payload: unknown) => emitted.push({ room, event, payload }) };
+       },
+     };
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(fakeRegistryMetrics());
+     const { gateway } = makeGateway({ registry });
+     (gateway as unknown as { server: unknown }).server = server;
+     return { gateway, emitted, sockets, registry };
+   }
+ 
+   const EVENT_ROW = {
+     roomId: ROOM,
+     seq: 5,
+     type: 'quiz.answer.submitted',
+     payload: { c: 1 },
+@@ -286,20 +310,46 @@ describe('RealtimeGateway fan-out and revoke', () => {
+     (gateway as unknown as { fanOut(e: unknown[]): void }).fanOut([
+       { ...EVENT_ROW, visibility: 'PUBLIC' },
+       { ...EVENT_ROW, visibility: 'ORGANIZER' },
+       { ...EVENT_ROW, visibility: 'MODULE_PRIVATE' },
+     ]);
+     expect(emitted.map((e) => e.room)).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
+     expect(emitted[0].event).toBe(REALTIME_MESSAGES.EVENT);
+     expect(emitted[0].payload).toEqual({ type: 'quiz.answer.submitted', payload: { c: 1 }, actorId: GUEST_CLAIMS.sub });
+   });
+ 
++  it('fan-out замеряет publish→deliver по recordedAt события (REQ-OPS-004)', () => {
++    const { gateway, bus, metrics } = makeGateway({});
++    const server = {
++      use: jest.fn(),
++      on: jest.fn(),
++      to: jest.fn().mockReturnValue({ emit: jest.fn() }),
++      sockets: { sockets: new Map() },
++    };
++    gateway.afterInit(server as never);
++    const listener = (bus.subscribe as jest.Mock).mock.calls[0][0] as (e: readonly unknown[]) => void;
++    listener([
++      {
++        roomId: ROOM,
++        seq: 1,
++        type: 'quiz.question.opened',
++        payload: {},
++        actorId: null,
++        visibility: 'PUBLIC',
++        schemaVersion: 1,
++        recordedAt: new Date(Date.now() - 120),
++      },
++    ]);
++    expect(metrics.observePublishToDeliver).toHaveBeenCalledWith('public', expect.any(Number));
++    expect((metrics.observePublishToDeliver as jest.Mock).mock.calls[0][1]).toBeGreaterThanOrEqual(0.1);
++  });
++
+   // Санкционированное отклонение (леджер Task 5 → Task 7, решение владельца):
+   // доставка изолирована per-event — падающая проекция/эмит логируется и
+   // пропускается, исключение НЕ вырывается наружу (иначе throw внутри fanOut
+   // отклонил бы outbox.run ПОСЛЕ успешного коммита).
+   it('fanOut isolates per-event delivery: a throwing projection is logged and skipped, other events still delivered', () => {
+     const { gateway, emitted } = gatewayWithServer();
+     const logger = { error: jest.fn() };
+     (gateway as unknown as { logger: unknown }).logger = logger;
+     const spy = jest
+       .spyOn(ProjectionService.prototype, 'projectEvent')
+diff --git a/packages/core/src/realtime/realtime.gateway.ts b/packages/core/src/realtime/realtime.gateway.ts
+index ac07c7e..d349042 100644
+--- a/packages/core/src/realtime/realtime.gateway.ts
++++ b/packages/core/src/realtime/realtime.gateway.ts
+@@ -22,20 +22,21 @@ import { TokenService, type AccessClaims } from '../auth/token.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { AppRuntimeService } from '../app-runtime/app-runtime.service';
+ import { ProjectionService, type OutwardLevel } from './projection.service';
+ import { RealtimeBus } from './realtime-bus';
+ import { RealtimeError } from './realtime.errors';
+ import { contractCodeFor } from './error-mapping';
+ import { SubscriptionRegistry } from './subscription-registry';
+ import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
++import { MetricsService } from '../observability/metrics.service';
+ 
+ type Ack<T> = (result: T | ContractErrorPayload) => void;
+ 
+ // Socket.io-комнаты: общая (все члены) и organizer-канал (design §5). module-private
+ // канала не существует — уровень наружу не доставляется никогда (REQ-CORE-005).
+ const roomChannel = (roomId: string): string => `room:${roomId}`;
+ const organizerChannel = (roomId: string): string => `room:${roomId}:organizer`;
+ 
+ const claimsOf = (socket: Socket): AccessClaims => socket.data.claims as AccessClaims;
+ 
+@@ -51,20 +52,21 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
+     private readonly tokens: TokenService,
+     private readonly prisma: PrismaService,
+     private readonly membership: MembershipService,
+     private readonly appRegistry: AppRegistryService,
+     private readonly appRuntime: AppRuntimeService,
+     private readonly projection: ProjectionService,
+     private readonly registry: SubscriptionRegistry,
+     private readonly bus: RealtimeBus,
+     @Inject(RECONNECT_RATE_LIMITER) private readonly reconnectLimiter: JoinRateLimiter,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
++    private readonly metrics: MetricsService,
+   ) {}
+ 
+   afterInit(server: Server): void {
+     this.server = server;
+     server.use((socket, next) => this.authenticate(socket, next));
+     server.on('connection', (socket) => {
+       socket.on(REALTIME_MESSAGES.SUBSCRIBE, (payload: unknown, ack: Ack<SubscribeOkAck>) =>
+         void this.handleSubscribe(socket, payload, ack),
+       );
+       socket.on(REALTIME_MESSAGES.PUBLISH, (payload: unknown, ack: Ack<PublishOkAck>) =>
+@@ -143,32 +145,35 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
+       // даёт дубликат — событие придёт live И попадёт в snapshot; это принятый
+       // trade-off cursor-less MVP (duplicate-acceptance).
+       // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
+       // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
+       // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
+       // индексов не возникает.
+       this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
+       await socket.join(roomChannel(roomId));
+       if (level === 'organizer') await socket.join(organizerChannel(roomId));
+       const room = await this.prisma.room.findUnique({ where: { id: roomId } });
++      const replayStart = performance.now();
+       const events = await this.prisma.logEvent.findMany({
+         where: { roomId },
+         orderBy: { seq: 'asc' },
+       });
+       const manifest =
+         room?.appId != null && room.manifestVersion != null
+           ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
+           : undefined;
+       const snapshot: RoomSnapshot = {
+         events: this.projection.projectEvents(events, level),
+         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
+       };
++      // REQ-OPS-004: длительность replay = чтение лога + построение snapshot.
++      this.metrics.observeReplayDuration(level, (performance.now() - replayStart) / 1000);
+       // M-3: disconnect, прилетевший внутри subscribe (пока читался лог), уже прошёл
+       // слушателем как no-op (записи не было). Без этой проверки запись мёртвого
+       // сокета протухла бы в реестре. Disconnect ПОСЛЕ проверки обслужит штатный
+       // слушатель — запись уже существует.
+       if (!socket.connected) {
+         this.registry.remove(socket.id);
+         socket.leave(roomChannel(roomId));
+         socket.leave(organizerChannel(roomId));
+         return;
+       }
+@@ -231,21 +236,29 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
+       // Изоляция per-event (санкционированное отклонение, леджер Task 5 → Task 7):
+       // RealtimeBus.publish пропагирует исключения слушателя синхронно — throw
+       // здесь отклонил бы outbox.run ПОСЛЕ успешного коммита. Падающая проекция/
+       // эмит логируется и пропускается, остальные события доставляются.
+       try {
+         const projected: ProjectedEvent = this.projection.projectEvent(event);
+         if (event.visibility === 'PUBLIC') {
+           this.server.to(roomChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
+         } else if (event.visibility === 'ORGANIZER') {
+           this.server.to(organizerChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
++        } else {
++          // MODULE_PRIVATE: наружу не доставляется (REQ-CORE-005) — доставки нет, замера нет.
++          continue;
+         }
++        // REQ-OPS-004: латентность publish→deliver от коммита (recordedAt — DB now()).
++        this.metrics.observePublishToDeliver(
++          event.visibility.toLowerCase(),
++          (Date.now() - event.recordedAt.getTime()) / 1000,
++        );
+       } catch (err) {
+         this.logger.error(
+           `fan-out of ${event.type} (room ${event.roomId}, seq ${event.seq}) failed: ${(err as Error).message}`,
+         );
+       }
+     }
+   }
+ 
+   // Hook среза исключения (design §4, §0.2): немедленный разрыв всех подписок
+   // identity в комнате. Вызывающего пока нет — срез исключения ОБЯЗАН вызвать этот
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+index 21230a3..fa687af 100644
+--- a/packages/core/src/realtime/realtime.module.ts
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -1,11 +1,12 @@
+ import { Module } from '@nestjs/common';
++import { MetricsModule } from '../observability/metrics.module';
+ import { ConfigModule } from '../config/config.module';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+@@ -13,21 +14,21 @@ import { EventOutbox } from './event-outbox';
+ import { ProjectionService } from './projection.service';
+ import { SubscriptionRegistry } from './subscription-registry';
+ import { RealtimeGateway } from './realtime.gateway';
+ import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+ 
+ // PrismaModule нужен EventOutbox'у (runner владеет транзакцией); сам примитив
+ // записи по-прежнему работает на транзакционном клиенте вызывающего — атомарность
+ // «действие + лог» (REQ-DEV-008) не меняется. Единственный модуль ядра, импортирующий
+ // socket.io (REQ-RT-006 + boundary-правило).
+ @Module({
+-  imports: [ConfigModule, PrismaModule, AuthModule, MembershipModule],
++  imports: [MetricsModule, ConfigModule, PrismaModule, AuthModule, MembershipModule],
+   providers: [
+     {
+       provide: EventEmitLimiter,
+       useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
+       inject: [APP_CONFIG],
+     },
+     {
+       // REQ-RT-015 (объём v1.3): отдельный инстанс — состояние не делится с
+       // join/refresh лимитерами; бэкофф/режимы — ф.4.
+       provide: RECONNECT_RATE_LIMITER,
+diff --git a/packages/core/src/realtime/subscription-registry.spec.ts b/packages/core/src/realtime/subscription-registry.spec.ts
+index 6bd7b38..79a012c 100644
+--- a/packages/core/src/realtime/subscription-registry.spec.ts
++++ b/packages/core/src/realtime/subscription-registry.spec.ts
+@@ -1,40 +1,58 @@
++import type { MetricsService } from '../observability/metrics.service';
+ import { SubscriptionRegistry } from './subscription-registry';
+ 
++const makeMetrics = () =>
++  ({
++    connectionAdded: jest.fn(),
++    connectionRemoved: jest.fn(),
++  }) as unknown as MetricsService;
++
+ const SUB_A = { socketId: 's1', identityId: 'u1', roomId: 'r1', level: 'public' as const };
+ const SUB_B = { socketId: 's2', identityId: 'u1', roomId: 'r1', level: 'organizer' as const };
+ const SUB_C = { socketId: 's3', identityId: 'u2', roomId: 'r1', level: 'public' as const };
+ 
+ describe('SubscriptionRegistry', () => {
+   it('add/get/remove round-trip', () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(makeMetrics());
+     registry.add(SUB_A);
+     expect(registry.get('s1')).toEqual(SUB_A);
+     registry.remove('s1');
+     expect(registry.get('s1')).toBeUndefined();
+   });
+ 
+   it('socketsOf groups by (identityId, roomId) for the revoke hook', () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(makeMetrics());
+     registry.add(SUB_A);
+     registry.add(SUB_B);
+     registry.add(SUB_C);
+     expect([...registry.socketsOf('u1', 'r1')].sort()).toEqual(['s1', 's2']);
+     expect(registry.socketsOf('u2', 'r1')).toEqual(['s3']);
+     expect(registry.socketsOf('u1', 'r2')).toEqual([]);
+   });
+ 
+   it('remove cleans the membership index; empty sets are dropped', () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(makeMetrics());
+     registry.add(SUB_A);
+     registry.add(SUB_B);
+     registry.remove('s1');
+     expect(registry.socketsOf('u1', 'r1')).toEqual(['s2']);
+     registry.remove('s2');
+     expect(registry.socketsOf('u1', 'r1')).toEqual([]);
+   });
+ 
+   it('removing an unknown socket is a no-op', () => {
+-    const registry = new SubscriptionRegistry();
++    const registry = new SubscriptionRegistry(makeMetrics());
+     expect(() => registry.remove('nope')).not.toThrow();
+   });
++
++  it('gauge: add инкрементирует, remove декрементирует, remove несуществующего — no-op (Review Focus 1)', () => {
++    const metrics = makeMetrics();
++    const registry = new SubscriptionRegistry(metrics);
++    registry.add({ socketId: 's1', identityId: 'i1', roomId: 'r1', level: 'public' });
++    expect(metrics.connectionAdded).toHaveBeenCalledWith('r1');
++    registry.remove('s1');
++    expect(metrics.connectionRemoved).toHaveBeenCalledWith('r1');
++    registry.remove('s1'); // повтор — без декремента
++    expect((metrics.connectionRemoved as jest.Mock).mock.calls).toHaveLength(1);
++  });
+ });
+diff --git a/packages/core/src/realtime/subscription-registry.ts b/packages/core/src/realtime/subscription-registry.ts
+index 00f5db6..97a48f7 100644
+--- a/packages/core/src/realtime/subscription-registry.ts
++++ b/packages/core/src/realtime/subscription-registry.ts
+@@ -1,49 +1,57 @@
+ import { Injectable } from '@nestjs/common';
++import { MetricsService } from '../observability/metrics.service';
+ import type { OutwardLevel } from './projection.service';
+ 
+ export interface Subscription {
+   readonly socketId: string;
+   readonly identityId: string;
+   readonly roomId: string;
+   readonly level: OutwardLevel;
+ }
+ 
+ // Реестр подписок (design §2): источник «кто что слушает» для fan-out и hook'а
+ // разрыва (REQ-SEC-003). In-memory легален при одной реплике (REQ-OPS-005);
+ // состояние — поле экземпляра (REQ-CORE-004). Индекс по (identityId, roomId)
+ // поддерживается синхронно с bySocket — менять только вместе.
+ @Injectable()
+ export class SubscriptionRegistry {
+   private readonly bySocket = new Map<string, Subscription>();
+   private readonly socketsByMembership = new Map<string, Set<string>>();
+ 
++  // REQ-OPS-004: gauge активных соединений живёт здесь, а не в gateway — все
++  // пути очистки (disconnect, mid-subscribe cleanup, catch-пути, revoke) идут
++  // через remove(), и парность инкремент/декремент гарантирована построением.
++  constructor(private readonly metrics: MetricsService) {}
++
+   private static key(identityId: string, roomId: string): string {
+     return `${identityId}:${roomId}`;
+   }
+ 
+   add(sub: Subscription): void {
+     this.bySocket.set(sub.socketId, sub);
+     const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
+     const set = this.socketsByMembership.get(key) ?? new Set<string>();
+     set.add(sub.socketId);
+     this.socketsByMembership.set(key, set);
++    this.metrics.connectionAdded(sub.roomId);
+   }
+ 
+   get(socketId: string): Subscription | undefined {
+     return this.bySocket.get(socketId);
+   }
+ 
+   remove(socketId: string): void {
+     const sub = this.bySocket.get(socketId);
+     if (sub === undefined) return;
+     this.bySocket.delete(socketId);
+     const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
+     const set = this.socketsByMembership.get(key);
+     set?.delete(socketId);
+     if (set?.size === 0) this.socketsByMembership.delete(key);
++    this.metrics.connectionRemoved(sub.roomId);
+   }
+ 
+   socketsOf(identityId: string, roomId: string): readonly string[] {
+     return [...(this.socketsByMembership.get(SubscriptionRegistry.key(identityId, roomId)) ?? [])];
+   }
+ }
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index c47a3a3..497e723 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,19 +1,20 @@
+ import { validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { RealtimeBus } from '../realtime/realtime-bus';
+ import { EventOutbox } from '../realtime/event-outbox';
++import { MetricsService } from '../observability/metrics.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
+ import { RoomService } from './room.service';
+ import {
+   RoomError,
+   RoomTransitionError,
+   RoomConflictError,
+@@ -21,21 +22,21 @@ import {
+   RoomOrganizerNotRegisteredError,
+   RoomSettingsFrozenError,
+ } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
+ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+ 
+ const makeService = (db: TestDb) => {
+-  const outbox = new EventOutbox(db.prisma, new RealtimeBus());
++  const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+   return new RoomService(
+     db.prisma,
+     new EventLogService(
+       new AppRegistryService([validManifests[0]]),
+       new EventEmitLimiter(1000),
+       TEST_CONFIG,
+       outbox,
+     ),
+     outbox,
+     new AppRegistryService([validManifests[0]]),
+@@ -552,21 +553,21 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.status).toBe('DRAFT');
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
+   // Реестр boot-time, строка комнаты durable: активация против версии, которой нет
+   // в реестре процесса (редеплой убрал), обязана отказать (design §5).
+   it('rejects activation when the pinned manifest is absent from the registry', async () => {
+     const room = await service.create(ORG);
+     await configureQuiz(service, room.id);
+-    const emptyRegistryOutbox = new EventOutbox(db.prisma, new RealtimeBus());
++    const emptyRegistryOutbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     const emptyRegistryService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         emptyRegistryOutbox,
+       ),
+       emptyRegistryOutbox,
+       new AppRegistryService([]),

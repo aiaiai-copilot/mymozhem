@@ -1,0 +1,110 @@
+# Review package: 9750944..4d33181
+
+## Commits
+4d33181 fix(app-quiz): standings — плотный ранг вместо competition ranking (1,2,2,3)
+
+## Files changed
+ packages/app-quiz/src/quiz-handlers.spec.ts | 4 +++-
+ packages/app-quiz/src/quiz-handlers.ts      | 7 ++++---
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/packages/app-quiz/src/quiz-handlers.spec.ts b/packages/app-quiz/src/quiz-handlers.spec.ts
+index b06538b..b1c1593 100644
+--- a/packages/app-quiz/src/quiz-handlers.spec.ts
++++ b/packages/app-quiz/src/quiz-handlers.spec.ts
+@@ -12,20 +12,21 @@ import type { QuizSettings } from './quiz-settings';
+ 
+ // Командные handlers квиза: ролевые гейты (REQ-ID-011), actorId только из ctx
+ // (REQ-RT-009), анти-бот minAnswerIntervalMs (REQ-RT-013), скоростная шкала и
+ // dense-rank standings. Payload уже провалидирован диспетчером — handlers его
+ // не перепроверяют; settings перепарсиваются защитно (дёшево).
+ 
+ const ORG = '0f8fad5b-d9cb-469f-a165-70867728950e';
+ const P1 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+ const P2 = 'a3a8d3e1-9e5b-4f1c-8a2b-3c4d5e6f7081';
+ const P3 = 'b4b9e4f2-af6c-402d-9b3c-4d5e6f708192';
++const P4 = 'c5caf503-b07d-413e-ac4d-5e6f708192a3';
+ 
+ const T0 = '2026-09-09T12:00:00.000Z';
+ 
+ const SETTINGS: QuizSettings = {
+   questions: [
+     { text: 'Q1', options: ['a', 'b', 'c'] },
+     { text: 'Q2', options: ['x', 'y'] },
+   ],
+   correctAnswers: [1, 0],
+   minAnswerIntervalMs: 1000,
+@@ -287,32 +288,33 @@ describe('handleQuizPublish / game.finish', () => {
+     expectRejection(() => finish({ actorRole: 'PARTICIPANT' }), 'PUBLISH_FORBIDDEN');
+   });
+ 
+   it('rejects a double finish with ROUND_NOT_OPEN', () => {
+     expectRejection(() => finish({ state: { ...initialQuizState(), finished: true } }), 'ROUND_NOT_OPEN');
+   });
+ 
+   it('computes dense-rank standings (1,2,2,3) sorted by total desc', async () => {
+     const state: QuizState = {
+       ...initialQuizState(),
+-      totals: { [P1]: 100, [P2]: 50, [P3]: 50 },
++      totals: { [P1]: 100, [P2]: 50, [P3]: 50, [P4]: 30 },
+     };
+     const commits = (await finish({ state })) as AppCommit[];
+     expect(commits).toEqual([
+       { shortName: 'game.finish', payload: {}, visibility: 'public', actor: 'publisher' },
+       {
+         shortName: 'game.finished',
+         payload: {
+           standings: [
+             { actorId: P1, total: 100, place: 1 },
+             { actorId: P2, total: 50, place: 2 },
+             { actorId: P3, total: 50, place: 2 },
++            { actorId: P4, total: 30, place: 3 },
+           ],
+         },
+         visibility: 'public',
+         actor: 'server',
+       },
+     ]);
+   });
+ 
+   it('finishes with empty standings when nobody scored', async () => {
+     const commits = (await finish({})) as AppCommit[];
+diff --git a/packages/app-quiz/src/quiz-handlers.ts b/packages/app-quiz/src/quiz-handlers.ts
+index f220a0d..571295a 100644
+--- a/packages/app-quiz/src/quiz-handlers.ts
++++ b/packages/app-quiz/src/quiz-handlers.ts
+@@ -123,29 +123,30 @@ function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string,
+     },
+   ];
+ }
+ 
+ function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppCommit[] {
+   requireOrganizer(ctx);
+   if (ctx.state.finished) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'игра уже завершена');
+   }
+   // Плотный ранг (1,2,2,3): равные total делят место, следующее отличное
+-  // значение получает предыдущее место + 1.
++  // значение получает непосредственно следующее место (не index + 1 — это был
++  // бы competition ranking 1,2,2,4).
+   const sorted = Object.entries(ctx.state.totals)
+     .map(([actorId, total]) => ({ actorId, total }))
+     .sort(byTotalDescThenActor);
+   let place = 0;
+   let previousTotal: number | undefined;
+-  const standings = sorted.map((entry, index) => {
++  const standings = sorted.map((entry) => {
+     if (previousTotal === undefined || entry.total !== previousTotal) {
+-      place = index + 1;
++      place += 1;
+       previousTotal = entry.total;
+     }
+     return { ...entry, place };
+   });
+   return [
+     { shortName: 'game.finish', payload, visibility: 'public', actor: 'publisher' },
+     { shortName: 'game.finished', payload: { standings }, visibility: 'public', actor: 'server' },
+   ];
+ }
+ 

@@ -1,0 +1,272 @@
+# Review package: 3ab4dd1..4fe39b4
+
+## Commits
+4fe39b4 feat(core): AppRegistryService.validateSettings with ajv cache (REQ-CORE-007)
+
+## Files changed
+ packages/core/package.json                         |  1 +
+ .../core/src/app-registry/app-registry.errors.ts   | 38 ++++++++++++++
+ .../src/app-registry/app-registry.service.spec.ts  | 58 ++++++++++++++++++++++
+ .../core/src/app-registry/app-registry.service.ts  | 47 +++++++++++++++++-
+ pnpm-lock.yaml                                     |  3 ++
+ 5 files changed, 146 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index fb4e3b8..8981712 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -11,20 +11,21 @@
+     "test": "jest",
+     "test:int": "jest -c jest.integration.config.js",
+     "prisma:generate": "prisma generate"
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
++    "ajv": "^8.20.0",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
+diff --git a/packages/core/src/app-registry/app-registry.errors.ts b/packages/core/src/app-registry/app-registry.errors.ts
+new file mode 100644
+index 0000000..d57f5ec
+--- /dev/null
++++ b/packages/core/src/app-registry/app-registry.errors.ts
+@@ -0,0 +1,38 @@
++// Core-internal typed errors of the app-registry module: validation of appSettings
++// against the manifest's JSON Schema (REQ-CORE-007). NOT part of the SDK contract —
++// when a transport lands, these map to typed API responses without stack traces
++// (REQ-SEC-006), same convention as room.errors.ts.
++export const APP_REGISTRY_ERROR_CODES = {
++  APP_MANIFEST_UNKNOWN: 'APP_MANIFEST_UNKNOWN',
++  APP_SETTINGS_INVALID: 'APP_SETTINGS_INVALID',
++} as const;
++
++export type AppRegistryErrorCode =
++  (typeof APP_REGISTRY_ERROR_CODES)[keyof typeof APP_REGISTRY_ERROR_CODES];
++
++export class AppRegistryError extends Error {
++  constructor(
++    readonly code: AppRegistryErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
++
++// No manifest registered under (appId, manifestVersion): unknown app, or a version a
++// redeploy removed from the compiled-in registry (boot-time registry vs durable room
++// row, design §5).
++export class AppManifestUnknownError extends AppRegistryError {
++  constructor(message: string) {
++    super(APP_REGISTRY_ERROR_CODES.APP_MANIFEST_UNKNOWN, message);
++  }
++}
++
++// Settings do not satisfy the manifest's JSON Schema. ajv detail stays in the
++// server-side message only; outward goes the code (REQ-SEC-006).
++export class AppSettingsInvalidError extends AppRegistryError {
++  constructor(message: string) {
++    super(APP_REGISTRY_ERROR_CODES.APP_SETTINGS_INVALID, message);
++  }
++}
+diff --git a/packages/core/src/app-registry/app-registry.service.spec.ts b/packages/core/src/app-registry/app-registry.service.spec.ts
+index 2110483..54fb31f 100644
+--- a/packages/core/src/app-registry/app-registry.service.spec.ts
++++ b/packages/core/src/app-registry/app-registry.service.spec.ts
+@@ -1,27 +1,85 @@
+ import { Test } from '@nestjs/testing';
++import Ajv2020 from 'ajv/dist/2020';
+ import { ContractError, validManifests, invalidManifestCases } from '@mymozhem/sdk';
+ import { AppRegistryService } from './app-registry.service';
+ import { AppRegistryModule } from './app-registry.module';
++import { AppManifestUnknownError, AppSettingsInvalidError } from './app-registry.errors';
++
++// Синхронный catch-helper: validateSettings бросает, не возвращает промис.
++const capture = (fn: () => void): unknown => {
++  try {
++    fn();
++    return undefined;
++  } catch (e) {
++    return e;
++  }
++};
+ 
+ describe('AppRegistryService', () => {
+   it('builds its registry from the injected manifests', () => {
+     const { appId, manifestVersion } = validManifests[0];
+     const svc = new AppRegistryService([validManifests[0]]);
+     expect(svc.getManifest(appId, manifestVersion)).toEqual(validManifests[0]);
+   });
+ 
+   it('fails construction (boot) when an injected manifest is invalid', () => {
+     expect(() => new AppRegistryService([invalidManifestCases[0].value])).toThrow(ContractError);
+   });
+ });
+ 
++describe('AppRegistryService.validateSettings (REQ-CORE-007)', () => {
++  const manifest = validManifests[0]; // quiz@1: { title: string, correctAnswers: number[] }, additionalProperties: false
++
++  it('accepts settings that satisfy the manifest schema', () => {
++    const svc = new AppRegistryService([manifest]);
++    expect(() =>
++      svc.validateSettings('quiz', 1, { title: 'Friday quiz', correctAnswers: [0, 2] }),
++    ).not.toThrow();
++  });
++
++  it.each([
++    { name: 'missing required property', value: { title: 'Friday quiz' } },
++    { name: 'wrong property type', value: { title: 'Friday quiz', correctAnswers: 'nope' } },
++    { name: 'additional property', value: { title: 'Friday quiz', correctAnswers: [0], hack: true } },
++  ])('rejects invalid settings with APP_SETTINGS_INVALID ($name)', ({ value }) => {
++    const svc = new AppRegistryService([manifest]);
++    const err = capture(() => svc.validateSettings('quiz', 1, value));
++    expect(err).toBeInstanceOf(AppSettingsInvalidError);
++    expect((err as AppSettingsInvalidError).code).toBe('APP_SETTINGS_INVALID');
++  });
++
++  it.each([
++    { name: 'unknown appId', appId: 'nope', version: 1 },
++    { name: 'unknown manifestVersion', appId: 'quiz', version: 99 },
++  ])('rejects an unknown manifest with APP_MANIFEST_UNKNOWN ($name)', ({ appId, version }) => {
++    const svc = new AppRegistryService([manifest]);
++    const err = capture(() =>
++      svc.validateSettings(appId, version, { title: 't', correctAnswers: [] }),
++    );
++    expect(err).toBeInstanceOf(AppManifestUnknownError);
++    expect((err as AppManifestUnknownError).code).toBe('APP_MANIFEST_UNKNOWN');
++  });
++
++  it('compiles the validator once per (appId, manifestVersion) key', () => {
++    const spy = jest.spyOn(Ajv2020.prototype, 'compile');
++    try {
++      const svc = new AppRegistryService([manifest]);
++      svc.validateSettings('quiz', 1, { title: 'a', correctAnswers: [] });
++      svc.validateSettings('quiz', 1, { title: 'b', correctAnswers: [1] });
++      expect(spy).toHaveBeenCalledTimes(1);
++    } finally {
++      spy.mockRestore();
++    }
++  });
++});
++
+ describe('AppRegistryModule', () => {
+   it('provides AppRegistryService with an empty registry by default', async () => {
+     const moduleRef = await Test.createTestingModule({
+       imports: [AppRegistryModule],
+     }).compile();
+     const svc = moduleRef.get(AppRegistryService);
+     const { appId, manifestVersion } = validManifests[0];
+     expect(svc.getManifest(appId, manifestVersion)).toBeUndefined();
+   });
+ });
+diff --git a/packages/core/src/app-registry/app-registry.service.ts b/packages/core/src/app-registry/app-registry.service.ts
+index 5574e06..e62aa8a 100644
+--- a/packages/core/src/app-registry/app-registry.service.ts
++++ b/packages/core/src/app-registry/app-registry.service.ts
+@@ -1,19 +1,64 @@
+ import { Inject, Injectable } from '@nestjs/common';
+-import type { AppManifest } from '@mymozhem/sdk';
++import Ajv2020 from 'ajv/dist/2020';
++import type { ValidateFunction } from 'ajv';
++import type { AppManifest, JsonSchemaObject } from '@mymozhem/sdk';
+ import { buildAppRegistry, type AppRegistry } from './app-registry';
+ import { APP_MANIFESTS } from './app-registry.tokens';
++import { AppManifestUnknownError, AppSettingsInvalidError } from './app-registry.errors';
+ 
+ @Injectable()
+ export class AppRegistryService {
+   private readonly registry: AppRegistry;
++  // REQ-CORE-007: скомпилированные валидаторы кэшируются по (appId, manifestVersion).
++  // Лениво — компиляция при первом обращении; далее запись неизменяема (дух
++  // REQ-CORE-004, как сам boot-time реестр). Eager-прогрев всех манифестов на буте
++  // отклонён: платили бы за неиспользуемое (design §3).
++  private readonly validators = new Map<string, ValidateFunction>();
++  // Ajv2020: манифестные схемы несут $schema draft 2020-12 — дефолтный Ajv (draft-07)
++  // на них падает. strict: false — схемы несут аннотацию x-visibility (ADR-008),
++  // неизвестный ajv keyword, который strict-режим отклонил бы.
++  private readonly ajv = new Ajv2020({ allErrors: true, strict: false });
+ 
+   constructor(@Inject(APP_MANIFESTS) manifests: readonly unknown[]) {
+     // Built once at construction (boot); immutable thereafter (REQ-CORE-004). A bad
+     // manifest throws here and fails startup — fail-closed.
+     this.registry = buildAppRegistry(manifests);
+   }
+ 
+   getManifest(appId: string, manifestVersion: number): AppManifest | undefined {
+     return this.registry.getManifest(appId, manifestVersion);
+   }
++
++  // REQ-CORE-007: валидация настроек по JSON Schema манифеста — при каждой записи
++  // (RoomService.configure) и повторно при DRAFT → ACTIVE (RoomService.transition).
++  // Verdict-only: никакой коэрсии и мутации входа (ajv без coerce/removeAdditional).
++  validateSettings(appId: string, manifestVersion: number, settings: unknown): void {
++    const manifest = this.registry.getManifest(appId, manifestVersion);
++    if (!manifest) {
++      throw new AppManifestUnknownError(
++        `No manifest registered for ${appId}@${manifestVersion}`,
++      );
++    }
++    const validate = this.validatorFor(appId, manifestVersion, manifest.appSettings);
++    if (!validate(settings)) {
++      throw new AppSettingsInvalidError(
++        `appSettings do not match the manifest schema of ${appId}@${manifestVersion}: ${this.ajv.errorsText(validate.errors)}`,
++      );
++    }
++  }
++
++  private validatorFor(
++    appId: string,
++    manifestVersion: number,
++    schema: JsonSchemaObject,
++  ): ValidateFunction {
++    const key = `${appId}@${manifestVersion}`;
++    const cached = this.validators.get(key);
++    if (cached) {
++      return cached;
++    }
++    const compiled = this.ajv.compile(schema);
++    this.validators.set(key, compiled);
++    return compiled;
++  }
+ }
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 6e71338..5d53c22 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -83,20 +83,23 @@ importers:
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@prisma/adapter-pg':
+         specifier: ^7.6.0
+         version: 7.8.0
+       '@prisma/client':
+         specifier: ^7.6.0
+         version: 7.8.0(prisma@7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3))(typescript@5.9.3)
++      ajv:
++        specifier: ^8.20.0
++        version: 8.20.0
+       pg:
+         specifier: ^8.13.0
+         version: 8.22.0
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+       zod:

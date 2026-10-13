@@ -1,0 +1,222 @@
+# Review package: 1c28137..HEAD
+
+## Commits
+3483503 fix(core): subscribe join до чтения лога (дизайн §4, duplicate-acceptance) + e2e replay-видимости
+
+## Files changed
+ apps/server/test/realtime.e2e-spec.ts              | 29 +++++++++++++++++++++-
+ .../core/src/realtime/realtime.gateway.spec.ts     | 21 ++++++++++++++++
+ packages/core/src/realtime/realtime.gateway.ts     | 28 +++++++++++++++------
+ 3 files changed, 70 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index f782303..f9bba71 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -38,20 +38,21 @@ const ORG = '00000000-0000-4000-8000-000000000001';
+ // secret — module-private.
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+   contractRange: '^1.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: {
+       label: { type: 'string', 'x-visibility': 'public' },
++      orgNote: { type: 'string', 'x-visibility': 'organizer' },
+       answers: { type: 'object' }, // без аннотации → module-private (fail-safe)
+     },
+   },
+   events: {
+     'note.posted': {
+       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
+       visibility: 'public',
+     },
+     'round.hinted': {
+       schema: { type: 'object', properties: { hint: { type: 'string' } }, required: ['hint'] },
+@@ -180,21 +181,21 @@ describe('Realtime (e2e)', () => {
+       'TRUNCATE TABLE identity."Session", membership."Membership", room."Room" CASCADE',
+     );
+   });
+ 
+   // Активная комната с пином TEST_APP + guest join по HTTP → access token участника.
+   async function activeRoomWithGuest() {
+     const room = await roomService.create(ORG);
+     await roomService.configure(room.id, {
+       appId: 'test-app',
+       manifestVersion: 1,
+-      settings: { label: 'live', answers: { r1: 2 } },
++      settings: { label: 'live', orgNote: 'o', answers: { r1: 2 } },
+     });
+     await roomService.activate(room.id, ORG);
+     const res = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: room.code, displayName: 'Гостя' },
+     });
+     expect(res.statusCode).toBe(201);
+     const { accessToken } = tokenResponseSchema.parse(res.json());
+     return { room, accessToken };
+@@ -283,20 +284,46 @@ describe('Realtime (e2e)', () => {
+     expect(organizerEvents.map((e) => e.type)).toEqual([
+       'test-app.note.posted',
+       'test-app.round.hinted',
+       'test-app.note.posted',
+     ]);
+     organizer.close();
+     participant.close();
+     pub.close();
+   });
+ 
++  it('replay-видимость: snapshot участника — только public, организатора — public+organizer, module-private никому (REQ-CORE-005/008)', async () => {
++    const { room, accessToken } = await activeRoomWithGuest();
++    // Пре-коммит ДО подключения подписчиков: organizer- и module-private события
++    // уже в логе — replay обязан построить видимость по уровню запрашивающего.
++    const pub = await connect(port, accessToken);
++    await emitAck(pub, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
++    await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.round.hinted', payload: { hint: 'h' } });
++    await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.secret.recorded', payload: { n: 9 } });
++    pub.close();
++
++    const participant = await connect(port, accessToken);
++    const organizer = await connect(port, await organizerToken(room.id));
++    type Snap = { ok: true; snapshot: { events: { type: string }[]; appSettings: Record<string, unknown> } };
++    const pAck = await emitAck<Snap>(participant, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
++    const oAck = await emitAck<Snap>(organizer, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
++
++    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
++    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'test-app.round.hinted']);
++    // appSettings: label — public (обоим), orgNote — organizer (только организатору),
++    // answers — module-private (никому; fail-safe на неаннотированное свойство).
++    expect(pAck.snapshot.appSettings).toEqual({ label: 'live' });
++    expect(oAck.snapshot.appSettings).toEqual({ label: 'live', orgNote: 'o' });
++    participant.close();
++    organizer.close();
++  });
++
+   it('гость не подписывается на чужую комнату (scope REQ-ID-016)', async () => {
+     const { accessToken } = await activeRoomWithGuest();
+     const other = await roomService.create(ORG);
+     const socket = await connect(port, accessToken);
+     const ack = await emitAck(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: other.id });
+     expect(ack).toEqual({ code: 'ACTOR_NOT_MEMBER' });
+     socket.close();
+   });
+ 
+   it('handshake без валидного токена → SESSION_INVALID', async () => {
+diff --git a/packages/core/src/realtime/realtime.gateway.spec.ts b/packages/core/src/realtime/realtime.gateway.spec.ts
+index 5f141a7..c13ad3d 100644
+--- a/packages/core/src/realtime/realtime.gateway.spec.ts
++++ b/packages/core/src/realtime/realtime.gateway.spec.ts
+@@ -102,20 +102,41 @@ describe('RealtimeGateway.handleSubscribe', () => {
+     const logger = { error: jest.fn(), warn: jest.fn() };
+     (gateway as unknown as { logger: unknown }).logger = logger;
+     const { ack, calls } = ackOf();
+     await expect(
+       gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack),
+     ).resolves.toBeUndefined();
+     expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
+     expect(logger.error).toHaveBeenCalledTimes(1);
+   });
+ 
++  // Join-first (design §4, final-review fix I-1): join теперь внутри try до чтения
++  // лога — сбой join ПОСЛЕ registry.add обязан откатить полуподписку (реестр +
++  // каналы), иначе клиент с ack-ошибкой продолжал бы получать live-поток.
++  it('join failure after registry.add leaves no stale subscription', async () => {
++    const registry = new SubscriptionRegistry();
++    const { gateway } = makeGateway({ registry });
++    const logger = { error: jest.fn(), warn: jest.fn() };
++    (gateway as unknown as { logger: unknown }).logger = logger;
++    const socket = fakeSocket();
++    socket.join = () => {
++      throw new Error('adapter down');
++    };
++    const { ack, calls } = ackOf();
++    await expect(
++      gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack),
++    ).resolves.toBeUndefined();
++    expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
++    expect(registry.get('socket-1')).toBeUndefined();
++    expect(socket.left).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
++  });
++
+   it('participant joins the room channel with a public snapshot', async () => {
+     const registry = new SubscriptionRegistry();
+     const { gateway } = makeGateway({ registry });
+     const socket = fakeSocket();
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+     expect(socket.joined).toEqual([`room:${ROOM}`]);
+     expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
+     expect(registry.get('socket-1')).toMatchObject({ identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
+   });
+diff --git a/packages/core/src/realtime/realtime.gateway.ts b/packages/core/src/realtime/realtime.gateway.ts
+index 874c0c4..4be0217 100644
+--- a/packages/core/src/realtime/realtime.gateway.ts
++++ b/packages/core/src/realtime/realtime.gateway.ts
+@@ -130,42 +130,56 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
+         return;
+       }
+       // REQ-SEC-003: чтение подресурсов комнаты — только членам.
+       const membership = await this.membership.findActiveMembership(roomId, claims.sub);
+       if (!membership) {
+         ack({ code: 'ACTOR_NOT_MEMBER' });
+         return;
+       }
+       // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
+       const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
++      // Порядок design §4 — join-first: подписка (реестр + каналы) ДО чтения лога.
++      // При порядке «чтение → join» событие, закоммиченное между чтением и join,
++      // терялось бы для подписчика (нет ни в snapshot, ни в live), а клиент без
++      // seq/cursor (REQ-RT-011a) не смог бы заметить разрыв. При join-first гонка
++      // даёт дубликат — событие придёт live И попадёт в snapshot; это принятый
++      // trade-off cursor-less MVP (duplicate-acceptance).
++      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
++      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
++      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
++      // индексов не возникает.
++      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
++      await socket.join(roomChannel(roomId));
++      if (level === 'organizer') await socket.join(organizerChannel(roomId));
+       const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+       const events = await this.prisma.logEvent.findMany({
+         where: { roomId },
+         orderBy: { seq: 'asc' },
+       });
+       const manifest =
+         room?.appId != null && room.manifestVersion != null
+           ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
+           : undefined;
+       const snapshot: RoomSnapshot = {
+         events: this.projection.projectEvents(events, level),
+         appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
+       };
+-      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
+-      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
+-      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
+-      // индексов не возникает.
+-      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
+-      await socket.join(roomChannel(roomId));
+-      if (level === 'organizer') await socket.join(organizerChannel(roomId));
+       ack({ ok: true, snapshot });
+     } catch (err) {
++      // Полуподписка недопустима: join теперь ДО чтения лога (design §4), поэтому
++      // при сбое после registry.add чистим и реестр, и каналы — иначе клиент,
++      // получивший ack-ошибку, продолжал бы получать live-поток комнаты. До join
++      // (отказы гейтов — return'ы выше; throw на ранних шагах) remove/leave —
++      // безвредные no-op.
++      this.registry.remove(socket.id);
++      socket.leave(roomChannel(parsed.data.roomId));
++      socket.leave(organizerChannel(parsed.data.roomId));
+       ack({ code: this.wireCodeOf(err) });
+     }
+   }
+ 
+   async handlePublish(socket: Socket, payload: unknown, ack: Ack<PublishOkAck>): Promise<void> {
+     const parsed = publishRequestSchema.safeParse(payload);
+     if (!parsed.success) {
+       ack({ code: 'REQUEST_INVALID' });
+       return;
+     }

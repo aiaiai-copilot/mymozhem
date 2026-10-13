@@ -1,0 +1,327 @@
+# Review package: 351d14a71816503a2e89d20e900a846286ccf83a..HEAD
+
+## Commits
+5743300 feat(core): конфиг ADR-012 — ORGANIZER_SETUP_TOKEN (обязателен, ≥32), ORGANIZER_RATE_LIMIT, PRIZE_MODE (default off); снята OAuth-секция (OAUTH_*/GOOGLE_*)
+
+## Files changed
+ packages/core/src/config/config.schema.spec.ts | 81 ++++++++++++++------------
+ packages/core/src/config/config.schema.ts      | 43 +++-----------
+ packages/core/src/testing/test-config.ts       |  8 +--
+ 3 files changed, 57 insertions(+), 75 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 52b8f70..74c655b 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -1,13 +1,17 @@
+ import { configSchema, loadConfig } from './config.schema';
+ 
+-const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db', JWT_SECRET: 's'.repeat(32) };
++const base = {
++  DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
++  JWT_SECRET: 's'.repeat(32),
++  ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
++};
+ 
+ describe('loadConfig', () => {
+   it('applies defaults when only DATABASE_URL is provided', () => {
+     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+     expect(cfg.PORT).toBe(3000);
+     expect(cfg.NODE_ENV).toBe('development');
+     expect(cfg.DATABASE_URL).toBe(base.DATABASE_URL);
+   });
+ 
+   it('coerces PORT from string', () => {
+@@ -46,75 +50,70 @@ describe('loadConfig', () => {
+       ...base,
+       ROOM_CODE_MIN_LEN: '10',
+       JOIN_RATE_LIMIT_IP: '5',
+     } as NodeJS.ProcessEnv);
+     expect(cfg.ROOM_CODE_MIN_LEN).toBe(10);
+     expect(cfg.JOIN_RATE_LIMIT_IP).toBe(5);
+   });
+ 
+   it('rejects a missing JWT_SECRET (REQ-SEC-002)', () => {
+     expect(() =>
+-      loadConfig({ DATABASE_URL: base.DATABASE_URL } as NodeJS.ProcessEnv),
++      loadConfig({
++        DATABASE_URL: base.DATABASE_URL,
++        ORGANIZER_SETUP_TOKEN: base.ORGANIZER_SETUP_TOKEN,
++      } as NodeJS.ProcessEnv),
+     ).toThrow(/JWT_SECRET/);
+   });
+ 
+   it('rejects JWT_SECRET shorter than 32 bytes (REQ-SEC-002)', () => {
+     expect(() => loadConfig({ ...base, JWT_SECRET: 'short' } as NodeJS.ProcessEnv)).toThrow(
+       /JWT_SECRET/,
+     );
+   });
+ 
+   it('accepts REFRESH_TOKEN_TTL > GUEST_TTL (guest cap применяется при выдаче, не в конфиге; design §5)', () => {
+     const cfg = loadConfig({ ...base, GUEST_TTL: '86400', REFRESH_TOKEN_TTL: '2592000' } as NodeJS.ProcessEnv);
+     expect(cfg.REFRESH_TOKEN_TTL).toBe(2_592_000);
+   });
+ 
+   it('rejects REFRESH_TOKEN_TTL below 1 day / above 90 days (§4)', () => {
+     expect(() => loadConfig({ ...base, REFRESH_TOKEN_TTL: '3600' } as NodeJS.ProcessEnv)).toThrow(/REFRESH_TOKEN_TTL/);
+     expect(() => loadConfig({ ...base, REFRESH_TOKEN_TTL: '8000000' } as NodeJS.ProcessEnv)).toThrow(/REFRESH_TOKEN_TTL/);
+   });
+ 
+-  it('accepts absent Google section (optional, design §8)', () => {
+-    const cfg = loadConfig(base as NodeJS.ProcessEnv);
+-    expect(cfg.GOOGLE_CLIENT_ID).toBeUndefined();
+-    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual([]);
+-    expect(cfg.OAUTH_STATE_TTL).toBe(600);
+-    expect(cfg.OAUTH_RATE_LIMIT).toBe(10);
+-  });
++  describe('ADR-012 параметры', () => {
++    it('requires ORGANIZER_SETUP_TOKEN (fail-fast, образец JWT_SECRET/REQ-SEC-002)', () => {
++      expect(() =>
++        loadConfig({
++          DATABASE_URL: base.DATABASE_URL,
++          JWT_SECRET: base.JWT_SECRET,
++        } as NodeJS.ProcessEnv),
++      ).toThrow(/ORGANIZER_SETUP_TOKEN/);
++    });
+ 
+-  it('rejects partial Google section (all-or-none, REQ-OPS-003)', () => {
+-    expect(() => loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id' } as NodeJS.ProcessEnv)).toThrow(/GOOGLE/);
+-    expect(() =>
+-      loadConfig({ ...base, GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 's' } as NodeJS.ProcessEnv),
+-    ).toThrow(/GOOGLE/);
+-  });
++    it('rejects ORGANIZER_SETUP_TOKEN shorter than 32 bytes', () => {
++      expect(() =>
++        loadConfig({ ...base, ORGANIZER_SETUP_TOKEN: 'short' } as NodeJS.ProcessEnv),
++      ).toThrow(/ORGANIZER_SETUP_TOKEN/);
++    });
+ 
+-  it('requires non-empty OAUTH_REDIRECT_ALLOWLIST when Google is configured (REQ-ID-009)', () => {
+-    expect(() =>
+-      loadConfig({
+-        ...base,
+-        GOOGLE_CLIENT_ID: 'id',
+-        GOOGLE_CLIENT_SECRET: 's',
+-        OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+-      } as NodeJS.ProcessEnv),
+-    ).toThrow(/OAUTH_REDIRECT_ALLOWLIST/);
+-  });
++    it('defaults PRIZE_MODE to off and ORGANIZER_RATE_LIMIT to 10', () => {
++      const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
++      expect(cfg.PRIZE_MODE).toBe('off');
++      expect(cfg.ORGANIZER_RATE_LIMIT).toBe(10);
++    });
+ 
+-  it('parses full Google section and allowlist transform', () => {
+-    const cfg = loadConfig({
+-      ...base,
+-      GOOGLE_CLIENT_ID: 'id',
+-      GOOGLE_CLIENT_SECRET: 's',
+-      OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+-      OAUTH_REDIRECT_ALLOWLIST: 'http://localhost:3000/app, http://localhost:3000/other',
+-    } as NodeJS.ProcessEnv);
+-    expect(cfg.OAUTH_REDIRECT_ALLOWLIST).toEqual(['http://localhost:3000/app', 'http://localhost:3000/other']);
++    it('accepts PRIZE_MODE=on', () => {
++      expect(
++        loadConfig({ ...base, PRIZE_MODE: 'on' } as NodeJS.ProcessEnv).PRIZE_MODE,
++      ).toBe('on');
++    });
+   });
+ 
+   it('rejects CORS wildcard in production (REQ-SEC-008)', () => {
+     expect(() =>
+       loadConfig({ ...base, NODE_ENV: 'production', CORS_ORIGINS: '*' } as NodeJS.ProcessEnv),
+     ).toThrow(/CORS_ORIGINS/);
+   });
+ 
+   it('applies transport defaults', () => {
+     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+@@ -133,42 +132,52 @@ describe('loadConfig', () => {
+       CORS_ORIGINS: 'https://a.example, https://b.example',
+     } as NodeJS.ProcessEnv);
+     expect(cfg.TRUST_PROXY).toBe(true);
+     expect(cfg.CORS_ORIGINS).toEqual(['https://a.example', 'https://b.example']);
+   });
+ 
+   it('applies §4 defaults for event emission params', () => {
+     const cfg = configSchema.parse({
+       DATABASE_URL: 'postgresql://x',
+       JWT_SECRET: 'x'.repeat(32),
++      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
+     });
+     expect(cfg.EVENT_EMIT_RATE_LIMIT_PER_MIN).toBe(30);
+     expect(cfg.MAX_EVENT_PAYLOAD_BYTES).toBe(16_384);
+   });
+ 
+   it('rejects out-of-range event emission params (REQ-RT-012/014, §4 bounds)', () => {
+-    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
++    const envBase = {
++      DATABASE_URL: 'postgresql://x',
++      JWT_SECRET: 'x'.repeat(32),
++      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
++    };
+     expect(configSchema.safeParse({ ...envBase, EVENT_EMIT_RATE_LIMIT_PER_MIN: 0 }).success).toBe(false);
+     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 512 }).success).toBe(false);
+     expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 300_000 }).success).toBe(false);
+   });
+ 
+   it('applies §4 default for reconnect ceiling (REQ-RT-015)', () => {
+     const cfg = configSchema.parse({
+       DATABASE_URL: 'postgresql://x',
+       JWT_SECRET: 'x'.repeat(32),
++      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
+     });
+     expect(cfg.RECONNECT_RATE_LIMIT_PER_MIN).toBe(10);
+   });
+ 
+   it('coerces RECONNECT_RATE_LIMIT_PER_MIN from string and rejects 0', () => {
+-    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
++    const envBase = {
++      DATABASE_URL: 'postgresql://x',
++      JWT_SECRET: 'x'.repeat(32),
++      ORGANIZER_SETUP_TOKEN: 't'.repeat(32),
++    };
+     expect(
+       configSchema.parse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: '5' })
+         .RECONNECT_RATE_LIMIT_PER_MIN,
+     ).toBe(5);
+     expect(
+       configSchema.safeParse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: 0 }).success,
+     ).toBe(false);
+   });
+ 
+   it('accepts CLEANUP_INTERVAL within the §4 range and defaults to 1 hour (REQ-ID-010)', () => {
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index d4b0897..871d432 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -7,20 +7,28 @@ export const configSchema = z.object({
+   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+   DATABASE_URL: z.string().min(1),
+   // REQ-ID-013: room code length (§4: default 8, min 6).
+   ROOM_CODE_MIN_LEN: z.coerce.number().int().min(6).default(8),
+   // REQ-ID-006: max PARTICIPANT memberships per room (§4: default 500, 1..100 000).
+   ROOM_PARTICIPANT_LIMIT: z.coerce.number().int().min(1).max(100_000).default(500),
+   // REQ-ID-006: join attempts per minute per IP (§4: default 20, ≥ 1).
+   JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
+   // REQ-SEC-002: обязателен, ≥ 32 байта; дефолта нет — старт без секрета невозможен.
+   JWT_SECRET: z.string().min(32),
++  // ADR-012 §2: bootstrap единственного организатора инстанса. Обязателен,
++  // ≥ 32 байта; дефолта нет — старт без токена невозможен (образец REQ-SEC-002).
++  ORGANIZER_SETUP_TOKEN: z.string().min(32),
++  // REQ-SEC-007 (§4 login_rate_limit): POST /auth/organizer, 10/мин на IP.
++  ORGANIZER_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
++  // ADR-012 §4: призовой режим. off — создание призов и розыгрыш с призом
++  // отклоняются PRIZES_DISABLED; on — юридическая ответственность организатора.
++  PRIZE_MODE: z.enum(['off', 'on']).default('off'),
+   // §4: access_token_ttl — 15 мин, 1 мин … 1 ч (секунды).
+   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
+   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
+   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
+   // §4: cleanup_interval — 1 ч, 5 мин … 24 ч (секунды). Интервал регламентных
+   // джоб (REQ-ID-010); фаза 3 — свип анонимизации гостей (REQ-ID-003/014, Task 8).
+   CLEANUP_INTERVAL: z.coerce.number().int().min(300).max(86_400).default(3_600),
+   // §4: refresh_token_ttl — 30 сут, 1 сут … 90 сут (секунды). Гостевой cap
+   // (≤ guest_ttl, REQ-ID-016) применяется в точках выдачи (TokenService.sessionExpiry,
+   // setRefreshCookie), не здесь: инвариант REQ-ID-016 — про гостевой refresh,
+@@ -47,66 +55,31 @@ export const configSchema = z.object({
+     .default('')
+     .transform((s) =>
+       s
+         .split(',')
+         .map((o) => o.trim())
+         .filter(Boolean),
+     ),
+   // UI-срез (дизайн §2): same-origin раздача собранного SPA из того же
+   // Docker-артефакта. Не задан → статика не раздаётся, поведение прежнее (dev/test).
+   WEB_STATIC_DIR: z.string().min(1).optional(),
+-  // REQ-ID-015/009: Google OAuth — опциональная секция, all-or-none (superRefine ниже).
+-  // Без неё приложение бутится, эндпоинты /auth/google* отдают OAUTH_NOT_CONFIGURED.
+-  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+-  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+-  OAUTH_REDIRECT_URI: z.url().optional(),
+-  OAUTH_REDIRECT_ALLOWLIST: z
+-    .string()
+-    .default('')
+-    .transform((s) =>
+-      s
+-        .split(',')
+-        .map((o) => o.trim())
+-        .filter(Boolean),
+-    )
+-    .pipe(z.array(z.url())),
+-  // TTL state/PKCE/redirect кук OAuth-флоу (секунды).
+-  OAUTH_STATE_TTL: z.coerce.number().int().min(60).max(1800).default(600),
+-  // REQ-SEC-007 (§4 login_rate_limit): /auth/google и /auth/google/callback, 10/мин на IP.
+-  OAUTH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+   // REQ-OPS-004 (ф.4): уровень структурных логов (pino levels).
+   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+ })
+   .superRefine((cfg, ctx) => {
+     if (cfg.NODE_ENV === 'production' && cfg.CORS_ORIGINS.includes('*')) {
+       ctx.addIssue({
+         code: 'custom',
+         path: ['CORS_ORIGINS'],
+         message: 'CORS wildcard is forbidden in production (REQ-SEC-008)',
+       });
+     }
+-    const googleSet = [cfg.GOOGLE_CLIENT_ID, cfg.GOOGLE_CLIENT_SECRET, cfg.OAUTH_REDIRECT_URI];
+-    const googlePresent = googleSet.filter((v) => v !== undefined).length;
+-    if (googlePresent > 0 && googlePresent < 3) {
+-      ctx.addIssue({
+-        code: 'custom',
+-        path: ['GOOGLE_CLIENT_ID'],
+-        message: 'Google OAuth is all-or-none: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI (REQ-ID-015)',
+-      });
+-    }
+-    if (googlePresent === 3 && cfg.OAUTH_REDIRECT_ALLOWLIST.length === 0) {
+-      ctx.addIssue({
+-        code: 'custom',
+-        path: ['OAUTH_REDIRECT_ALLOWLIST'],
+-        message: 'OAUTH_REDIRECT_ALLOWLIST must be non-empty when Google OAuth is configured (REQ-ID-009)',
+-      });
+-    }
+   });
+ 
+ export type AppConfig = z.infer<typeof configSchema>;
+ 
+ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
+   const parsed = configSchema.safeParse(env);
+   if (!parsed.success) {
+     const detail = parsed.error.issues
+       .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+       .join('; ');
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index aadb00d..b08daee 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -16,24 +16,24 @@ export const TEST_CONFIG: AppConfig = {
+   CLEANUP_INTERVAL: 3_600,
+   // REFRESH_TOKEN_TTL — новый дефолт §4 (30 сут): registered-ветки int-спеков должны
+   // видеть TTL > GUEST_TTL (гостевой cap применяется при выдаче, не в конфиге).
+   REFRESH_TOKEN_TTL: 2_592_000,
+   REFRESH_RATE_LIMIT: 10,
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
+   MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   RECONNECT_RATE_LIMIT_PER_MIN: 10,
+   TRUST_PROXY: false,
+   CORS_ORIGINS: [],
+-  // Google-секция опциональна (all-or-none) — в тестовом конфиге отсутствует.
+-  OAUTH_STATE_TTL: 600,
+-  OAUTH_RATE_LIMIT: 10,
+-  OAUTH_REDIRECT_ALLOWLIST: [],
++  // ADR-012: bootstrap организатора и призовой режим (тестовые значения инертны).
++  ORGANIZER_SETUP_TOKEN: 'test-only-organizer-setup-token!!',
++  ORGANIZER_RATE_LIMIT: 10,
++  PRIZE_MODE: 'off',
+   LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
+ };
+ 
+ // Структурный no-op фейк PinoLogger (REQ-OPS-004) для прямых — вне DI — конструкций
+ // сервисов в int/e2e-спеках: DI-деревья получают настоящий PinoLogger транзитивно
+ // через PinoLoggerModule, а здесь поведение логов не ассертится, важна лишь
+ // сигнатура конструктора. Поля покрывают методы, реально вызываемые сервисами.
+ export const fakeLogger = {
+   setContext: () => undefined,
+   info: () => undefined,

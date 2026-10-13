@@ -1,0 +1,112 @@
+# Review package: 3279301..HEAD
+
+## Commits
+e4d8b64 feat(core): §4 join/code/participant config params + ConfigModule (REQ-OPS-003)
+
+## Files changed
+ packages/core/src/config/config.module.ts      |  9 +++++++++
+ packages/core/src/config/config.schema.spec.ts | 28 ++++++++++++++++++++++++++
+ packages/core/src/config/config.schema.ts      | 10 +++++++--
+ packages/core/src/config/config.tokens.ts      |  3 +++
+ 4 files changed, 48 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/config/config.module.ts b/packages/core/src/config/config.module.ts
+new file mode 100644
+index 0000000..d21ff7a
+--- /dev/null
++++ b/packages/core/src/config/config.module.ts
+@@ -0,0 +1,9 @@
++import { Module } from '@nestjs/common';
++import { APP_CONFIG } from './config.tokens';
++import { loadConfig } from './config.schema';
++
++@Module({
++  providers: [{ provide: APP_CONFIG, useFactory: () => loadConfig(process.env) }],
++  exports: [APP_CONFIG],
++})
++export class ConfigModule {}
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 78958b5..0aa1ef0 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -15,11 +15,39 @@ describe('loadConfig', () => {
+     expect(cfg.PORT).toBe(8080);
+   });
+ 
+   it('throws when DATABASE_URL is missing', () => {
+     expect(() => loadConfig({} as NodeJS.ProcessEnv)).toThrow(/DATABASE_URL/);
+   });
+ 
+   it('throws when PORT is out of range', () => {
+     expect(() => loadConfig({ ...base, PORT: '70000' } as NodeJS.ProcessEnv)).toThrow(/PORT/);
+   });
++
++  it('applies §4 defaults (REQ-ID-006, REQ-ID-013)', () => {
++    const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
++    expect(cfg.ROOM_CODE_MIN_LEN).toBe(8);
++    expect(cfg.ROOM_PARTICIPANT_LIMIT).toBe(500);
++    expect(cfg.JOIN_RATE_LIMIT_IP).toBe(20);
++  });
++
++  it.each([
++    ['ROOM_CODE_MIN_LEN', '5'],
++    ['ROOM_PARTICIPANT_LIMIT', '0'],
++    ['ROOM_PARTICIPANT_LIMIT', '100001'],
++    ['JOIN_RATE_LIMIT_IP', '0'],
++  ] as const)('throws when %s is out of range (%s)', (key, value) => {
++    expect(() => loadConfig({ ...base, [key]: value } as NodeJS.ProcessEnv)).toThrow(
++      new RegExp(key),
++    );
++  });
++
++  it('coerces §4 params from strings', () => {
++    const cfg = loadConfig({
++      ...base,
++      ROOM_CODE_MIN_LEN: '10',
++      JOIN_RATE_LIMIT_IP: '5',
++    } as NodeJS.ProcessEnv);
++    expect(cfg.ROOM_CODE_MIN_LEN).toBe(10);
++    expect(cfg.JOIN_RATE_LIMIT_IP).toBe(5);
++  });
+ });
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index baa71fa..4c305cf 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -1,18 +1,24 @@
+ import { z } from 'zod';
+ 
+-// Startup config validation mechanism (REQ-OPS-003). Phase 0 keeps the surface
+-// minimal; §4 parameters arrive with their own phases.
++// Startup config validation mechanism (REQ-OPS-003). §4 parameters arrive with the
++// phases that need them; ranges are the hard bounds of the spec's §4 table.
+ export const configSchema = z.object({
+   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+   DATABASE_URL: z.string().min(1),
++  // REQ-ID-013: room code length (§4: default 8, min 6).
++  ROOM_CODE_MIN_LEN: z.coerce.number().int().min(6).default(8),
++  // REQ-ID-006: max PARTICIPANT memberships per room (§4: default 500, 1..100 000).
++  ROOM_PARTICIPANT_LIMIT: z.coerce.number().int().min(1).max(100_000).default(500),
++  // REQ-ID-006: join attempts per minute per IP (§4: default 20, ≥ 1).
++  JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
+ });
+ 
+ export type AppConfig = z.infer<typeof configSchema>;
+ 
+ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
+   const parsed = configSchema.safeParse(env);
+   if (!parsed.success) {
+     const detail = parsed.error.issues
+       .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+       .join('; ');
+diff --git a/packages/core/src/config/config.tokens.ts b/packages/core/src/config/config.tokens.ts
+new file mode 100644
+index 0000000..e1730cc
+--- /dev/null
++++ b/packages/core/src/config/config.tokens.ts
+@@ -0,0 +1,3 @@
++// DI token for the validated startup config (REQ-OPS-003). Services inject AppConfig;
++// nothing outside PrismaService reads process.env directly.
++export const APP_CONFIG = Symbol('APP_CONFIG');

@@ -1,0 +1,185 @@
+# Review package: 3595d54..8086a54
+
+## Commits
+8086a54 feat(core): enforce REGISTERED organizer via atomic guarded INSERT (REQ-ID-005)
+
+## Files changed
+ packages/core/src/room/room.errors.ts           | 10 ++++++++
+ packages/core/src/room/room.service.int-spec.ts | 20 +++++++++++++++-
+ packages/core/src/room/room.service.ts          | 31 +++++++++++++++++++++----
+ 3 files changed, 56 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/room/room.errors.ts b/packages/core/src/room/room.errors.ts
+index 01ad41a..31654cb 100644
+--- a/packages/core/src/room/room.errors.ts
++++ b/packages/core/src/room/room.errors.ts
+@@ -1,17 +1,18 @@
+ // Core-internal typed domain errors for the Room lifecycle. NOT part of the SDK
+ // contract (these do not cross the app↔core boundary in this slice). When an HTTP
+ // surface for the organizer lands, these map to typed API responses without
+ // stack traces (REQ-SEC-006).
+ export const ROOM_ERROR_CODES = {
+   ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
+   ROOM_CONFLICT: 'ROOM_CONFLICT',
++  ROOM_ORGANIZER_NOT_REGISTERED: 'ROOM_ORGANIZER_NOT_REGISTERED',
+ } as const;
+ 
+ export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
+ 
+ export class RoomError extends Error {
+   constructor(
+     readonly code: RoomErrorCode,
+     message: string,
+   ) {
+     super(message);
+@@ -26,10 +27,19 @@ export class RoomTransitionError extends RoomError {
+   }
+ }
+ 
+ // Atomic conditional UPDATE affected zero rows: not-found, concurrent change,
+ // already terminal, or already deleted.
+ export class RoomConflictError extends RoomError {
+   constructor(message: string) {
+     super(ROOM_ERROR_CODES.ROOM_CONFLICT, message);
+   }
+ }
++
++// Organizer identity missing, GUEST, or anonymized — collapsed into one code on
++// purpose (design §3): to the caller it is a single refusal, and the predicate is
++// identity's invariant, not a place for reconnaissance.
++export class RoomOrganizerNotRegisteredError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_ORGANIZER_NOT_REGISTERED, message);
++  }
++}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index b91744a..4f8a1ae 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,14 +1,14 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { RoomService } from './room.service';
+-import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
++import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+@@ -23,20 +23,38 @@ describe('RoomService lifecycle', () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+   it('create() yields a DRAFT room', async () => {
+     const room = await service.create(ORG);
+     expect(room.status).toBe('DRAFT');
+     expect(room.deletedAt).toBeNull();
+     expect(room.organizerId).toBe(ORG);
+   });
+ 
++  it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const err = await service.create(guest.id).catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomOrganizerNotRegisteredError);
++    expect((err as RoomOrganizerNotRegisteredError).code).toBe('ROOM_ORGANIZER_NOT_REGISTERED');
++  });
++
++  it('rejects a nonexistent organizer with the same collapsed code', async () => {
++    await expect(
++      service.create('00000000-0000-0000-0000-0000000000aa'),
++    ).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
++  });
++
++  it('rejects an anonymized (deletedAt) REGISTERED organizer', async () => {
++    const ghost = await seedIdentity(db.prisma, { kind: 'REGISTERED', deletedAt: new Date() });
++    await expect(service.create(ghost.id)).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
++  });
++
+   it('persists each legal transition', async () => {
+     const a = await service.create(ORG);
+     expect((await service.activate(a.id)).status).toBe('ACTIVE');
+     expect((await service.complete(a.id)).status).toBe('COMPLETED');
+ 
+     const b = await service.create(ORG);
+     expect((await service.cancel(b.id)).status).toBe('CANCELLED');
+ 
+     const c = await service.create(ORG);
+     await service.activate(c.id);
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index bee3212..acc8a1d 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,39 +1,62 @@
+ import { Injectable } from '@nestjs/common';
+ import type { Room, $Enums } from '@prisma/client';
+ import { PrismaService } from '../prisma/prisma.service';
+ import {
+   assertTransition,
+   assertDeletable,
+   DELETABLE_STATUSES,
+   type RoomStatus,
+ } from './room-state-machine';
+-import { RoomConflictError } from './room.errors';
++import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ // Compile-time parity assertion between the Prisma-generated enum and the domain union.
+ // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
+ // if a member is ever added to one side and not the other, this line fails to compile
+ // instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
+ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
+   ? [$Enums.RoomStatus] extends [RoomStatus]
+     ? true
+     : never
+   : never;
+ void (true satisfies RoomStatusParity);
+ 
+ @Injectable()
+ export class RoomService {
+   constructor(private readonly prisma: PrismaService) {}
+ 
+-  create(organizerId: string): Promise<Room> {
+-    // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
+-    return this.prisma.room.create({ data: { organizerId } });
++  async create(organizerId: string): Promise<Room> {
++    // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
++    // INSERT — the WHERE EXISTS predicate is the single source of truth, no
++    // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
++    // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
++    // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
++    // The same predicate lives in the "Identity_registered_email_key" index
++    // condition (design §7) — change both or neither.
++    // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
++    const rows = await this.prisma.$queryRaw<Room[]>`
++      INSERT INTO room."Room" ("id", "organizerId", "status", "createdAt", "updatedAt")
++      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', now(), now()
++      WHERE EXISTS (
++        SELECT 1 FROM identity."Identity"
++        WHERE "id" = ${organizerId}::uuid
++          AND "kind" = 'REGISTERED'
++          AND "deletedAt" IS NULL
++      )
++      RETURNING *
++    `;
++    if (rows.length === 0) {
++      throw new RoomOrganizerNotRegisteredError(
++        `Organizer ${organizerId} is not a live REGISTERED identity`,
++      );
++    }
++    return rows[0];
+   }
+ 
+   async transition(roomId: string, to: RoomStatus): Promise<Room> {
+     const current = await this.prisma.room.findUnique({ where: { id: roomId } });
+     if (!current || current.deletedAt !== null) {
+       throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+     }
+     // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+     assertTransition(current.status as RoomStatus, to);
+     // Atomic guarded update: correctness of the race rests on this WHERE, not on the

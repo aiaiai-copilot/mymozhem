@@ -1,0 +1,74 @@
+# Review package: 320e3d5..HEAD
+
+## Commits
+c12a9cf fix(realtime): gauge-парность на re-subscribe — add идемпотентен по socketId (Review Focus 1)
+
+## Files changed
+ packages/core/src/realtime/subscription-registry.spec.ts | 11 +++++++++++
+ packages/core/src/realtime/subscription-registry.ts      |  6 +++++-
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/src/realtime/subscription-registry.spec.ts b/packages/core/src/realtime/subscription-registry.spec.ts
+index 79a012c..4f9ffe0 100644
+--- a/packages/core/src/realtime/subscription-registry.spec.ts
++++ b/packages/core/src/realtime/subscription-registry.spec.ts
+@@ -48,11 +48,22 @@ describe('SubscriptionRegistry', () => {
+   it('gauge: add инкрементирует, remove декрементирует, remove несуществующего — no-op (Review Focus 1)', () => {
+     const metrics = makeMetrics();
+     const registry = new SubscriptionRegistry(metrics);
+     registry.add({ socketId: 's1', identityId: 'i1', roomId: 'r1', level: 'public' });
+     expect(metrics.connectionAdded).toHaveBeenCalledWith('r1');
+     registry.remove('s1');
+     expect(metrics.connectionRemoved).toHaveBeenCalledWith('r1');
+     registry.remove('s1'); // повтор — без декремента
+     expect((metrics.connectionRemoved as jest.Mock).mock.calls).toHaveLength(1);
+   });
++
++  it('re-add той же подписки (тот же socketId) не двигает gauge (Review Focus 1)', () => {
++    const metrics = makeMetrics();
++    const registry = new SubscriptionRegistry(metrics);
++    const sub = { socketId: 's1', identityId: 'i1', roomId: 'r1', level: 'public' as const };
++    registry.add(sub);
++    registry.add(sub); // re-subscribe в ту же комнату — идемпотентен, без второго инкремента
++    expect((metrics.connectionAdded as jest.Mock).mock.calls).toHaveLength(1);
++    registry.remove('s1');
++    expect((metrics.connectionRemoved as jest.Mock).mock.calls).toHaveLength(1);
++  });
+ });
+diff --git a/packages/core/src/realtime/subscription-registry.ts b/packages/core/src/realtime/subscription-registry.ts
+index 97a48f7..30ad956 100644
+--- a/packages/core/src/realtime/subscription-registry.ts
++++ b/packages/core/src/realtime/subscription-registry.ts
+@@ -21,26 +21,30 @@ export class SubscriptionRegistry {
+   // REQ-OPS-004: gauge активных соединений живёт здесь, а не в gateway — все
+   // пути очистки (disconnect, mid-subscribe cleanup, catch-пути, revoke) идут
+   // через remove(), и парность инкремент/декремент гарантирована построением.
+   constructor(private readonly metrics: MetricsService) {}
+ 
+   private static key(identityId: string, roomId: string): string {
+     return `${identityId}:${roomId}`;
+   }
+ 
+   add(sub: Subscription): void {
++    // Re-add того же socketId (идемпотентный re-subscribe в ту же комнату, контракт
++    // gateway) — перезапись, а не новое соединение: gauge не двигаем, иначе инкремент
++    // остался бы без парного декремента (Review Focus 1).
++    const isNew = !this.bySocket.has(sub.socketId);
+     this.bySocket.set(sub.socketId, sub);
+     const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
+     const set = this.socketsByMembership.get(key) ?? new Set<string>();
+     set.add(sub.socketId);
+     this.socketsByMembership.set(key, set);
+-    this.metrics.connectionAdded(sub.roomId);
++    if (isNew) this.metrics.connectionAdded(sub.roomId);
+   }
+ 
+   get(socketId: string): Subscription | undefined {
+     return this.bySocket.get(socketId);
+   }
+ 
+   remove(socketId: string): void {
+     const sub = this.bySocket.get(socketId);
+     if (sub === undefined) return;
+     this.bySocket.delete(socketId);

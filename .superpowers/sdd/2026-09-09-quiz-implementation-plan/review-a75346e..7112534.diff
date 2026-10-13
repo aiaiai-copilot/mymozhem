@@ -1,0 +1,165 @@
+# Review package: a75346e..HEAD
+
+## Commits
+7112534 feat(sdk): контракт 1.5.0 — wire-коды фазы 2 (app-runtime + отказы квиза)
+
+## Files changed
+ packages/sdk/package.json                            |  2 +-
+ packages/sdk/src/contract-version.contract.spec.ts   |  2 +-
+ packages/sdk/src/contract-version.ts                 |  2 +-
+ packages/sdk/src/errors/error-codes.contract.spec.ts | 19 +++++++++++++++++++
+ packages/sdk/src/errors/error-codes.ts               |  8 ++++++++
+ 5 files changed, 30 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index ac28dcc..6a3b9f0 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,13 +1,13 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "1.4.0",
++  "version": "1.5.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+   "dependencies": {
+diff --git a/packages/sdk/src/contract-version.contract.spec.ts b/packages/sdk/src/contract-version.contract.spec.ts
+index c9a5f22..60758e6 100644
+--- a/packages/sdk/src/contract-version.contract.spec.ts
++++ b/packages/sdk/src/contract-version.contract.spec.ts
+@@ -20,21 +20,21 @@ describe('contract version', () => {
+     const pkg = JSON.parse(
+       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
+     ) as { version: string };
+     expect(pkg.version).toBe(CONTRACT_VERSION);
+   });
+ 
+   it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(true);
+   });
+ 
+-  it.each(['^2.0.0', '>=1.5.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
++  it.each(['^2.0.0', '>=1.6.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(false);
+   });
+ 
+   it.each(['garbage!!', '', 'not-a-range', '*'])(
+     'rejects a range that constrains nothing or is malformed: %s',
+     (range) => {
+       expect(isContractRangeSatisfied(range)).toBe(false);
+     },
+   );
+ 
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+index 5248817..30ec3c7 100644
+--- a/packages/sdk/src/contract-version.ts
++++ b/packages/sdk/src/contract-version.ts
+@@ -1,18 +1,18 @@
+ import { satisfies, validRange } from 'semver';
+ import { ContractError } from './errors/error-codes';
+ 
+ // The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
+ // contract version — packages/sdk/package.json is kept equal to this by a contract
+ // test. Versioning from day one is the enforcement mechanism of the boundary, not
+ // preparation for a future consumer (ADR-002).
+-export const CONTRACT_VERSION = '1.4.0';
++export const CONTRACT_VERSION = '1.5.0';
+ 
+ // A manifest declares the range of contract versions it is compatible with; the
+ // core checks it at registration (REQ-CTR-004). We normalize the range with semver
+ // before judging it, rather than pattern-matching the input spelling: many strings
+ // normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
+ // normalized form catches all of them instead of an incomplete enumeration of
+ // spellings. A range that constrains nothing has not declared compatibility — it has
+ // opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
+ // range that fails to parse at all. It never silently passes as "no constraint".
+ export const isContractRangeSatisfied = (range: string): boolean => {
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+index a168efa..b56082b 100644
+--- a/packages/sdk/src/errors/error-codes.contract.spec.ts
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -28,24 +28,43 @@ describe('contract errors', () => {
+       'RATE_LIMITED',
+       'REQUEST_INVALID',
+       'SESSION_INVALID',
+       'OAUTH_NOT_CONFIGURED',
+       'OAUTH_REDIRECT_INVALID',
+       'OAUTH_STATE_INVALID',
+       'OAUTH_ACCESS_DENIED',
+       'OAUTH_EXCHANGE_FAILED',
+       'OAUTH_EMAIL_UNVERIFIED',
+       'OAUTH_EMAIL_CONFLICT',
++      'MODULE_UNAVAILABLE',
++      'PUBLISH_FORBIDDEN',
++      'ANSWER_TOO_FAST',
++      'ROUND_NOT_OPEN',
++      'ALREADY_ANSWERED',
++      'QUESTION_UNKNOWN',
++      'OPTION_UNKNOWN',
+       'INTERNAL_ERROR',
+     ]);
+   });
+ 
++  it.each([
++    'MODULE_UNAVAILABLE',
++    'PUBLISH_FORBIDDEN',
++    'ANSWER_TOO_FAST',
++    'ROUND_NOT_OPEN',
++    'ALREADY_ANSWERED',
++    'QUESTION_UNKNOWN',
++    'OPTION_UNKNOWN',
++  ] as const)('accepts phase-2 code %s', (code) => {
++    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
++  });
++
+   it('rejects an unknown code', () => {
+     expect(contractErrorCodeSchema.safeParse('KABOOM').success).toBe(false);
+   });
+ 
+   it('carries its code and stays a real Error', () => {
+     const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
+     expect(err).toBeInstanceOf(Error);
+     expect(err.code).toBe('EVENT_UNKNOWN_TYPE');
+   });
+ 
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index 65f053c..28b7f9b 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -27,20 +27,28 @@ export const CONTRACT_ERROR_CODES = [
+   'REQUEST_INVALID',
+   'SESSION_INVALID',
+   // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
+   'OAUTH_NOT_CONFIGURED',
+   'OAUTH_REDIRECT_INVALID',
+   'OAUTH_STATE_INVALID',
+   'OAUTH_ACCESS_DENIED',
+   'OAUTH_EXCHANGE_FAILED',
+   'OAUTH_EMAIL_UNVERIFIED',
+   'OAUTH_EMAIL_CONFLICT',
++  // Quiz-срез (фаза 2, design 2026-09-09): диспетчер app-runtime и отказы модуля.
++  'MODULE_UNAVAILABLE',
++  'PUBLISH_FORBIDDEN',
++  'ANSWER_TOO_FAST',
++  'ROUND_NOT_OPEN',
++  'ALREADY_ANSWERED',
++  'QUESTION_UNKNOWN',
++  'OPTION_UNKNOWN',
+   'INTERNAL_ERROR',
+ ] as const;
+ 
+ export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
+ export const contractErrorCodeSchema = z.enum(CONTRACT_ERROR_CODES);
+ 
+ // The wire form of an error: a code, and deliberately nothing else. strictObject so
+ // that a well-meaning `message` field cannot be added without failing this contract
+ // (REQ-SEC-006 bans forwarding raw error.message outward).
+ export const contractErrorPayloadSchema = z.strictObject({

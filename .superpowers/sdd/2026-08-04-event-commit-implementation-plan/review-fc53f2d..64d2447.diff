@@ -1,0 +1,1490 @@
+# Review package: fc53f2d..HEAD
+
+## Commits
+64d2447 test(core): конкурентный seq и payload-нейтральность app-событий (REQ-RT-007, критерий выхода ф.1)
+57b32ec feat(core): actorId в lifecycle-эмит через transition (REQ-RT-009, service-уровень)
+2794691 test(core): rate-limit семантика commitAppEvent — per-actor изоляция, null-actor, подсчёт попыток (REQ-RT-014)
+964859c feat(core): commitAppEvent — commit-цепочка app-событий (REQ-RT-012/016, REQ-CTR-008/009, membership-гейт)
+f9e3076 refactor(core): EventLogService — общий appendLocked + deps (appRegistry/limiter/config), шов commitAppEvent
+ec7f15e feat(core): realtime errors + event read-path в AppRegistryService (REQ-CTR-008/009)
+c54d5a0 feat(core): EventEmitLimiter — per-actor hard rate limit эмиссии (REQ-RT-014, объём v1.3)
+39f3a2e feat(core): config params EVENT_EMIT_RATE_LIMIT_PER_MIN/MAX_EVENT_PAYLOAD_BYTES (REQ-RT-012/014, §4)
+
+## Files changed
+ apps/server/test/transport.e2e-spec.ts             |   7 +-
+ .../src/app-registry/app-registry.service.spec.ts  |  31 ++
+ .../core/src/app-registry/app-registry.service.ts  |  32 ++
+ packages/core/src/auth/token.service.int-spec.ts   |   7 +-
+ packages/core/src/config/config.schema.spec.ts     |  18 +-
+ packages/core/src/config/config.schema.ts          |   4 +
+ packages/core/src/index.ts                         |   2 +
+ .../src/membership/membership.service.int-spec.ts  |   7 +-
+ .../core/src/realtime/event-commit.int-spec.ts     | 419 +++++++++++++++++++++
+ .../core/src/realtime/event-emit-limiter.spec.ts   |  37 ++
+ packages/core/src/realtime/event-emit-limiter.ts   |  41 ++
+ packages/core/src/realtime/event-log.int-spec.ts   |  24 +-
+ packages/core/src/realtime/event-log.service.ts    | 152 +++++++-
+ packages/core/src/realtime/realtime.errors.ts      |  76 ++++
+ packages/core/src/realtime/realtime.module.ts      |  15 +-
+ packages/core/src/room/room.service.int-spec.ts    |  13 +-
+ packages/core/src/room/room.service.ts             |  32 +-
+ packages/core/src/testing/test-config.ts           |   2 +
+ 18 files changed, 885 insertions(+), 34 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index 9f39ef2..99e1f89 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -1,18 +1,19 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { tokenResponseSchema } from '@mymozhem/sdk';
+ import {
+   AppRegistryService,
++  EventEmitLimiter,
+   EventLogService,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
+   RoomService,
+   TEST_CONFIG,
+   TokenService,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+@@ -87,21 +88,25 @@ describe('Transport HTTP (e2e)', () => {
+   beforeAll(async () => {
+     savedDatabaseUrl = process.env.DATABASE_URL;
+     savedJwtSecret = process.env.JWT_SECRET;
+     db = await startTestDb(); // выставляет DATABASE_URL — её подхватят app'ы ниже
+     // Access-токены верифицируем тем же секретом, которым подписывают boot'нутые app'ы.
+     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
+     roomService = new RoomService(
+       db.prisma,
+-      new EventLogService(),
++      new EventLogService(
++        new AppRegistryService([]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++      ),
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+       ),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+diff --git a/packages/core/src/app-registry/app-registry.service.spec.ts b/packages/core/src/app-registry/app-registry.service.spec.ts
+index 54fb31f..49041d8 100644
+--- a/packages/core/src/app-registry/app-registry.service.spec.ts
++++ b/packages/core/src/app-registry/app-registry.service.spec.ts
+@@ -66,20 +66,51 @@ describe('AppRegistryService.validateSettings (REQ-CORE-007)', () => {
+       const svc = new AppRegistryService([manifest]);
+       svc.validateSettings('quiz', 1, { title: 'a', correctAnswers: [] });
+       svc.validateSettings('quiz', 1, { title: 'b', correctAnswers: [1] });
+       expect(spy).toHaveBeenCalledTimes(1);
+     } finally {
+       spy.mockRestore();
+     }
+   });
+ });
+ 
++describe('event-commit read-path (REQ-CTR-008/009)', () => {
++  it('getEventDefinition returns schema+visibility for a known type, undefined for unknown', () => {
++    const svc = new AppRegistryService([validManifests[0]]);
++    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
++    expect(def?.visibility).toBe('module-private');
++    expect(def?.schema).toMatchObject({ type: 'object' });
++    expect(svc.getEventDefinition('quiz', 1, 'answer.v2')).toBeUndefined();
++    expect(svc.getEventDefinition('nope', 1, 'answer.submitted')).toBeUndefined();
++  });
++
++  it('eventValidatorFor compiles, caches and validates the registered schema', () => {
++    const svc = new AppRegistryService([validManifests[0]]);
++    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
++    if (!def) throw new Error('fixture must define answer.submitted');
++    const v1 = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
++    const v2 = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
++    expect(v1).toBe(v2); // кэш REQ-CORE-007
++    expect(v1({ roundId: 'r1', choice: 2 })).toBe(true);
++    expect(v1({ roundId: 'r1', choice: 'x' })).toBe(false);
++  });
++
++  it('describeEventErrors renders ajv errors after a failed validation', () => {
++    const svc = new AppRegistryService([validManifests[0]]);
++    const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
++    if (!def) throw new Error('fixture must define answer.submitted');
++    const v = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
++    expect(v({})).toBe(false);
++    expect(svc.describeEventErrors(v)).toMatch(/roundId|required/);
++  });
++});
++
+ describe('AppRegistryModule', () => {
+   it('provides AppRegistryService with an empty registry by default', async () => {
+     const moduleRef = await Test.createTestingModule({
+       imports: [AppRegistryModule],
+     }).compile();
+     const svc = moduleRef.get(AppRegistryService);
+     const { appId, manifestVersion } = validManifests[0];
+     expect(svc.getManifest(appId, manifestVersion)).toBeUndefined();
+   });
+ });
+diff --git a/packages/core/src/app-registry/app-registry.service.ts b/packages/core/src/app-registry/app-registry.service.ts
+index e62aa8a..8a3635e 100644
+--- a/packages/core/src/app-registry/app-registry.service.ts
++++ b/packages/core/src/app-registry/app-registry.service.ts
+@@ -40,20 +40,52 @@ export class AppRegistryService {
+       );
+     }
+     const validate = this.validatorFor(appId, manifestVersion, manifest.appSettings);
+     if (!validate(settings)) {
+       throw new AppSettingsInvalidError(
+         `appSettings do not match the manifest schema of ${appId}@${manifestVersion}: ${this.ajv.errorsText(validate.errors)}`,
+       );
+     }
+   }
+ 
++  // REQ-CTR-008/009 read-path для event-commit цепочки: схема + декларированный
++  // потолок видимости типа из манифеста. undefined = неизвестный тип/манифест.
++  getEventDefinition(
++    appId: string,
++    manifestVersion: number,
++    name: string,
++  ): AppManifest['events'][string] | undefined {
++    return this.registry.getManifest(appId, manifestVersion)?.events[name];
++  }
++
++  // Валидаторы app-событий — в том же кэше, что appSettings (REQ-CORE-007), с
++  // префиксом ключа, чтобы не пересекаться с ключом настроек `appId@version`.
++  eventValidatorFor(
++    appId: string,
++    manifestVersion: number,
++    name: string,
++    schema: JsonSchemaObject,
++  ): ValidateFunction {
++    const key = `event:${appId}@${manifestVersion}:${name}`;
++    const cached = this.validators.get(key);
++    if (cached) {
++      return cached;
++    }
++    const compiled = this.ajv.compile(schema);
++    this.validators.set(key, compiled);
++    return compiled;
++  }
++
++  describeEventErrors(validate: ValidateFunction): string {
++    return this.ajv.errorsText(validate.errors);
++  }
++
+   private validatorFor(
+     appId: string,
+     manifestVersion: number,
+     schema: JsonSchemaObject,
+   ): ValidateFunction {
+     const key = `${appId}@${manifestVersion}`;
+     const cached = this.validators.get(key);
+     if (cached) {
+       return cached;
+     }
+diff --git a/packages/core/src/auth/token.service.int-spec.ts b/packages/core/src/auth/token.service.int-spec.ts
+index e7c36eb..bb2217d 100644
+--- a/packages/core/src/auth/token.service.int-spec.ts
++++ b/packages/core/src/auth/token.service.int-spec.ts
+@@ -1,14 +1,15 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
++import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { TokenService } from './token.service';
+ import { AUTH_ERROR_CODES, AuthError } from './auth.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const IP = '203.0.113.7';
+@@ -31,21 +32,25 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     membership = new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+     );
+     roomService = new RoomService(
+       db.prisma,
+-      new EventLogService(),
++      new EventLogService(
++        new AppRegistryService([]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++      ),
+       new AppRegistryService([]),
+       membership,
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index ace5a53..6c0bf3e 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -1,11 +1,11 @@
+-import { loadConfig } from './config.schema';
++import { configSchema, loadConfig } from './config.schema';
+ 
+ const base = { DATABASE_URL: 'postgresql://u:p@localhost:5432/db', JWT_SECRET: 's'.repeat(32) };
+ 
+ describe('loadConfig', () => {
+   it('applies defaults when only DATABASE_URL is provided', () => {
+     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+     expect(cfg.PORT).toBe(3000);
+     expect(cfg.NODE_ENV).toBe('development');
+     expect(cfg.DATABASE_URL).toBe(base.DATABASE_URL);
+   });
+@@ -87,11 +87,27 @@ describe('loadConfig', () => {
+ 
+   it('parses TRUST_PROXY and CORS_ORIGINS', () => {
+     const cfg = loadConfig({
+       ...base,
+       TRUST_PROXY: 'true',
+       CORS_ORIGINS: 'https://a.example, https://b.example',
+     } as NodeJS.ProcessEnv);
+     expect(cfg.TRUST_PROXY).toBe(true);
+     expect(cfg.CORS_ORIGINS).toEqual(['https://a.example', 'https://b.example']);
+   });
++
++  it('applies §4 defaults for event emission params', () => {
++    const cfg = configSchema.parse({
++      DATABASE_URL: 'postgresql://x',
++      JWT_SECRET: 'x'.repeat(32),
++    });
++    expect(cfg.EVENT_EMIT_RATE_LIMIT_PER_MIN).toBe(30);
++    expect(cfg.MAX_EVENT_PAYLOAD_BYTES).toBe(16_384);
++  });
++
++  it('rejects out-of-range event emission params (REQ-RT-012/014, §4 bounds)', () => {
++    const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
++    expect(configSchema.safeParse({ ...envBase, EVENT_EMIT_RATE_LIMIT_PER_MIN: 0 }).success).toBe(false);
++    expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 512 }).success).toBe(false);
++    expect(configSchema.safeParse({ ...envBase, MAX_EVENT_PAYLOAD_BYTES: 300_000 }).success).toBe(false);
++  });
+ });
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index 8cf438e..501af5e 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -15,20 +15,24 @@ export const configSchema = z.object({
+   // REQ-SEC-002: обязателен, ≥ 32 байта; дефолта нет — старт без секрета невозможен.
+   JWT_SECRET: z.string().min(32),
+   // §4: access_token_ttl — 15 мин, 1 мин … 1 ч (секунды).
+   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
+   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
+   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
+   // REQ-ID-016: гостевой refresh ≤ guest_ttl (инвариант — superRefine ниже).
+   REFRESH_TOKEN_TTL: z.coerce.number().int().min(60).default(86_400),
+   // REQ-SEC-007 (§4 login_rate_limit): refresh-эндпоинт, 10/мин на IP.
+   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
++  // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
++  EVENT_EMIT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(30),
++  // REQ-RT-012 (§4 max_event_payload): 16 КБ, диапазон 1 КБ … 256 КБ (байты).
++  MAX_EVENT_PAYLOAD_BYTES: z.coerce.number().int().min(1024).max(262_144).default(16_384),
+   // Доверие к X-Forwarded-For — свойство деплоя, не кода (transport design §6).
+   TRUST_PROXY: z
+     .enum(['true', 'false'])
+     .default('false')
+     .transform((v) => v === 'true'),
+   // REQ-SEC-008: allowlist origin; wildcard в production запрещён (superRefine).
+   CORS_ORIGINS: z
+     .string()
+     .default('')
+     .transform((s) =>
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index ecc95e0..3acd488 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -13,20 +13,22 @@ export * from './room/room.errors';
+ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
+ export * from './identity/identity.service';
+ export * from './identity/identity.module';
+ export * from './membership/membership.errors';
+ export * from './membership/join-rate-limiter';
+ export * from './membership/membership.service';
+ export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
++export * from './realtime/event-emit-limiter';
++export * from './realtime/realtime.errors';
+ export * from './realtime/realtime.module';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
+ export * from './transport/transport.module';
+ export * from './transport/http-exception.filter';
+ export * from './transport/auth.tokens';
+ // Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+ // строятся на том же testcontainer-посеве, что и core int-спеки.
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 5cbea1c..9351a16 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -1,14 +1,15 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
++import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from './membership.service';
+ import { JoinRateLimiter } from './join-rate-limiter';
+ import {
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+ } from './membership.errors';
+@@ -27,21 +28,25 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+     );
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     roomService = new RoomService(
+       db.prisma,
+-      new EventLogService(),
++      new EventLogService(
++        new AppRegistryService([]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++      ),
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+       ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+new file mode 100644
+index 0000000..3eda7a3
+--- /dev/null
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -0,0 +1,419 @@
++import type { AppManifest } from '@mymozhem/sdk';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import { readRoomLog } from '../testing/read-room-log';
++import { TEST_CONFIG } from '../testing/test-config';
++import { AppRegistryService } from '../app-registry/app-registry.service';
++import { MembershipService } from '../membership/membership.service';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { IdentityService } from '../identity/identity.service';
++import { RoomService } from '../room/room.service';
++import { EventLogService } from './event-log.service';
++import { EventEmitLimiter } from './event-emit-limiter';
++import {
++  ActorNotMemberError,
++  EventEmitRateLimitedError,
++  EventPayloadInvalidError,
++  EventPayloadTooLargeError,
++  EventTypeUnknownError,
++  EventVisibilityExceededError,
++  RoomNotActiveError,
++} from './realtime.errors';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++const P1 = '00000000-0000-0000-0000-0000000000a1';
++const P2 = '00000000-0000-0000-0000-0000000000b2';
++
++// Фикстурный манифест (design §7): открытая схема note.posted — нужна для
++// payload-нейтральности (Task 7); secret.recorded — потолок module-private.
++const TEST_APP: AppManifest = {
++  appId: 'test-app',
++  manifestVersion: 1,
++  contractRange: '^1.0.0',
++  appSettings: {
++    $schema: 'https://json-schema.org/draft/2020-12/schema',
++    type: 'object',
++    properties: { label: { type: 'string' } },
++  },
++  events: {
++    'note.posted': {
++      schema: {
++        type: 'object',
++        properties: { n: { type: 'number' }, blob: { type: 'string' } },
++        required: ['n'],
++        additionalProperties: true,
++      },
++      visibility: 'public',
++    },
++    'secret.recorded': {
++      schema: {
++        type: 'object',
++        properties: { n: { type: 'number' } },
++        required: ['n'],
++        additionalProperties: false,
++      },
++      visibility: 'module-private',
++    },
++  },
++};
++
++describe('EventLogService.commitAppEvent', () => {
++  let db: TestDb;
++  let rooms: RoomService;
++  let eventLog: EventLogService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
++    await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
++    const registry = new AppRegistryService([TEST_APP]);
++    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG);
++    rooms = new RoomService(
++      db.prisma,
++      eventLog,
++      registry,
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
++    );
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  const ACTIVE_SETTINGS = { label: 'live' };
++
++  async function activeRoom() {
++    const room = await rooms.create(ORG);
++    await rooms.configure(room.id, {
++      appId: 'test-app',
++      manifestVersion: 1,
++      settings: ACTIVE_SETTINGS,
++    });
++    return rooms.activate(room.id);
++  }
++
++  async function joinParticipant(roomId: string, identityId: string) {
++    await db.prisma.membership.create({
++      data: { roomId, identityId, role: 'PARTICIPANT' },
++    });
++  }
++
++  it('commits an app event with contract shape after activation', async () => {
++    const room = await activeRoom();
++    await joinParticipant(room.id, P1);
++
++    await db.prisma.$transaction((tx) =>
++      eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
++    );
++
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(2); // seq 1 — core.room.activated (пин)
++    expect(log[1]).toMatchObject({
++      seq: 2,
++      type: 'test-app.note.posted',
++      visibility: 'public',
++      actorId: P1,
++      payload: { n: 1 },
++      schemaVersion: 1, // пиннутый manifestVersion
++    });
++  });
++
++  it('rejects emission into a DRAFT room (ROOM_NOT_ACTIVE), nothing written', async () => {
++    const room = await rooms.create(ORG);
++    await rooms.configure(room.id, {
++      appId: 'test-app',
++      manifestVersion: 1,
++      settings: ACTIVE_SETTINGS,
++    });
++
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
++      )
++      .catch((e: unknown) => e);
++
++    expect(err).toBeInstanceOf(RoomNotActiveError);
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
++  });
++
++  it('seals the log in a terminal status (REQ-RT-016): cancel, then emit rejected', async () => {
++    const room = await activeRoom();
++    await rooms.cancel(room.id);
++
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
++      )
++      .catch((e: unknown) => e);
++
++    expect(err).toBeInstanceOf(RoomNotActiveError);
++    expect((err as RoomNotActiveError).code).toBe('ROOM_NOT_ACTIVE');
++    // seq 1 activated, seq 2 cancelled — попытка эмита ничего не добавила
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(2);
++  });
++
++  it('rejects oversized payload (REQ-RT-012)', async () => {
++    const room = await activeRoom();
++    const big = { n: 1, blob: 'x'.repeat(TEST_CONFIG.MAX_EVENT_PAYLOAD_BYTES) };
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', null),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventPayloadTooLargeError);
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
++  });
++
++  it('rejects an unknown event type (REQ-CTR-008)', async () => {
++    const room = await activeRoom();
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.v2', { n: 1 }, 'public', null),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventTypeUnknownError);
++  });
++
++  it('rejects payload failing the registered schema (REQ-CTR-008)', async () => {
++    const room = await activeRoom();
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', { blob: 1 }, 'public', null),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventPayloadInvalidError);
++    expect((err as EventPayloadInvalidError).code).toBe('EVENT_PAYLOAD_INVALID');
++  });
++
++  it('rejects visibility weaker than the declared ceiling (REQ-CTR-009)', async () => {
++    const room = await activeRoom();
++    await joinParticipant(room.id, P1);
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'secret.recorded', { n: 1 }, 'organizer', P1),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventVisibilityExceededError);
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
++  });
++
++  it('allows visibility STRONGER than the ceiling (module-private under public)', async () => {
++    const room = await activeRoom();
++    await db.prisma.$transaction((tx) =>
++      eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'module-private', null),
++    );
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log[1]).toMatchObject({ visibility: 'module-private' });
++  });
++
++  it('rejects an actor without membership (ACTOR_NOT_MEMBER)', async () => {
++    const room = await activeRoom();
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P2),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(ActorNotMemberError);
++  });
++
++  it('null actor (server emission): no membership gate, commits', async () => {
++    const room = await activeRoom();
++    await db.prisma.$transaction((tx) =>
++      eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', null),
++    );
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log[1]).toMatchObject({ actorId: null, seq: 2 });
++  });
++});
++
++describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
++  let db: TestDb;
++  let rooms: RoomService;
++  let limitedLog: EventLogService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
++    await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
++    const registry = new AppRegistryService([TEST_APP]);
++    limitedLog = new EventLogService(registry, new EventEmitLimiter(3), TEST_CONFIG);
++    rooms = new RoomService(
++      db.prisma,
++      limitedLog,
++      registry,
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
++    );
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  async function activeRoomWithP1P2() {
++    const room = await rooms.create(ORG);
++    await rooms.configure(room.id, { appId: 'test-app', manifestVersion: 1, settings: { label: 'x' } });
++    await rooms.activate(room.id);
++    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
++    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P2, role: 'PARTICIPANT' } });
++    return room;
++  }
++
++  it('4th attempt in the window is rejected; other actor and null actor unaffected', async () => {
++    const room = await activeRoomWithP1P2();
++    const emit = (actor: string | null) =>
++      db.prisma.$transaction((tx) =>
++        limitedLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', actor),
++      );
++
++    await emit(P1);
++    await emit(P1);
++    await emit(P1);
++    const err = await emit(P1).catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventEmitRateLimitedError);
++
++    await emit(P2);   // другой actor — свой бюджет
++    await emit(null); // серверная эмиссия — вне per-actor лимита
++
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(1 /* activated */ + 3 + 2);
++  });
++
++  it('failed attempts burn the budget too (attempts counted, not just successes)', async () => {
++    const room = await activeRoomWithP1P2();
++    // 3 попытки с невалидным payload (отказ по схеме — после шага лимитера)
++    for (let i = 0; i < 3; i++) {
++      const e = await db.prisma
++        .$transaction((tx) =>
++          limitedLog.commitAppEvent(tx, room.id, 'note.posted', { blob: 1 }, 'public', P1),
++        )
++        .catch((e: unknown) => e);
++      expect(e).toBeInstanceOf(EventPayloadInvalidError);
++    }
++    const err = await db.prisma
++      .$transaction((tx) =>
++        limitedLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventEmitRateLimitedError);
++  });
++});
++
++describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
++  let db: TestDb;
++  let rooms: RoomService;
++  let eventLog: EventLogService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST' });
++    await seedIdentity(db.prisma, { id: P2, kind: 'GUEST' });
++    const registry = new AppRegistryService([TEST_APP]);
++    eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG);
++    rooms = new RoomService(
++      db.prisma,
++      eventLog,
++      registry,
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
++    );
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  async function activeRoomWithP1P2() {
++    const room = await rooms.create(ORG);
++    await rooms.configure(room.id, { appId: 'test-app', manifestVersion: 1, settings: { label: 'x' } });
++    await rooms.activate(room.id);
++    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
++    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P2, role: 'PARTICIPANT' } });
++    return room;
++  }
++
++  it('serializes concurrent app commits: dense seqs after activation', async () => {
++    const room = await activeRoomWithP1P2();
++    const N = 8;
++
++    const committed = await Promise.all(
++      Array.from({ length: N }, (_, i) =>
++        db.prisma.$transaction((tx) =>
++          eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: i }, 'public', P1),
++        ),
++      ),
++    );
++
++    // seq 1 — core.room.activated; app-события занимают ровно {2..N+1}.
++    expect(new Set(committed.map((e) => e.seq))).toEqual(
++      new Set(Array.from({ length: N }, (_, i) => i + 2)),
++    );
++    expect((await readRoomLog(db.prisma, room.id)).map((e) => e.seq)).toEqual(
++      Array.from({ length: N + 1 }, (_, i) => i + 1),
++    );
++  });
++
++  it('payload-neutrality: mixed-size races stay dense and all-valid', async () => {
++    // Отложенный тест lifecycle-среза (§10). Принуждаемое свойство: валидация —
++    // до lock (design §2), поэтому размер payload не меняет исход гонки — обе
++    // записи валидны, seq плотные при любом порядке старта. Порядок захвата lock
++    // black-box не наблюдаем; детерминированно проверяем контракт на смешанных
++    // размерах с чередованием порядка старта.
++    const room = await activeRoomWithP1P2();
++    const ROUNDS = 20;
++    const big = { n: 1, blob: 'x'.repeat(8000) }; // < MAX_EVENT_PAYLOAD_BYTES
++    const small = { n: 2 };
++
++    for (let round = 0; round < ROUNDS; round++) {
++      const bigFirst = round % 2 === 0;
++      const bigEmit = () =>
++        db.prisma.$transaction((tx) =>
++          eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', P1),
++        );
++      const smallEmit = () =>
++        db.prisma.$transaction((tx) =>
++          eventLog.commitAppEvent(tx, room.id, 'note.posted', small, 'public', P2),
++        );
++      // Чередуем порядок СТАРТА (создания промисов): bigFirst либо smallFirst.
++      const first = bigFirst ? bigEmit : smallEmit;
++      const second = bigFirst ? smallEmit : bigEmit;
++      const [firstEv, secondEv] = await Promise.all([first(), second()]);
++      expect(firstEv.seq).not.toBe(secondEv.seq);
++    }
++
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log.map((e) => e.seq)).toEqual(Array.from({ length: 1 + ROUNDS * 2 }, (_, i) => i + 1));
++    expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(ROUNDS * 2);
++  });
++});
+diff --git a/packages/core/src/realtime/event-emit-limiter.spec.ts b/packages/core/src/realtime/event-emit-limiter.spec.ts
+new file mode 100644
+index 0000000..08286b4
+--- /dev/null
++++ b/packages/core/src/realtime/event-emit-limiter.spec.ts
+@@ -0,0 +1,37 @@
++import { EventEmitLimiter } from './event-emit-limiter';
++
++describe('EventEmitLimiter', () => {
++  it('allows up to limit attempts in the window, then rejects (REQ-RT-014)', () => {
++    const now = { t: 1_000 };
++    const limiter = new EventEmitLimiter(2, 60_000, () => now.t);
++    expect(limiter.tryAcquire('room:actor')).toBe(true);
++    expect(limiter.tryAcquire('room:actor')).toBe(true);
++    expect(limiter.tryAcquire('room:actor')).toBe(false);
++  });
++
++  it('resets after the window', () => {
++    const now = { t: 1_000 };
++    const limiter = new EventEmitLimiter(1, 60_000, () => now.t);
++    expect(limiter.tryAcquire('room:actor')).toBe(true);
++    expect(limiter.tryAcquire('room:actor')).toBe(false);
++    now.t += 61_000;
++    expect(limiter.tryAcquire('room:actor')).toBe(true);
++  });
++
++  it('isolates keys: one actor\'s flood does not burn another\'s budget', () => {
++    const limiter = new EventEmitLimiter(1, 60_000);
++    expect(limiter.tryAcquire('room:a')).toBe(true);
++    expect(limiter.tryAcquire('room:a')).toBe(false);
++    expect(limiter.tryAcquire('room:b')).toBe(true);
++    expect(limiter.tryAcquire('other-room:a')).toBe(true);
++  });
++
++  it('lazy sweep evicts expired entries at most once per window', () => {
++    const now = { t: 1_000 };
++    const limiter = new EventEmitLimiter(10, 60_000, () => now.t);
++    limiter.tryAcquire('one-shot');
++    now.t += 120_000; // два окна спустя sweep обязан вычистить ключ
++    limiter.tryAcquire('trigger-sweep');
++    expect((limiter as unknown as { attempts: Map<string, unknown> }).attempts.has('one-shot')).toBe(false);
++  });
++});
+diff --git a/packages/core/src/realtime/event-emit-limiter.ts b/packages/core/src/realtime/event-emit-limiter.ts
+new file mode 100644
+index 0000000..3766d91
+--- /dev/null
++++ b/packages/core/src/realtime/event-emit-limiter.ts
+@@ -0,0 +1,41 @@
++// Per-actor fixed-window limiter for app-event emission (REQ-RT-014,
++// event_emit_rate_limit; объём фазы 1 по амендменту v1.3 — только хард per-actor,
++// soft cap/алерты/режимы — фаза 4). Дисциплина состояния — как у JoinRateLimiter:
++// поле экземпляра, не module-level (REQ-CORE-004); in-memory корректен при одной
++// реплике (REQ-OPS-005); рестарт сбрасывает окно — принято. Ключ — `${roomId}:${actorId}`:
++// флуд актора жжёт только его бюджет. Ленивый sweep не чаще раза в окно —
++// one-shot ключи не копятся на жизнь процесса.
++export class EventEmitLimiter {
++  private readonly attempts = new Map<string, { windowStart: number; count: number }>();
++  private lastSweep: number;
++
++  constructor(
++    private readonly limit: number,
++    private readonly windowMs: number = 60_000,
++    private readonly now: () => number = () => Date.now(),
++  ) {
++    this.lastSweep = this.now();
++  }
++
++  // Записывает попытку и возвращает, разрешена ли она. Лимитом считаются ПОПЫТКИ,
++  // не только успешные commit (design §2 шаг 2): невалидные payload тоже жгут бюджет.
++  tryAcquire(key: string): boolean {
++    const now = this.now();
++    if (now - this.lastSweep >= this.windowMs) {
++      for (const [k, entry] of this.attempts) {
++        if (now - entry.windowStart >= this.windowMs) this.attempts.delete(k);
++      }
++      this.lastSweep = now;
++    }
++    const entry = this.attempts.get(key);
++    if (!entry || now - entry.windowStart >= this.windowMs) {
++      this.attempts.set(key, { windowStart: now, count: 1 });
++      return true;
++    }
++    if (entry.count >= this.limit) {
++      return false;
++    }
++    entry.count += 1;
++    return true;
++  }
++}
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index 55239a0..0f8d9f0 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -2,44 +2,53 @@ import { ContractError, validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
++import { EventEmitLimiter } from './event-emit-limiter';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('EventLogService.commitCoreEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     rooms = new RoomService(
+       db.prisma,
+-      new EventLogService(),
++      new EventLogService(
++        new AppRegistryService([validManifests[0]]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++      ),
+       new AppRegistryService([validManifests[0]]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+       ),
+       TEST_CONFIG,
+     );
+-    eventLog = new EventLogService();
++    eventLog = new EventLogService(
++      new AppRegistryService([validManifests[0]]),
++      new EventEmitLimiter(1000),
++      TEST_CONFIG,
++    );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     // CASCADE чистит и realtime."LogEvent" (FK-ссылка), и room."Room".
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+@@ -79,20 +88,31 @@ describe('EventLogService.commitCoreEvent', () => {
+       .$transaction((tx) =>
+         eventLog.commitCoreEvent(tx, room.id, 'room.completed', { bogus: 1 }),
+       )
+       .catch((e: unknown) => e);
+ 
+     expect(err).toBeInstanceOf(ContractError);
+     expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
++  it('records actorId on lifecycle events when the caller supplies it (REQ-RT-009)', async () => {
++    const ACTOR = '00000000-0000-0000-0000-0000000000c3';
++    await seedIdentity(db.prisma, { id: ACTOR, email: 'actor@example.test' });
++    const room = await rooms.create(ORG);
++    await rooms.cancel(room.id, ACTOR);
++
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(1);
++    expect(log[0]).toMatchObject({ type: 'core.room.cancelled', actorId: ACTOR });
++  });
++
+   it('serializes concurrent commits via the advisory lock: dense seqs 1..N (REQ-RT-007)', async () => {
+     const room = await rooms.create(ORG);
+     const N = 8;
+ 
+     const committed = await Promise.all(
+       Array.from({ length: N }, () =>
+         db.prisma.$transaction((tx) =>
+           eventLog.commitCoreEvent(tx, room.id, 'room.cancelled', {}),
+         ),
+       ),
+diff --git a/packages/core/src/realtime/event-log.service.ts b/packages/core/src/realtime/event-log.service.ts
+index 82a479a..1ff9183 100644
+--- a/packages/core/src/realtime/event-log.service.ts
++++ b/packages/core/src/realtime/event-log.service.ts
+@@ -1,48 +1,174 @@
+-import { Injectable } from '@nestjs/common';
++import { Inject, Injectable } from '@nestjs/common';
+ import type { LogEvent, Prisma } from '@prisma/client';
+-import { CORE_EVENTS, ContractError, coreEventType, type CoreEventName } from '@mymozhem/sdk';
++import {
++  CORE_EVENTS,
++  ContractError,
++  coreEventType,
++  isWithinCeiling,
++  type CoreEventName,
++  type Visibility,
++} from '@mymozhem/sdk';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { AppRegistryService } from '../app-registry/app-registry.service';
++import { EventEmitLimiter } from './event-emit-limiter';
++import {
++  ActorNotMemberError,
++  EventEmitRateLimitedError,
++  EventPayloadInvalidError,
++  EventPayloadTooLargeError,
++  EventTypeUnknownError,
++  EventVisibilityExceededError,
++  RoomNotActiveError,
++} from './realtime.errors';
+ 
+-// Append-only commit-примитив для core-типов событий (design §3). ЕДИНСТВЕННЫЙ путь
+-// записи в realtime."LogEvent". Порядок шагов контрактуален (SDK-дизайн §7):
+-// валидация payload — ДО входа в критическую секцию, затем advisory lock на комнату
+-// и атомарное присвоение seq — размер payload не влияет на исход гонки (REQ-RT-007).
+-// Шаги 1–7 цепочки app-событий (sealing REQ-RT-016, размер REQ-RT-012, rate-limit
+-// REQ-RT-014, actorId из auth REQ-RT-009, реестр REQ-CTR-008) встают перед шагом 3
+-// без изменения шагов 3–4 — шов event-commit плана (design §10).
++// Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
++// realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
++// Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
++// ДО advisory lock, размер payload не влияет на исход гонки за seq.
++// Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
++// комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
++// в room."Room".
+ @Injectable()
+ export class EventLogService {
++  constructor(
++    private readonly appRegistry: AppRegistryService,
++    private readonly emitLimiter: EventEmitLimiter,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
+   async commitCoreEvent(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     name: CoreEventName,
+     payload: unknown = {},
+     actorId: string | null = null,
+   ): Promise<LogEvent> {
+     const definition = CORE_EVENTS[name];
+     const parsed = definition.schema.safeParse(payload);
+     if (!parsed.success) {
+       throw new ContractError(
+         'EVENT_PAYLOAD_INVALID',
+         `payload of ${coreEventType(name)} does not match its core schema`,
+       );
+     }
++    return this.appendLocked(
++      tx,
++      roomId,
++      coreEventType(name),
++      parsed.data,
++      actorId,
++      definition.visibility,
++      definition.version,
++    );
++  }
++
++  // Commit-цепочка app-событий (design §2): ВСЕ проверки до advisory lock —
++  // payload-нейтральность гонки за seq контрактуальна (REQ-RT-007). Порядок шагов:
++  // status-гейт → rate-limit → размер → реестр → схема → видимость → membership →
++  // appendLocked. Дешёвые отказы раньше; запечатанная комната не жжёт лимит (шаг 1
++  // до шага 2). actorId = null — серверная эмиссия приложения: membership-гейт и
++  // per-actor лимит не применяются (design §0).
++  async commitAppEvent(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    name: string,
++    payload: unknown,
++    visibility: Visibility,
++    actorId: string | null = null,
++  ): Promise<LogEvent> {
++    // 1. Status-гейт (REQ-RT-016): только ACTIVE с пином; DRAFT/терминальные/
++    // удалённые/несуществующие — один код. Пин не-null в ACTIVE по гейту активации
++    // (REQ-RT-004); проверка — fail-closed на случай рассогласования.
++    const room = await tx.room.findUnique({ where: { id: roomId } });
++    if (
++      !room ||
++      room.deletedAt !== null ||
++      room.status !== 'ACTIVE' ||
++      room.appId === null ||
++      room.manifestVersion === null
++    ) {
++      throw new RoomNotActiveError(`Room ${roomId} is not ACTIVE (sealed, draft or not found)`);
++    }
++    const appId = room.appId;
++    const manifestVersion = room.manifestVersion;
++    // 2. Per-actor rate-limit (REQ-RT-014): считаются попытки, не только успехи.
++    if (actorId !== null && !this.emitLimiter.tryAcquire(`${roomId}:${actorId}`)) {
++      throw new EventEmitRateLimitedError(
++        `Event emission rate limit exceeded for actor ${actorId} in room ${roomId}`,
++      );
++    }
++    // 3. Размер (REQ-RT-012) — до реестра: дешевле и не требует manifest lookup.
++    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
++      throw new EventPayloadTooLargeError(
++        `payload of ${appId}.${name} exceeds MAX_EVENT_PAYLOAD_BYTES (${this.config.MAX_EVENT_PAYLOAD_BYTES})`,
++      );
++    }
++    // 4. Реестр (REQ-CTR-008): тип обязан существовать в пиннутом манифесте.
++    const definition = this.appRegistry.getEventDefinition(appId, manifestVersion, name);
++    if (!definition) {
++      throw new EventTypeUnknownError(`No event type ${name} in manifest ${appId}@${manifestVersion}`);
++    }
++    // 5. Схема владельца типа (REQ-CTR-008) — verdict-only, без коэрсии (REQ-CORE-007).
++    const validate = this.appRegistry.eventValidatorFor(appId, manifestVersion, name, definition.schema);
++    if (!validate(payload)) {
++      throw new EventPayloadInvalidError(
++        `payload of ${appId}.${name} does not match its registered schema: ${this.appRegistry.describeEventErrors(validate)}`,
++      );
++    }
++    // 6. Потолок видимости (REQ-CTR-009): слабее декларированного — отказ, строже — можно.
++    if (!isWithinCeiling(visibility, definition.visibility)) {
++      throw new EventVisibilityExceededError(
++        `visibility ${visibility} exceeds declared ceiling ${definition.visibility} for ${appId}.${name}`,
++      );
++    }
++    // 7. Membership-гейт (design §0): актор — член комнаты.
++    if (actorId !== null) {
++      const member = await tx.membership.findUnique({
++        where: { roomId_identityId: { roomId, identityId: actorId } },
++      });
++      if (!member) {
++        throw new ActorNotMemberError(`Identity ${actorId} is not a member of room ${roomId}`);
++      }
++    }
++    // 8. Append: schemaVersion = пиннутый manifestVersion — версия схемы app-события.
++    return this.appendLocked(
++      tx,
++      roomId,
++      `${appId}.${name}`,
++      payload,
++      actorId,
++      visibility,
++      manifestVersion,
++    );
++  }
++
++  private async appendLocked(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    type: string,
++    payload: unknown,
++    actorId: string | null,
++    visibility: Visibility,
++    schemaVersion: number,
++  ): Promise<LogEvent> {
+     // $executeRaw, не $queryRaw: pg_advisory_xact_lock возвращает void, а $queryRaw
+     // пытается десериализовать колонку результата и падает на типе 'void'.
+     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roomId}, 0))`;
+     const rows = await tx.$queryRaw<LogEvent[]>`
+       INSERT INTO realtime."LogEvent"
+         ("roomId", "seq", "type", "payload", "actorId", "visibility", "schemaVersion")
+       SELECT ${roomId}::uuid,
+              COALESCE(MAX("seq"), 0) + 1,
+-             ${coreEventType(name)},
+-             ${JSON.stringify(parsed.data)}::jsonb,
++             ${type},
++             ${JSON.stringify(payload)}::jsonb,
+              ${actorId}::uuid,
+-             ${definition.visibility}::realtime."EventVisibility",
+-             ${definition.version}
++             ${visibility}::realtime."EventVisibility",
++             ${schemaVersion}
+       FROM realtime."LogEvent"
+       WHERE "roomId" = ${roomId}::uuid
+       RETURNING *
+     `;
+     return rows[0];
+   }
+ }
+diff --git a/packages/core/src/realtime/realtime.errors.ts b/packages/core/src/realtime/realtime.errors.ts
+new file mode 100644
+index 0000000..5fbc96c
+--- /dev/null
++++ b/packages/core/src/realtime/realtime.errors.ts
+@@ -0,0 +1,76 @@
++// Core-internal typed errors of the event-commit chain (design §6). Не часть
++// SDK-контракта: wire-маппинг придёт с realtime-транспортом (EVENT_EMIT_RATE_LIMITED
++// → единый RATE_LIMITED по конвенции transport-среза).
++export const REALTIME_ERROR_CODES = {
++  ROOM_NOT_ACTIVE: 'ROOM_NOT_ACTIVE',
++  EVENT_EMIT_RATE_LIMITED: 'EVENT_EMIT_RATE_LIMITED',
++  EVENT_PAYLOAD_TOO_LARGE: 'EVENT_PAYLOAD_TOO_LARGE',
++  EVENT_TYPE_UNKNOWN: 'EVENT_TYPE_UNKNOWN',
++  // Строковый паритет с кодом ContractError SDK (commitCoreEvent): будущий транспорт
++  // отобразит code→code 1:1.
++  EVENT_PAYLOAD_INVALID: 'EVENT_PAYLOAD_INVALID',
++  EVENT_VISIBILITY_EXCEEDED: 'EVENT_VISIBILITY_EXCEEDED',
++  ACTOR_NOT_MEMBER: 'ACTOR_NOT_MEMBER',
++} as const;
++
++export type RealtimeErrorCode = (typeof REALTIME_ERROR_CODES)[keyof typeof REALTIME_ERROR_CODES];
++
++export class RealtimeError extends Error {
++  constructor(
++    readonly code: RealtimeErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
++
++// Эмит не в ACTIVE: DRAFT, терминальная (запечатывание REQ-RT-016), удалённая или
++// отсутствующая комната — причины свёрнуты в один код (точность — в message).
++export class RoomNotActiveError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.ROOM_NOT_ACTIVE, message);
++  }
++}
++
++// REQ-RT-014: превышен per-actor хард rate-limit эмиссии — отказ, не алерт.
++export class EventEmitRateLimitedError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.EVENT_EMIT_RATE_LIMITED, message);
++  }
++}
++
++// REQ-RT-012: payload больше max_event_payload.
++export class EventPayloadTooLargeError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.EVENT_PAYLOAD_TOO_LARGE, message);
++  }
++}
++
++// REQ-CTR-008: тип события отсутствует в пиннутом манифесте.
++export class EventTypeUnknownError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.EVENT_TYPE_UNKNOWN, message);
++  }
++}
++
++// REQ-CTR-008: payload не соответствует зарегистрированной схеме владельца типа.
++export class EventPayloadInvalidError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.EVENT_PAYLOAD_INVALID, message);
++  }
++}
++
++// REQ-CTR-009: фактическая видимость слабее декларированного для типа потолка.
++export class EventVisibilityExceededError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.EVENT_VISIBILITY_EXCEEDED, message);
++  }
++}
++
++// Membership-гейт (design §0): actorId не член комнаты.
++export class ActorNotMemberError extends RealtimeError {
++  constructor(message: string) {
++    super(REALTIME_ERROR_CODES.ACTOR_NOT_MEMBER, message);
++  }
++}
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+index cb5e55d..194f0e9 100644
+--- a/packages/core/src/realtime/realtime.module.ts
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -1,10 +1,23 @@
+ import { Module } from '@nestjs/common';
++import { ConfigModule } from '../config/config.module';
++import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
+ import { EventLogService } from './event-log.service';
++import { EventEmitLimiter } from './event-emit-limiter';
+ 
+ // PrismaModule намеренно НЕ импортируется: примитив работает на транзакционном
+ // клиенте вызывающего (атомарность «действие + лог», REQ-DEV-008).
+ @Module({
+-  providers: [EventLogService],
++  imports: [ConfigModule, AppRegistryModule],
++  providers: [
++    {
++      provide: EventEmitLimiter,
++      useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
++      inject: [APP_CONFIG],
++    },
++    EventLogService,
++  ],
+   exports: [EventLogService],
+ })
+ export class RealtimeModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index ac32848..9a34aed 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,16 +1,17 @@
+ import { validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
++import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
+ import { RoomService } from './room.service';
+ import {
+   RoomError,
+   RoomTransitionError,
+   RoomConflictError,
+@@ -20,21 +21,25 @@ import {
+ } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
+ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+ 
+ const makeService = (db: TestDb) =>
+   new RoomService(
+     db.prisma,
+-    new EventLogService(),
++    new EventLogService(
++      new AppRegistryService([validManifests[0]]),
++      new EventEmitLimiter(1000),
++      TEST_CONFIG,
++    ),
+     new AppRegistryService([validManifests[0]]),
+     new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+     ),
+     TEST_CONFIG,
+   );
+ 
+@@ -543,21 +548,25 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
+   // Реестр boot-time, строка комнаты durable: активация против версии, которой нет
+   // в реестре процесса (редеплой убрал), обязана отказать (design §5).
+   it('rejects activation when the pinned manifest is absent from the registry', async () => {
+     const room = await service.create(ORG);
+     await configureQuiz(service, room.id);
+     const emptyRegistryService = new RoomService(
+       db.prisma,
+-      new EventLogService(),
++      new EventLogService(
++        new AppRegistryService([]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++      ),
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+       ),
+       TEST_CONFIG,
+     );
+     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index 60e50cc..f2b7c88 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -131,21 +131,23 @@ export class RoomService {
+       const reason = !existing
+         ? 'not found'
+         : existing.deletedAt !== null
+           ? 'deleted'
+           : `status ${existing.status}`;
+       throw new RoomSettingsFrozenError(`Room ${roomId} is not configurable: ${reason}`);
+     }
+     return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
+   }
+ 
+-  async transition(roomId: string, to: RoomStatus): Promise<Room> {
++  // actorId — актор перехода из auth-контекста вызывающего (REQ-RT-009); null у
++  // вызывающих без auth-контекста (seed-скрипт, системные вызовы).
++  async transition(roomId: string, to: RoomStatus, actorId: string | null = null): Promise<Room> {
+     return this.prisma.$transaction(async (tx) => {
+       const current = await tx.room.findUnique({ where: { id: roomId } });
+       if (!current || current.deletedAt !== null) {
+         throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+       }
+       // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+       assertTransition(current.status as RoomStatus, to);
+       // Atomic guarded update: correctness of the race rests on this WHERE, not on the
+       // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
+       // Для активации это ещё и точка сериализации с configure: updateMany берёт
+@@ -177,44 +179,50 @@ export class RoomService {
+         // REQ-CORE-007: повторная валидация при DRAFT → ACTIVE. Реестр boot-time,
+         // строка durable: редеплой мог убрать манифест или изменить схему версии.
+         this.appRegistry.validateSettings(
+           updated.appId,
+           updated.manifestVersion,
+           updated.appSettings,
+         );
+         // Эмит — последним в транзакции: advisory lock комнаты всегда leaf-most,
+         // после его захвата room."Room" в этой транзакции не пишем (конвенция
+         // порядка блокировок, HANDOFF «Долгоживущие ограничения»).
+-        await this.eventLog.commitCoreEvent(tx, roomId, 'room.activated', {
+-          appId: updated.appId,
+-          manifestVersion: updated.manifestVersion,
+-        });
++        await this.eventLog.commitCoreEvent(
++          tx,
++          roomId,
++          'room.activated',
++          {
++            appId: updated.appId,
++            manifestVersion: updated.manifestVersion,
++          },
++          actorId,
++        );
+       } else {
+         const eventName = LIFECYCLE_EVENTS[to];
+         if (eventName) {
+-          await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
++          await this.eventLog.commitCoreEvent(tx, roomId, eventName, {}, actorId);
+         }
+       }
+       return updated;
+     });
+   }
+ 
+-  activate(roomId: string): Promise<Room> {
+-    return this.transition(roomId, 'ACTIVE');
++  activate(roomId: string, actorId: string | null = null): Promise<Room> {
++    return this.transition(roomId, 'ACTIVE', actorId);
+   }
+ 
+-  complete(roomId: string): Promise<Room> {
+-    return this.transition(roomId, 'COMPLETED');
++  complete(roomId: string, actorId: string | null = null): Promise<Room> {
++    return this.transition(roomId, 'COMPLETED', actorId);
+   }
+ 
+-  cancel(roomId: string): Promise<Room> {
+-    return this.transition(roomId, 'CANCELLED');
++  cancel(roomId: string, actorId: string | null = null): Promise<Room> {
++    return this.transition(roomId, 'CANCELLED', actorId);
+   }
+ 
+   async softDelete(roomId: string): Promise<Room> {
+     const current = await this.prisma.room.findUnique({ where: { id: roomId } });
+     if (!current || current.deletedAt !== null) {
+       throw new RoomConflictError(`Room ${roomId} not found or already deleted`);
+     }
+     assertDeletable(current.status as RoomStatus);
+     // Guard derived from the single source of truth (DELETABLE_STATUSES) rather than a
+     // hardcoded `status: { not: 'ACTIVE' }`, so a future change to that set is enforced
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index 9207796..f01232c 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -7,13 +7,15 @@ export const TEST_CONFIG: AppConfig = {
+   PORT: 3000,
+   DATABASE_URL: 'postgresql://unused',
+   ROOM_CODE_MIN_LEN: 8,
+   ROOM_PARTICIPANT_LIMIT: 500,
+   JOIN_RATE_LIMIT_IP: 20,
+   JWT_SECRET: 'test-only-secret-key-32-bytes-long!!',
+   ACCESS_TOKEN_TTL: 900,
+   GUEST_TTL: 86_400,
+   REFRESH_TOKEN_TTL: 86_400,
+   REFRESH_RATE_LIMIT: 10,
++  EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
++  MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   TRUST_PROXY: false,
+   CORS_ORIGINS: [],
+ };

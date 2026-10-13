@@ -1,0 +1,138 @@
+# Review package: 0666e8d..670e10d
+
+## Commits
+670e10d feat(sdk): core event registry with public lifecycle events (REQ-RT-010, REQ-RT-005)
+
+## Files changed
+ .../sdk/src/events/core-events.contract.spec.ts    | 50 ++++++++++++++++++++++
+ packages/sdk/src/events/core-events.ts             | 50 ++++++++++++++++++++++
+ packages/sdk/src/index.ts                          |  1 +
+ 3 files changed, 101 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/events/core-events.contract.spec.ts b/packages/sdk/src/events/core-events.contract.spec.ts
+new file mode 100644
+index 0000000..dec5690
+--- /dev/null
++++ b/packages/sdk/src/events/core-events.contract.spec.ts
+@@ -0,0 +1,50 @@
++import { CORE_EVENTS, coreEventType, isCoreEventName } from './core-events';
++import { resolveTypeOwner } from './event-type';
++
++describe('core event registry', () => {
++  it('registers exactly the lifecycle transitions of REQ-RT-005', () => {
++    expect(Object.keys(CORE_EVENTS).sort()).toEqual([
++      'room.activated',
++      'room.cancelled',
++      'room.completed',
++    ]);
++  });
++
++  // REQ-RT-010: lifecycle transitions are emitted as public events.
++  it.each(Object.keys(CORE_EVENTS))('declares %s public (REQ-RT-010)', (name) => {
++    expect(CORE_EVENTS[name as keyof typeof CORE_EVENTS].visibility).toBe('public');
++  });
++
++  it('composes full types inside the core namespace, owned by the core', () => {
++    expect(coreEventType('room.activated')).toBe('core.room.activated');
++    expect(resolveTypeOwner(coreEventType('room.activated'))).toEqual({
++      kind: 'core',
++      shortName: 'room.activated',
++    });
++  });
++
++  it('recognises its own short names and nothing else', () => {
++    expect(isCoreEventName('room.activated')).toBe(true);
++    expect(isCoreEventName('answer.submitted')).toBe(false);
++  });
++
++  // REQ-RT-004: ACTIVE freezes the pin, so the activation event carries it.
++  it('validates the activation payload as the pin (appId, manifestVersion)', () => {
++    const schema = CORE_EVENTS['room.activated'].schema;
++    expect(schema.safeParse({ appId: 'quiz', manifestVersion: 1 }).success).toBe(true);
++    expect(schema.safeParse({ appId: 'quiz' }).success).toBe(false);
++    expect(schema.safeParse({ appId: 'core', manifestVersion: 1 }).success).toBe(false);
++    expect(schema.safeParse({ appId: 'quiz', manifestVersion: 0 }).success).toBe(false);
++  });
++
++  it('rejects payload on the terminal transitions', () => {
++    expect(CORE_EVENTS['room.completed'].schema.safeParse({}).success).toBe(true);
++    expect(CORE_EVENTS['room.completed'].schema.safeParse({ reason: 'x' }).success).toBe(false);
++  });
++
++  it('declares a positive schemaVersion for every type', () => {
++    for (const def of Object.values(CORE_EVENTS)) {
++      expect(def.version).toBeGreaterThan(0);
++    }
++  });
++});
+diff --git a/packages/sdk/src/events/core-events.ts b/packages/sdk/src/events/core-events.ts
+new file mode 100644
+index 0000000..3987fe1
+--- /dev/null
++++ b/packages/sdk/src/events/core-events.ts
+@@ -0,0 +1,50 @@
++import { z } from 'zod';
++import type { Visibility } from '../visibility/visibility';
++import { CORE_NAMESPACE, appIdSchema, composeEventType } from './event-type';
++
++// Shape shared by the core registry and the app registry in a manifest, so that the
++// commit pipeline differs only in WHERE the registry comes from, not in its logic
++// (design §4.2). `visibility` is the exposure ceiling of the type (REQ-CTR-009);
++// `version` is what the core stamps as the event's schemaVersion.
++export type EventTypeDefinition = {
++  readonly schema: z.ZodType;
++  readonly visibility: Visibility;
++  readonly version: number;
++};
++
++// Core-owned event types. Static zod, with no conversion and no snapshot: the core
++// is versioned by the contract rather than by a manifest, and these schemas never
++// cross the boundary (design §4.2).
++//
++// The set is the lifecycle transitions of REQ-RT-005 (DRAFT → ACTIVE → COMPLETED,
++// DRAFT → CANCELLED, ACTIVE → CANCELLED), emitted as public events per REQ-RT-010.
++export const CORE_EVENTS = {
++  'room.activated': {
++    // ACTIVE freezes appSettings and the pair (appId, manifestVersion) — REQ-RT-004.
++    // Carrying the pin keeps the log self-describing without a join to the room.
++    schema: z.strictObject({
++      appId: appIdSchema,
++      manifestVersion: z.number().int().positive(),
++    }),
++    visibility: 'public',
++    version: 1,
++  },
++  'room.completed': {
++    schema: z.strictObject({}),
++    visibility: 'public',
++    version: 1,
++  },
++  'room.cancelled': {
++    schema: z.strictObject({}),
++    visibility: 'public',
++    version: 1,
++  },
++} as const satisfies Record<string, EventTypeDefinition>;
++
++export type CoreEventName = keyof typeof CORE_EVENTS;
++
++export const coreEventType = (name: CoreEventName): string =>
++  composeEventType(CORE_NAMESPACE, name);
++
++export const isCoreEventName = (name: string): name is CoreEventName =>
++  Object.prototype.hasOwnProperty.call(CORE_EVENTS, name);
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index aa68115..c91f13c 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -1,8 +1,9 @@
+ export * from './errors/error-codes';
+ export * from './visibility/visibility';
+ export * from './visibility/visibility.fixtures';
+ export * from './events/event-type';
++export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
+ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';

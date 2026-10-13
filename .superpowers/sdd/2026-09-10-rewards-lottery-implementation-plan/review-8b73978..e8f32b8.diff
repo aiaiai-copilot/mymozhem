@@ -1,0 +1,651 @@
+# Review package: 8b73978..e8f32b8
+
+## Commits
+e8f32b8 feat(app-quiz): manifestVersion 2 — capability rewards, начисления эффектами при question.closed
+
+## Files changed
+ packages/app-quiz/src/quiz-handlers.spec.ts        | 178 ++++++++++++++-------
+ packages/app-quiz/src/quiz-handlers.ts             |  90 +++++++----
+ .../app-quiz/src/quiz-manifest.contract.spec.ts    |   7 +
+ packages/app-quiz/src/quiz-manifest.ts             |   3 +-
+ 4 files changed, 186 insertions(+), 92 deletions(-)
+
+## Diff
+diff --git a/packages/app-quiz/src/quiz-handlers.spec.ts b/packages/app-quiz/src/quiz-handlers.spec.ts
+index 6c8135d..0a35ea4 100644
+--- a/packages/app-quiz/src/quiz-handlers.spec.ts
++++ b/packages/app-quiz/src/quiz-handlers.spec.ts
+@@ -1,13 +1,12 @@
+ import {
+   AppRejection,
+-  type AppCommit,
+   type AppHostContext,
+   type ContractErrorCode,
+ } from '@mymozhem/sdk';
+ import { handleQuizPublish } from './quiz-handlers';
+ import { createQuizApp, createQuizRuntime } from './quiz-runtime';
+ import { buildQuizManifest, QUIZ_APP_ID, QUIZ_MANIFEST_VERSION } from './quiz-manifest';
+ import { initialQuizState, type QuizState } from './quiz-state';
+ import type { QuizSettings } from './quiz-settings';
+ 
+ // Командные handlers квиза: ролевые гейты (REQ-ID-011), actorId только из ctx
+@@ -96,24 +95,27 @@ describe('handleQuizPublish / question.opened', () => {
+   });
+ 
+   it('rejects out-of-range questionIndex with QUESTION_UNKNOWN', () => {
+     expectRejection(
+       () => handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 2 }),
+       'QUESTION_UNKNOWN',
+     );
+   });
+ 
+   it('commits question.opened as public/publisher on happy path', async () => {
+-    const commits = (await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 })) as AppCommit[];
+-    expect(commits).toEqual([
+-      { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
+-    ]);
++    const result = await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 });
++    expect(result).toEqual({
++      commits: [
++        { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
++      ],
++      effects: [],
++    });
+   });
+ });
+ 
+ describe('handleQuizPublish / answer.submitted', () => {
+   const submit = (over: Partial<AppHostContext<QuizState>>, payload: Record<string, unknown>) =>
+     handleQuizPublish(ctx(over), 'answer.submitted', payload);
+ 
+   it.each(['ORGANIZER', 'SPECTATOR', 'MODERATOR'] as const)('rejects role %s with PUBLISH_FORBIDDEN', (role) => {
+     expectRejection(
+       () => submit({ actorRole: role, state: openState(0) }, { questionIndex: 0, optionIndex: 0 }),
+@@ -159,63 +161,69 @@ describe('handleQuizPublish / answer.submitted', () => {
+       () =>
+         submit(
+           { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0), now: '2026-09-09T12:00:00.999Z' },
+           { questionIndex: 0, optionIndex: 1 },
+         ),
+       'ANSWER_TOO_FAST',
+     );
+   });
+ 
+   it('REQ-RT-013: accepts an answer at exactly the interval boundary', async () => {
+-    const commits = (await submit(
++    const result = await submit(
+       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0), now: '2026-09-09T12:00:01.000Z' },
+       { questionIndex: 0, optionIndex: 1 },
+-    )) as AppCommit[];
+-    expect(commits).toHaveLength(2);
++    );
++    expect(result.commits).toHaveLength(2);
++    expect(result.effects).toEqual([]);
+   });
+ 
+   it('REQ-RT-013: minAnswerIntervalMs = 0 disables the control entirely', async () => {
+     const settings: QuizSettings = { ...SETTINGS, minAnswerIntervalMs: 0 };
+-    const commits = (await submit(
++    const result = await submit(
+       { actorRole: 'PARTICIPANT', actorId: P1, settings, state: openState(0), now: T0 },
+       { questionIndex: 0, optionIndex: 1 },
+-    )) as AppCommit[];
+-    expect(commits).toHaveLength(2);
++    );
++    expect(result.commits).toHaveLength(2);
++    expect(result.effects).toEqual([]);
+   });
+ 
+   it('accepts when openedAt is null (no open timestamp recorded)', async () => {
+-    const commits = (await submit(
++    const result = await submit(
+       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0, { openedAt: null }), now: T0 },
+       { questionIndex: 0, optionIndex: 1 },
+-    )) as AppCommit[];
+-    expect(commits).toHaveLength(2);
++    );
++    expect(result.commits).toHaveLength(2);
++    expect(result.effects).toEqual([]);
+   });
+ 
+   it('commits answer.submitted (module-private/publisher) + answer.accepted (public/server) on happy path', async () => {
+-    const commits = (await submit(
++    const result = await submit(
+       { actorRole: 'PARTICIPANT', actorId: P1, state: openState(0), now: '2026-09-09T12:00:02.000Z' },
+       { questionIndex: 0, optionIndex: 1 },
+-    )) as AppCommit[];
+-    expect(commits).toEqual([
+-      {
+-        shortName: 'answer.submitted',
+-        payload: { questionIndex: 0, optionIndex: 1 },
+-        visibility: 'module-private',
+-        actor: 'publisher',
+-      },
+-      {
+-        shortName: 'answer.accepted',
+-        payload: { questionIndex: 0, actorId: P1 },
+-        visibility: 'public',
+-        actor: 'server',
+-      },
+-    ]);
++    );
++    expect(result).toEqual({
++      commits: [
++        {
++          shortName: 'answer.submitted',
++          payload: { questionIndex: 0, optionIndex: 1 },
++          visibility: 'module-private',
++          actor: 'publisher',
++        },
++        {
++          shortName: 'answer.accepted',
++          payload: { questionIndex: 0, actorId: P1 },
++          visibility: 'public',
++          actor: 'server',
++        },
++      ],
++      effects: [],
++    });
+   });
+ });
+ 
+ describe('handleQuizPublish / question.closed', () => {
+   const close = (over: Partial<AppHostContext<QuizState>>, payload: Record<string, unknown>) =>
+     handleQuizPublish(ctx(over), 'question.closed', payload);
+ 
+   it('rejects non-organizer with PUBLISH_FORBIDDEN', () => {
+     expectRejection(
+       () => close({ actorRole: 'PARTICIPANT', state: openState(0) }, { questionIndex: 0 }),
+@@ -232,22 +240,22 @@ describe('handleQuizPublish / question.closed', () => {
+   });
+ 
+   it('ranks correct answers by seq: base, base-step, base-2*step; wrong answers get nothing', async () => {
+     const state = openState(0, {
+       answers: {
+         [P1]: { optionIndex: 1, seq: 3 }, // correct, third
+         [P2]: { optionIndex: 1, seq: 1 }, // correct, first
+         [P3]: { optionIndex: 0, seq: 2 }, // wrong
+       },
+     });
+-    const commits = (await close({ state }, { questionIndex: 0 })) as AppCommit[];
+-    expect(commits).toEqual([
++    const result = await close({ state }, { questionIndex: 0 });
++    expect(result.commits).toEqual([
+       { shortName: 'question.closed', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
+       {
+         shortName: 'question.revealed',
+         payload: {
+           questionIndex: 0,
+           correctIndex: 1,
+           awarded: [
+             { actorId: P2, points: 1000 },
+             { actorId: P1, points: 900 },
+           ],
+@@ -255,84 +263,135 @@ describe('handleQuizPublish / question.closed', () => {
+             { actorId: P2, total: 1000 },
+             { actorId: P1, total: 900 },
+           ],
+         },
+         visibility: 'public',
+         actor: 'server',
+       },
+     ]);
+   });
+ 
++  it('начисления: эффект award.points на каждого ответившего с points > 0, reason quiz.round', async () => {
++    // Два правильных ответа (P2 быстрее P1) и один неверный;
++    // scoring { base: 1000, step: 100 } → awarded P2=1000, P1=900.
++    const state = openState(0, {
++      answers: {
++        [P1]: { optionIndex: 1, seq: 3 }, // correct, second
++        [P2]: { optionIndex: 1, seq: 1 }, // correct, first
++        [P3]: { optionIndex: 0, seq: 2 }, // wrong
++      },
++    });
++    const result = await close({ state }, { questionIndex: 0 });
++    expect(result.effects).toEqual([
++      { kind: 'award.points', identityId: P2, points: 1000, reason: 'quiz.round' },
++      { kind: 'award.points', identityId: P1, points: 900, reason: 'quiz.round' },
++    ]);
++    // Неверный ответ эффекта не даёт; reveal-коммит не изменился (awarded/totals как прежде).
++    expect(result.commits.map((c) => c.shortName)).toEqual(['question.closed', 'question.revealed']);
++    expect(result.commits[1].payload.awarded).toEqual([
++      { actorId: P2, points: 1000 },
++      { actorId: P1, points: 900 },
++    ]);
++  });
++
++  it('clamp-ветка скоринга (points = 0) эффекта не порождает', async () => {
++    // scoring { base: 100, step: 100 }, три правильных ответа: 100, 0, 0 →
++    // эффект только на первого (points > 0).
++    const settings: QuizSettings = { ...SETTINGS, scoring: { base: 100, step: 100 } };
++    const state = openState(0, {
++      answers: {
++        [P1]: { optionIndex: 1, seq: 1 },
++        [P2]: { optionIndex: 1, seq: 2 },
++        [P3]: { optionIndex: 1, seq: 3 },
++      },
++    });
++    const result = await close({ settings, state }, { questionIndex: 0 });
++    expect(result.effects).toEqual([
++      { kind: 'award.points', identityId: P1, points: 100, reason: 'quiz.round' },
++    ]);
++    // Нулевые начисления остаются видимы в reveal (табло), но не в ledger.
++    expect(result.commits[1].payload.awarded).toEqual([
++      { actorId: P1, points: 100 },
++      { actorId: P2, points: 0 },
++      { actorId: P3, points: 0 },
++    ]);
++  });
++
+   it('merges awarded points into pre-existing totals', async () => {
+     const state = openState(0, {
+       totals: { [P1]: 500 },
+       answers: { [P1]: { optionIndex: 1, seq: 1 } },
+     });
+-    const commits = (await close({ state }, { questionIndex: 0 })) as AppCommit[];
+-    const revealed = commits[1];
++    const result = await close({ state }, { questionIndex: 0 });
++    const revealed = result.commits[1];
+     expect(revealed.payload.totals).toEqual([{ actorId: P1, total: 1500 }]);
+   });
+ 
+   it('omits correctIndex and awards nothing when the question has no configured correct answer', async () => {
+     const settings: QuizSettings = { ...SETTINGS, correctAnswers: [] };
+     const state = openState(0, { answers: { [P1]: { optionIndex: 1, seq: 1 } } });
+-    const commits = (await close({ settings, state }, { questionIndex: 0 })) as AppCommit[];
+-    const revealed = commits[1];
++    const result = await close({ settings, state }, { questionIndex: 0 });
++    const revealed = result.commits[1];
+     expect(revealed.payload).toEqual({ questionIndex: 0, awarded: [], totals: [] });
+     expect(revealed.payload).not.toHaveProperty('correctIndex');
++    expect(result.effects).toEqual([]);
+   });
+ });
+ 
+ describe('handleQuizPublish / game.finish', () => {
+   const finish = (over: Partial<AppHostContext<QuizState>>) =>
+     handleQuizPublish(ctx(over), 'game.finish', {});
+ 
+   it('rejects non-organizer with PUBLISH_FORBIDDEN', () => {
+     expectRejection(() => finish({ actorRole: 'PARTICIPANT' }), 'PUBLISH_FORBIDDEN');
+   });
+ 
+   it('rejects a double finish with ROUND_NOT_OPEN', () => {
+     expectRejection(() => finish({ state: { ...initialQuizState(), finished: true } }), 'ROUND_NOT_OPEN');
+   });
+ 
+   it('computes dense-rank standings (1,2,2,3) sorted by total desc', async () => {
+     const state: QuizState = {
+       ...initialQuizState(),
+       totals: { [P1]: 100, [P2]: 50, [P3]: 50, [P4]: 30 },
+     };
+-    const commits = (await finish({ state })) as AppCommit[];
+-    expect(commits).toEqual([
+-      { shortName: 'game.finish', payload: {}, visibility: 'public', actor: 'publisher' },
+-      {
+-        shortName: 'game.finished',
+-        payload: {
+-          standings: [
+-            { actorId: P1, total: 100, place: 1 },
+-            { actorId: P2, total: 50, place: 2 },
+-            { actorId: P3, total: 50, place: 2 },
+-            { actorId: P4, total: 30, place: 3 },
+-          ],
++    const result = await finish({ state });
++    expect(result).toEqual({
++      commits: [
++        { shortName: 'game.finish', payload: {}, visibility: 'public', actor: 'publisher' },
++        {
++          shortName: 'game.finished',
++          payload: {
++            standings: [
++              { actorId: P1, total: 100, place: 1 },
++              { actorId: P2, total: 50, place: 2 },
++              { actorId: P3, total: 50, place: 2 },
++              { actorId: P4, total: 30, place: 3 },
++            ],
++          },
++          visibility: 'public',
++          actor: 'server',
+         },
+-        visibility: 'public',
+-        actor: 'server',
+-      },
+-    ]);
++      ],
++      effects: [],
++    });
+   });
+ 
+   it('finishes with empty standings when nobody scored', async () => {
+-    const commits = (await finish({})) as AppCommit[];
+-    expect(commits[1]).toEqual({
++    const result = await finish({});
++    expect(result.commits[1]).toEqual({
+       shortName: 'game.finished',
+       payload: { standings: [] },
+       visibility: 'public',
+       actor: 'server',
+     });
++    expect(result.effects).toEqual([]);
+   });
+ });
+ 
+ describe('handleQuizPublish / unknown command', () => {
+   it('rejects an unknown shortName with EVENT_UNKNOWN_TYPE', () => {
+     expectRejection(() => handleQuizPublish(ctx({}), 'no.such.command', {}), 'EVENT_UNKNOWN_TYPE');
+   });
+ });
+ 
+ describe('createQuizRuntime / createQuizApp', () => {
+@@ -348,22 +407,25 @@ describe('createQuizRuntime / createQuizApp', () => {
+       actorId: ORG,
+       seq: 1,
+       recordedAt: T0,
+     });
+     expect(opened.accepting).toBe(true);
+     expect(opened.currentQuestion).toBe(0);
+   });
+ 
+   it('dispatches handlePublish through the runtime module', async () => {
+     const runtime = createQuizRuntime();
+-    const commits = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
+-    expect(commits).toEqual([
+-      { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
+-    ]);
++    const result = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
++    expect(result).toEqual({
++      commits: [
++        { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
++      ],
++      effects: [],
++    });
+   });
+ 
+   it('createQuizApp returns the manifest and the runtime', () => {
+     const app = createQuizApp();
+     expect(app.manifest).toEqual(buildQuizManifest());
+     expect(app.runtime.appId).toBe(QUIZ_APP_ID);
+   });
+ });
+diff --git a/packages/app-quiz/src/quiz-handlers.ts b/packages/app-quiz/src/quiz-handlers.ts
+index 571295a..4746cd2 100644
+--- a/packages/app-quiz/src/quiz-handlers.ts
++++ b/packages/app-quiz/src/quiz-handlers.ts
+@@ -1,11 +1,16 @@
+-import { AppRejection, type AppCommit, type AppHostContext } from '@mymozhem/sdk';
++import {
++  AppRejection,
++  type AppEffect,
++  type AppHostContext,
++  type AppPublishResult,
++} from '@mymozhem/sdk';
+ import type { z } from 'zod';
+ import type {
+   answerSubmittedPayload,
+   questionClosedPayload,
+   questionOpenedPayload,
+ } from './quiz-events';
+ import { quizSettingsSchema, type QuizSettings } from './quiz-settings';
+ import type { QuizState } from './quiz-state';
+ 
+ // Командные handlers квиза (дизайн 2026-09-09 §5). Диспетчер ядра уже
+@@ -16,36 +21,39 @@ import type { QuizState } from './quiz-state';
+ // ceiling манифеста (REQ-CTR-009).
+ 
+ type Ctx = AppHostContext<QuizState>;
+ 
+ function requireOrganizer(ctx: Ctx): void {
+   if (ctx.actorRole !== 'ORGANIZER') {
+     throw new AppRejection('PUBLISH_FORBIDDEN', 'команда доступна только организатору');
+   }
+ }
+ 
+-function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
++function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
+   requireOrganizer(ctx);
+   if (ctx.state.finished) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'игра завершена');
+   }
+   if (ctx.state.accepting) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'прежний вопрос не закрыт');
+   }
+   const p = payload as z.infer<typeof questionOpenedPayload>;
+   if (p.questionIndex >= settings.questions.length) {
+     throw new AppRejection('QUESTION_UNKNOWN', `вопроса с индексом ${p.questionIndex} нет в настройках`);
+   }
+-  return [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }];
++  return {
++    commits: [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }],
++    effects: [],
++  };
+ }
+ 
+-function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
++function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
+   // Организатор не играет; SPECTATOR отсекается ядром раньше — ветка защитная.
+   if (ctx.actorRole !== 'PARTICIPANT') {
+     throw new AppRejection('PUBLISH_FORBIDDEN', 'отвечать могут только участники');
+   }
+   const { state } = ctx;
+   if (!state.accepting || state.currentQuestion === null) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'сейчас нет открытого вопроса');
+   }
+   const p = payload as z.infer<typeof answerSubmittedPayload>;
+   if (p.questionIndex !== state.currentQuestion) {
+@@ -59,37 +67,40 @@ function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string,
+     throw new AppRejection('ALREADY_ANSWERED', 'ответ на этот вопрос уже принят');
+   }
+   // REQ-RT-013: анти-бот — минимальный интервал между открытием вопроса и ответом.
+   if (
+     settings.minAnswerIntervalMs > 0 &&
+     state.openedAt !== null &&
+     Date.parse(ctx.now) - Date.parse(state.openedAt) < settings.minAnswerIntervalMs
+   ) {
+     throw new AppRejection('ANSWER_TOO_FAST', 'ответ отправлен раньше минимального интервала');
+   }
+-  return [
+-    { shortName: 'answer.submitted', payload, visibility: 'module-private', actor: 'publisher' },
+-    {
+-      shortName: 'answer.accepted',
+-      payload: { questionIndex: p.questionIndex, actorId: ctx.actorId },
+-      visibility: 'public',
+-      actor: 'server',
+-    },
+-  ];
++  return {
++    commits: [
++      { shortName: 'answer.submitted', payload, visibility: 'module-private', actor: 'publisher' },
++      {
++        shortName: 'answer.accepted',
++        payload: { questionIndex: p.questionIndex, actorId: ctx.actorId },
++        visibility: 'public',
++        actor: 'server',
++      },
++    ],
++    effects: [],
++  };
+ }
+ 
+ // Детерминированный порядок табло: по убыванию total, при равенстве — по actorId.
+ function byTotalDescThenActor(a: { actorId: string; total: number }, b: { actorId: string; total: number }): number {
+   return b.total - a.total || (a.actorId < b.actorId ? -1 : a.actorId > b.actorId ? 1 : 0);
+ }
+ 
+-function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppCommit[] {
++function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
+   requireOrganizer(ctx);
+   const { state } = ctx;
+   const p = payload as z.infer<typeof questionClosedPayload>;
+   if (!state.accepting || p.questionIndex !== state.currentQuestion) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'этот вопрос сейчас не открыт');
+   }
+   const questionIndex = p.questionIndex;
+   const correctIndex = settings.correctAnswers[questionIndex];
+   // Скоростная шкала: правильные ответы ранжируются по seq, k-й (0-based)
+   // получает max(base - k*step, 0). Без сконфигурированного correctAnswers[qi]
+@@ -101,67 +112,80 @@ function closeQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string,
+     actorId,
+     points: Math.max(settings.scoring.base - k * settings.scoring.step, 0),
+   }));
+   const totalsMap: Record<string, number> = { ...state.totals };
+   for (const entry of awarded) {
+     totalsMap[entry.actorId] = (totalsMap[entry.actorId] ?? 0) + entry.points;
+   }
+   const totals = Object.entries(totalsMap)
+     .map(([actorId, total]) => ({ actorId, total }))
+     .sort(byTotalDescThenActor);
+-  return [
+-    { shortName: 'question.closed', payload, visibility: 'public', actor: 'publisher' },
+-    {
+-      shortName: 'question.revealed',
+-      payload: {
+-        questionIndex,
+-        awarded,
+-        totals,
+-        ...(correctIndex !== undefined ? { correctIndex } : {}),
++  // Начисления rewards (design §5): reveal-событие и ledger-записи коммитятся
++  // одной транзакцией с эффектами. Табло остаётся проекцией квиза; ledger —
++  // платформенная запись. Дублирование осознанное; инвариант «менять вместе»:
++  // изменение скоринга трогает обе записи; сходимость — e2e Task 13.
++  const effects: AppEffect[] = awarded
++    .filter((a) => a.points > 0) // clamp-ветка шкалы не порождает нулевых грантов
++    .map((a) => ({ kind: 'award.points', identityId: a.actorId, points: a.points, reason: 'quiz.round' }));
++  return {
++    commits: [
++      { shortName: 'question.closed', payload, visibility: 'public', actor: 'publisher' },
++      {
++        shortName: 'question.revealed',
++        payload: {
++          questionIndex,
++          awarded,
++          totals,
++          ...(correctIndex !== undefined ? { correctIndex } : {}),
++        },
++        visibility: 'public',
++        actor: 'server',
+       },
+-      visibility: 'public',
+-      actor: 'server',
+-    },
+-  ];
++    ],
++    effects,
++  };
+ }
+ 
+-function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppCommit[] {
++function finishGame(ctx: Ctx, payload: Record<string, unknown>): AppPublishResult {
+   requireOrganizer(ctx);
+   if (ctx.state.finished) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'игра уже завершена');
+   }
+   // Плотный ранг (1,2,2,3): равные total делят место, следующее отличное
+   // значение получает непосредственно следующее место (не index + 1 — это был
+   // бы competition ranking 1,2,2,4).
+   const sorted = Object.entries(ctx.state.totals)
+     .map(([actorId, total]) => ({ actorId, total }))
+     .sort(byTotalDescThenActor);
+   let place = 0;
+   let previousTotal: number | undefined;
+   const standings = sorted.map((entry) => {
+     if (previousTotal === undefined || entry.total !== previousTotal) {
+       place += 1;
+       previousTotal = entry.total;
+     }
+     return { ...entry, place };
+   });
+-  return [
+-    { shortName: 'game.finish', payload, visibility: 'public', actor: 'publisher' },
+-    { shortName: 'game.finished', payload: { standings }, visibility: 'public', actor: 'server' },
+-  ];
++  return {
++    commits: [
++      { shortName: 'game.finish', payload, visibility: 'public', actor: 'publisher' },
++      { shortName: 'game.finished', payload: { standings }, visibility: 'public', actor: 'server' },
++    ],
++    effects: [], // game.finished эффектов не несёт (решение §0.8)
++  };
+ }
+ 
+ export function handleQuizPublish(
+   ctx: AppHostContext<QuizState>,
+   shortName: string,
+   payload: Record<string, unknown>,
+-): AppCommit[] {
++): AppPublishResult {
+   const settings = quizSettingsSchema.parse(ctx.settings);
+   switch (shortName) {
+     case 'question.opened':
+       return openQuestion(ctx, settings, payload);
+     case 'answer.submitted':
+       return submitAnswer(ctx, settings, payload);
+     case 'question.closed':
+       return closeQuestion(ctx, settings, payload);
+     case 'game.finish':
+       return finishGame(ctx, payload);
+diff --git a/packages/app-quiz/src/quiz-manifest.contract.spec.ts b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+index a18bd7a..26b0399 100644
+--- a/packages/app-quiz/src/quiz-manifest.contract.spec.ts
++++ b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+@@ -30,20 +30,27 @@ const EXPECTED_EVENTS: ReadonlyArray<readonly [string, Visibility, boolean]> = [
+ describe('quiz manifest', () => {
+   it('satisfies the manifest contract (appManifestSchema)', () => {
+     expect(appManifestSchema.safeParse(manifest).success).toBe(true);
+   });
+ 
+   it('carries the quiz identity', () => {
+     expect(manifest.appId).toBe(QUIZ_APP_ID);
+     expect(manifest.manifestVersion).toBe(QUIZ_MANIFEST_VERSION);
+   });
+ 
++  // Фаза 3 (REQ-RWD-001, REQ-RT-004): пин версии 2 и capability rewards —
++  // начисления баллов уходят эффектами, исполняемыми рантаймом.
++  it('pins manifestVersion 2 with the rewards capability', () => {
++    expect(QUIZ_MANIFEST_VERSION).toBe(2);
++    expect(manifest.capabilities).toEqual(['rewards']);
++  });
++
+   it('registers exactly the 7 quiz event types', () => {
+     expect(Object.keys(manifest.events).sort()).toEqual(
+       EXPECTED_EVENTS.map(([name]) => name).sort(),
+     );
+   });
+ 
+   it.each(EXPECTED_EVENTS)(
+     'event %s declares visibility=%s and clientInitiated=%s',
+     (name, visibility, clientInitiated) => {
+       const event = manifest.events[name];
+diff --git a/packages/app-quiz/src/quiz-manifest.ts b/packages/app-quiz/src/quiz-manifest.ts
+index 10bc755..9a6b8c8 100644
+--- a/packages/app-quiz/src/quiz-manifest.ts
++++ b/packages/app-quiz/src/quiz-manifest.ts
+@@ -4,25 +4,26 @@ import {
+   answerAcceptedPayload,
+   answerSubmittedPayload,
+   finishGamePayload,
+   gameFinishedPayload,
+   questionClosedPayload,
+   questionOpenedPayload,
+   questionRevealedPayload,
+ } from './quiz-events';
+ 
+ export const QUIZ_APP_ID = 'quiz';
+-export const QUIZ_MANIFEST_VERSION = 1;
++export const QUIZ_MANIFEST_VERSION = 2;
+ export function buildQuizManifest(): AppManifest {
+   return defineApp({
+     appId: QUIZ_APP_ID,
+     manifestVersion: QUIZ_MANIFEST_VERSION,
++    capabilities: ['rewards'], // фаза 3: начисления баллов эффектами (design 2026-09-10 §5)
+     appSettings: quizSettingsSchema,
+     events: {
+       'question.opened': { schema: questionOpenedPayload, visibility: 'public', clientInitiated: true },
+       'answer.submitted': { schema: answerSubmittedPayload, visibility: 'module-private', clientInitiated: true },
+       'question.closed': { schema: questionClosedPayload, visibility: 'public', clientInitiated: true },
+       'game.finish': { schema: finishGamePayload, visibility: 'public', clientInitiated: true },
+       'answer.accepted': { schema: answerAcceptedPayload, visibility: 'public', clientInitiated: false },
+       'question.revealed': { schema: questionRevealedPayload, visibility: 'public', clientInitiated: false },
+       'game.finished': { schema: gameFinishedPayload, visibility: 'public', clientInitiated: false },
+     },

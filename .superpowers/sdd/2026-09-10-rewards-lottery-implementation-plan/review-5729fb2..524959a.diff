@@ -1,0 +1,436 @@
+# Review package: 5729fb2..524959a
+
+## Commits
+524959a feat(core): схема rewards — Prize/Award/PointsGrant, CHECK фонда, частичный индекс единичности, CLEANUP_INTERVAL
+
+## Files changed
+ .../20260910171833_rewards_schema/migration.sql    | 82 ++++++++++++++++++
+ packages/core/prisma/schema.prisma                 | 73 +++++++++++++++-
+ packages/core/src/config/config.schema.spec.ts     | 13 +++
+ packages/core/src/config/config.schema.ts          |  3 +
+ .../core/src/rewards/rewards-schema.int-spec.ts    | 97 ++++++++++++++++++++++
+ packages/core/src/testing/test-config.ts           |  1 +
+ 6 files changed, 268 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql b/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql
+new file mode 100644
+index 0000000..94b22d0
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql
+@@ -0,0 +1,82 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "rewards";
++
++-- CreateEnum
++CREATE TYPE "rewards"."AwardStatus" AS ENUM ('AWARDED', 'FULFILLED', 'REVOKED');
++
++-- CreateTable
++CREATE TABLE "rewards"."Prize" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "name" TEXT NOT NULL,
++    "quantityTotal" INTEGER NOT NULL,
++    "quantity" INTEGER NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "Prize_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "rewards"."Award" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "prizeId" UUID,
++    "winnerId" UUID NOT NULL,
++    "status" "rewards"."AwardStatus" NOT NULL DEFAULT 'AWARDED',
++    "sourceAppId" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "fulfilledAt" TIMESTAMP(3),
++    "revokedAt" TIMESTAMP(3),
++
++    CONSTRAINT "Award_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "rewards"."PointsGrant" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "identityId" UUID NOT NULL,
++    "points" INTEGER NOT NULL,
++    "reason" TEXT,
++    "sourceAppId" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "PointsGrant_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE INDEX "Award_roomId_idx" ON "rewards"."Award"("roomId");
++
++-- CreateIndex
++CREATE INDEX "PointsGrant_roomId_identityId_idx" ON "rewards"."PointsGrant"("roomId", "identityId");
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Prize" ADD CONSTRAINT "Prize_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_prizeId_fkey" FOREIGN KEY ("prizeId") REFERENCES "rewards"."Prize"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_winnerId_fkey" FOREIGN KEY ("winnerId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."PointsGrant" ADD CONSTRAINT "PointsGrant_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."PointsGrant" ADD CONSTRAINT "PointsGrant_identityId_fkey" FOREIGN KEY ("identityId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- REQ-RWD-010: ограниченность призового фонда — DB-инвариант (рукописной CHECK;
++-- preview-функцию Prisma partialIndexes/checkConstraints НЕ использовать, REQ-DEV-006).
++ALTER TABLE rewards."Prize" ADD CONSTRAINT "Prize_quantity_nonnegative" CHECK (quantity >= 0);
++
++-- REQ-RWD-003 + REQ-DEV-006: единичность победителя по активным записям.
++-- «Активная» = не отозванная: отзыв освобождает место (приз можно переразыграть),
++-- вручённая — нет. Сетевой повтор того же награждения конфликтует по индексу →
++-- типизированный no-op в RewardsService (Task 5).
++CREATE UNIQUE INDEX "Award_single_active_winner_per_prize_key"
++  ON rewards."Award" ("roomId", "prizeId", "winnerId")
++  WHERE "status" IN ('AWARDED', 'FULFILLED');
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index 57c02a8..a1f9307 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,17 +1,17 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["identity", "membership", "realtime", "room"]
++  schemas  = ["identity", "membership", "realtime", "rewards", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+@@ -43,20 +43,23 @@ model Room {
+   joinPolicy      RoomJoinPolicy @default(GUESTS)
+   appId           String?
+   manifestVersion Int?
+   appSettings     Json?
+   deletedAt       DateTime?
+   createdAt       DateTime       @default(now())
+   updatedAt       DateTime       @updatedAt
+   logEvents       LogEvent[]
+   memberships     Membership[]
+   exclusions      Exclusion[]
++  prizes          Prize[]
++  awards          Award[]
++  pointsGrants    PointsGrant[]
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+   REGISTERED
+   GUEST
+ 
+   @@schema("identity")
+ }
+@@ -74,20 +77,22 @@ model Identity {
+   deletedAt   DateTime?
+   createdAt   DateTime     @default(now())
+   updatedAt   DateTime     @updatedAt
+   rooms       Room[]
+   logEvents   LogEvent[]
+   memberships Membership[]
+   sessions    Session[]
+   providers   IdentityProvider[]
+   exclusions  Exclusion[]  @relation("ExclusionTarget")
+   exclusionsMade Exclusion[] @relation("ExclusionActor")
++  awardsWon   Award[]
++  pointsGrants PointsGrant[]
+ 
+   @@schema("identity")
+ }
+ 
+ // Session — семейство refresh-токенов (REQ-ID-007: хранится только хэш токена,
+ // ротация связывает replacedById, отзыв — revokedAt; REQ-ID-016: expiresAt).
+ model Session {
+   id               String    @id @default(uuid()) @db.Uuid
+   identity         Identity  @relation(fields: [identityId], references: [id])
+   identityId       String    @db.Uuid
+@@ -193,10 +198,76 @@ model Exclusion {
+   ip         String
+   excludedByIdentity Identity @relation("ExclusionActor", fields: [excludedBy], references: [id], onDelete: Restrict)
+   excludedBy String   @db.Uuid
+   reason     String?
+   createdAt  DateTime @default(now())
+ 
+   @@unique([roomId, identityId])
+   @@index([roomId, ip])
+   @@schema("membership")
+ }
++
++// === Фаза 3: rewards (design 2026-09-10 §3) ===
++
++model Prize {
++  id            String   @id @default(uuid()) @db.Uuid
++  roomId        String   @db.Uuid
++  name          String
++  quantityTotal Int // исходный фонд, для «раздано X из Y»
++  quantity      Int    // остаток; CHECK (quantity >= 0) — рукописной миграцией (REQ-RWD-010)
++  createdAt     DateTime @default(now())
++  updatedAt     DateTime @updatedAt
++
++  room   Room    @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  awards Award[]
++
++  @@schema("rewards")
++}
++
++// БЕЗ @map: значения в БД uppercase, под дословный SQL частичного индекса
++// (design §3; прецедент MemberRole).
++enum AwardStatus {
++  AWARDED
++  FULFILLED
++  REVOKED
++
++  @@schema("rewards")
++}
++
++model Award {
++  id          String      @id @default(uuid()) @db.Uuid
++  roomId      String      @db.Uuid
++  prizeId     String?     @db.Uuid // REQ-RWD-002b: победитель без сущности приза
++  winnerId    String      @db.Uuid
++  status      AwardStatus @default(AWARDED)
++  sourceAppId String // 'lottery', 'quiz'
++  createdAt   DateTime    @default(now())
++  fulfilledAt DateTime?
++  revokedAt   DateTime?
++
++  room   Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  prize  Prize?   @relation(fields: [prizeId], references: [id], onDelete: Restrict)
++  winner Identity @relation(fields: [winnerId], references: [id], onDelete: Restrict)
++
++  // Единичность победителя по активным записям — частичный уникальный индекс
++  // "Award_single_active_winner_per_prize_key", рукописной миграцией (REQ-RWD-003,
++  // REQ-DEV-006). NULL prizeId не конфликтует (SQL NULLs distinct) — осознанно.
++  @@index([roomId])
++  @@schema("rewards")
++}
++
++model PointsGrant {
++  id          String   @id @default(uuid()) @db.Uuid
++  roomId      String   @db.Uuid
++  identityId  String   @db.Uuid
++  points      Int // только положительные в MVP (принуждается appEffectSchema)
++  reason      String? // 'quiz.round', …
++  sourceAppId String
++  createdAt   DateTime @default(now())
++
++  room     Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  identity Identity @relation(fields: [identityId], references: [id], onDelete: Restrict)
++
++  // Агрегат «баллы участника» — проекция по ledger'у, не хранимый счётчик.
++  @@index([roomId, identityId])
++  @@schema("rewards")
++}
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 183125c..52b8f70 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -163,11 +163,24 @@ describe('loadConfig', () => {
+   it('coerces RECONNECT_RATE_LIMIT_PER_MIN from string and rejects 0', () => {
+     const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+     expect(
+       configSchema.parse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: '5' })
+         .RECONNECT_RATE_LIMIT_PER_MIN,
+     ).toBe(5);
+     expect(
+       configSchema.safeParse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: 0 }).success,
+     ).toBe(false);
+   });
++
++  it('accepts CLEANUP_INTERVAL within the §4 range and defaults to 1 hour (REQ-ID-010)', () => {
++    expect(
++      loadConfig({ ...base, CLEANUP_INTERVAL: '600' } as NodeJS.ProcessEnv).CLEANUP_INTERVAL,
++    ).toBe(600);
++    expect(loadConfig({ ...base } as NodeJS.ProcessEnv).CLEANUP_INTERVAL).toBe(3600);
++    expect(() =>
++      loadConfig({ ...base, CLEANUP_INTERVAL: '60' } as NodeJS.ProcessEnv),
++    ).toThrow(/CLEANUP_INTERVAL/); // < 5 мин
++    expect(() =>
++      loadConfig({ ...base, CLEANUP_INTERVAL: '90000' } as NodeJS.ProcessEnv),
++    ).toThrow(/CLEANUP_INTERVAL/); // > 24 ч
++  });
+ });
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index 793fecb..a9871f4 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -11,20 +11,23 @@ export const configSchema = z.object({
+   // REQ-ID-006: max PARTICIPANT memberships per room (§4: default 500, 1..100 000).
+   ROOM_PARTICIPANT_LIMIT: z.coerce.number().int().min(1).max(100_000).default(500),
+   // REQ-ID-006: join attempts per minute per IP (§4: default 20, ≥ 1).
+   JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
+   // REQ-SEC-002: обязателен, ≥ 32 байта; дефолта нет — старт без секрета невозможен.
+   JWT_SECRET: z.string().min(32),
+   // §4: access_token_ttl — 15 мин, 1 мин … 1 ч (секунды).
+   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
+   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
+   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
++  // §4: cleanup_interval — 1 ч, 5 мин … 24 ч (секунды). Интервал регламентных
++  // джоб (REQ-ID-010); фаза 3 — свип анонимизации гостей (REQ-ID-003/014, Task 8).
++  CLEANUP_INTERVAL: z.coerce.number().int().min(300).max(86_400).default(3_600),
+   // §4: refresh_token_ttl — 30 сут, 1 сут … 90 сут (секунды). Гостевой cap
+   // (≤ guest_ttl, REQ-ID-016) применяется в точках выдачи (TokenService.sessionExpiry,
+   // setRefreshCookie), не здесь: инвариант REQ-ID-016 — про гостевой refresh,
+   // не про глобальный параметр (design 2026-09-02 §5/§8).
+   REFRESH_TOKEN_TTL: z.coerce.number().int().min(86_400).max(7_776_000).default(2_592_000),
+   // REQ-SEC-007 (§4 login_rate_limit): refresh-эндпоинт, 10/мин на IP.
+   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+   // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(30),
+   // REQ-RT-015 (§4 reconnect_rate_limit): базовый per-identity потолок на
+diff --git a/packages/core/src/rewards/rewards-schema.int-spec.ts b/packages/core/src/rewards/rewards-schema.int-spec.ts
+new file mode 100644
+index 0000000..a46fe79
+--- /dev/null
++++ b/packages/core/src/rewards/rewards-schema.int-spec.ts
+@@ -0,0 +1,97 @@
++import { randomUUID } from 'node:crypto';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++
++// REQ-DEV-006 (автотест наличия рукописных частей миграции), REQ-RWD-003
++// (частичный уникальный индекс единичности победителя), REQ-RWD-010 (CHECK
++// неотрицательности призового фонда + ограниченный декремент).
++describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('has the partial unique index on active awards (REQ-RWD-003)', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'rewards' AND indexname = 'Award_single_active_winner_per_prize_key'
++    `;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
++    expect(rows[0].indexdef).toContain('"roomId"');
++    expect(rows[0].indexdef).toContain('"prizeId"');
++    expect(rows[0].indexdef).toContain('"winnerId"');
++    expect(rows[0].indexdef).toContain("'AWARDED'");
++    expect(rows[0].indexdef).toContain("'FULFILLED'");
++  });
++
++  it('has the CHECK quantity >= 0 on Prize (REQ-RWD-010)', async () => {
++    const rows = await db.prisma.$queryRaw<{ conname: string }[]>`
++      SELECT conname FROM pg_constraint
++      WHERE conname = 'Prize_quantity_nonnegative' AND connamespace = 'rewards'::regnamespace
++    `;
++    expect(rows).toHaveLength(1);
++  });
++
++  // Сиды комнаты/приза/победителя. Значения уникальны на вызов: тесты делят одну
++  // testcontainer-БД, фиксированные email/код комнаты конфликтовали бы по P2002.
++  async function seedRoomPrizeWinner() {
++    const org = await seedIdentity(db.prisma, {
++      email: `org-${randomUUID()}@example.test`,
++    });
++    const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: 2, quantity: 2 },
++    });
++    return { room, prize, winner };
++  }
++
++  it('blocks a second active award of the same prize to the same winner; revoke frees the slot; fulfilled does not', async () => {
++    const { room, prize, winner } = await seedRoomPrizeWinner();
++    const first = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++    });
++    // Дубль по активной записи — конфликт индекса.
++    await expect(
++      db.prisma.award.create({
++        data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++      }),
++    ).rejects.toMatchObject({ code: 'P2002' });
++    // Отзыв освобождает место.
++    await db.prisma.award.update({
++      where: { id: first.id },
++      data: { status: 'REVOKED', revokedAt: new Date() },
++    });
++    const second = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++    });
++    // FULFILLED — нет: слот по-прежнему занят.
++    await db.prisma.award.update({
++      where: { id: second.id },
++      data: { status: 'FULFILLED', fulfilledAt: new Date() },
++    });
++    await expect(
++      db.prisma.award.create({
++        data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++      }),
++    ).rejects.toMatchObject({ code: 'P2002' });
++  });
++
++  it('CHECK rejects a negative quantity and the guarded decrement stops at zero', async () => {
++    const { prize } = await seedRoomPrizeWinner();
++    await expect(
++      db.prisma.$executeRaw`UPDATE rewards."Prize" SET quantity = -1 WHERE id = ${prize.id}::uuid`,
++    ).rejects.toMatchObject({ code: 'P2010' }); // SQLSTATE 23514 check_violation (форма adapter-pg — HANDOFF)
++    const zero = await db.prisma.prize.update({ where: { id: prize.id }, data: { quantity: 0 } });
++    const n = await db.prisma.$executeRaw`UPDATE rewards."Prize" SET quantity = quantity - 1 WHERE id = ${zero.id}::uuid AND quantity >= 1`;
++    expect(n).toBe(0);
++  });
++});
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index 61f0c64..6c7bd41 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -5,20 +5,21 @@ import type { AppConfig } from '../config/config.schema';
+ export const TEST_CONFIG: AppConfig = {
+   NODE_ENV: 'test',
+   PORT: 3000,
+   DATABASE_URL: 'postgresql://unused',
+   ROOM_CODE_MIN_LEN: 8,
+   ROOM_PARTICIPANT_LIMIT: 500,
+   JOIN_RATE_LIMIT_IP: 20,
+   JWT_SECRET: 'test-only-secret-key-32-bytes-long!!',
+   ACCESS_TOKEN_TTL: 900,
+   GUEST_TTL: 86_400,
++  CLEANUP_INTERVAL: 3_600,
+   // REFRESH_TOKEN_TTL — новый дефолт §4 (30 сут): registered-ветки int-спеков должны
+   // видеть TTL > GUEST_TTL (гостевой cap применяется при выдаче, не в конфиге).
+   REFRESH_TOKEN_TTL: 2_592_000,
+   REFRESH_RATE_LIMIT: 10,
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
+   MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   RECONNECT_RATE_LIMIT_PER_MIN: 10,
+   TRUST_PROXY: false,
+   CORS_ORIGINS: [],
+   // Google-секция опциональна (all-or-none) — в тестовом конфиге отсутствует.

@@ -1,0 +1,215 @@
+# Review package: 485374290462e9c9751da9385dde25354b0c4494..HEAD
+
+## Commits
+4394208 feat(core): transport module with join/refresh controllers (REQ-ID-003, REQ-ID-008, REQ-SEC-007)
+
+## Files changed
+ packages/core/src/index.ts                      |  3 ++
+ packages/core/src/transport/auth.controller.ts  | 42 +++++++++++++++++++++++++
+ packages/core/src/transport/auth.tokens.ts      |  3 ++
+ packages/core/src/transport/http.types.ts       | 22 +++++++++++++
+ packages/core/src/transport/join.controller.ts  | 33 +++++++++++++++++++
+ packages/core/src/transport/refresh-cookie.ts   | 16 ++++++++++
+ packages/core/src/transport/transport.module.ts | 29 +++++++++++++++++
+ 7 files changed, 148 insertions(+)
+
+## Diff
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 442d9fc..deee8cf 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -18,10 +18,13 @@ export * from './identity/identity.module';
+ export * from './membership/membership.errors';
+ export * from './membership/join-rate-limiter';
+ export * from './membership/membership.service';
+ export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
+ export * from './realtime/realtime.module';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
++export * from './transport/transport.module';
++export * from './transport/http-exception.filter';
++export * from './transport/auth.tokens';
+diff --git a/packages/core/src/transport/auth.controller.ts b/packages/core/src/transport/auth.controller.ts
+new file mode 100644
+index 0000000..9f7b339
+--- /dev/null
++++ b/packages/core/src/transport/auth.controller.ts
+@@ -0,0 +1,42 @@
++import { Controller, HttpCode, Inject, Post, Req, Res } from '@nestjs/common';
++import type { TokenResponse } from '@mymozhem/sdk';
++import { TokenService } from '../auth/token.service';
++import { AUTH_ERROR_CODES, AuthError } from '../auth/auth.errors';
++import { REFRESH_COOKIE } from '../auth/auth.constants';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { JoinRateLimitedError } from '../membership/membership.errors';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { REFRESH_RATE_LIMITER } from './auth.tokens';
++import { setRefreshCookie } from './refresh-cookie';
++import type { ReplyLike, RequestLike } from './http.types';
++
++@Controller('auth')
++export class AuthController {
++  constructor(
++    private readonly tokens: TokenService,
++    @Inject(REFRESH_RATE_LIMITER) private readonly refreshRateLimiter: JoinRateLimiter,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  // Refresh принимает токен ТОЛЬКО из httpOnly-куки (REQ-ID-008) — тела у запроса нет.
++  // Rate-limit per IP до любой работы с токеном (REQ-SEC-007); все отказы ротации
++  // неразличимы снаружи (SESSION_INVALID, фильтр → 401).
++  @Post('refresh')
++  @HttpCode(200)
++  async refresh(
++    @Req() req: RequestLike,
++    @Res({ passthrough: true }) reply: ReplyLike,
++  ): Promise<TokenResponse> {
++    if (!this.refreshRateLimiter.tryAcquire(req.ip)) {
++      throw new JoinRateLimitedError('refresh rate limit exceeded'); // фильтр: 429 RATE_LIMITED
++    }
++    const refreshToken = req.cookies[REFRESH_COOKIE];
++    if (!refreshToken) {
++      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'no refresh cookie');
++    }
++    const issued = await this.tokens.rotate(refreshToken);
++    setRefreshCookie(reply, issued.refreshToken, this.config);
++    return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
++  }
++}
+diff --git a/packages/core/src/transport/auth.tokens.ts b/packages/core/src/transport/auth.tokens.ts
+new file mode 100644
+index 0000000..9c2339e
+--- /dev/null
++++ b/packages/core/src/transport/auth.tokens.ts
+@@ -0,0 +1,3 @@
++// Отдельный инстанс лимитера для refresh-эндпоинта (REQ-SEC-007) — не делит состояние
++// с join-лимитером.
++export const REFRESH_RATE_LIMITER = Symbol('REFRESH_RATE_LIMITER');
+diff --git a/packages/core/src/transport/http.types.ts b/packages/core/src/transport/http.types.ts
+new file mode 100644
+index 0000000..4822c03
+--- /dev/null
++++ b/packages/core/src/transport/http.types.ts
+@@ -0,0 +1,22 @@
++// Core не зависит от fastify напрямую (адаптер подключается в apps/server) — контроллеры
++// типизируются структурным минимумом запроса/ответа; FastifyRequest/FastifyReply
++// совместимы по форме. Тот же приём, что ReplyLike в http-exception.filter (там своя
++// приватная вариация под status/send — здесь под ip/cookies/setCookie).
++export interface RequestLike {
++  readonly ip: string;
++  readonly cookies: Record<string, string | undefined>;
++}
++
++export interface ReplyLike {
++  setCookie(
++    name: string,
++    value: string,
++    options: {
++      httpOnly: boolean;
++      secure: boolean;
++      sameSite: 'strict';
++      path: string;
++      maxAge: number;
++    },
++  ): unknown;
++}
+diff --git a/packages/core/src/transport/join.controller.ts b/packages/core/src/transport/join.controller.ts
+new file mode 100644
+index 0000000..b397190
+--- /dev/null
++++ b/packages/core/src/transport/join.controller.ts
+@@ -0,0 +1,33 @@
++import { Body, Controller, Inject, Post, Req, Res } from '@nestjs/common';
++import { joinRequestSchema, type TokenResponse } from '@mymozhem/sdk';
++import { MembershipService } from '../membership/membership.service';
++import { TokenService } from '../auth/token.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { setRefreshCookie } from './refresh-cookie';
++import type { ReplyLike, RequestLike } from './http.types';
++
++@Controller()
++export class JoinController {
++  constructor(
++    private readonly membership: MembershipService,
++    private readonly tokens: TokenService,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  // actorId НЕ принимается из payload — актор определяется только выданным токеном
++  // (REQ-RT-009 по духу для HTTP). ZodError/доменные ошибки уходят в фильтр —
++  // контроллер статусов не знает (design §5).
++  @Post('rooms/join')
++  async join(
++    @Body() body: unknown,
++    @Req() req: RequestLike,
++    @Res({ passthrough: true }) reply: ReplyLike,
++  ): Promise<TokenResponse> {
++    const { code, displayName } = joinRequestSchema.parse(body);
++    const { identity, membership } = await this.membership.join({ code, displayName, ip: req.ip });
++    const issued = await this.tokens.issueGuestTokens(identity.id, membership.roomId);
++    setRefreshCookie(reply, issued.refreshToken, this.config);
++    return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
++  }
++}
+diff --git a/packages/core/src/transport/refresh-cookie.ts b/packages/core/src/transport/refresh-cookie.ts
+new file mode 100644
+index 0000000..d64fc8c
+--- /dev/null
++++ b/packages/core/src/transport/refresh-cookie.ts
+@@ -0,0 +1,16 @@
++import type { AppConfig } from '../config/config.schema';
++import { REFRESH_COOKIE } from '../auth/auth.constants';
++import type { ReplyLike } from './http.types';
++
++// httpOnly + SameSite=Strict + Path=/auth: кука не уходит никуда, кроме
++// refresh-эндпоинта (REQ-ID-008). Secure — только в production (dev/e2e по http).
++// maxAge ограничен guest_ttl — гостевая сессия не переживает гостя (REQ-ID-016).
++export function setRefreshCookie(reply: ReplyLike, refreshToken: string, config: AppConfig): void {
++  void reply.setCookie(REFRESH_COOKIE, refreshToken, {
++    httpOnly: true,
++    secure: config.NODE_ENV === 'production',
++    sameSite: 'strict',
++    path: '/auth',
++    maxAge: Math.min(config.REFRESH_TOKEN_TTL, config.GUEST_TTL),
++  });
++}
+diff --git a/packages/core/src/transport/transport.module.ts b/packages/core/src/transport/transport.module.ts
+new file mode 100644
+index 0000000..15ba55a
+--- /dev/null
++++ b/packages/core/src/transport/transport.module.ts
+@@ -0,0 +1,29 @@
++import { Module } from '@nestjs/common';
++import { APP_FILTER } from '@nestjs/core';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { MembershipModule } from '../membership/membership.module';
++import { AuthModule } from '../auth/auth.module';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { JoinController } from './join.controller';
++import { AuthController } from './auth.controller';
++import { HttpExceptionFilter } from './http-exception.filter';
++import { REFRESH_RATE_LIMITER } from './auth.tokens';
++
++@Module({
++  imports: [ConfigModule, MembershipModule, AuthModule],
++  controllers: [JoinController, AuthController],
++  providers: [
++    // Единственная точка маппинга ошибка → HTTP для всего приложения (design §5).
++    { provide: APP_FILTER, useClass: HttpExceptionFilter },
++    // Отдельный инстанс лимитера для refresh (REQ-SEC-007) — не делит состояние
++    // с join-лимитером из MembershipModule.
++    {
++      provide: REFRESH_RATE_LIMITER,
++      useFactory: (config: AppConfig) => new JoinRateLimiter(config.REFRESH_RATE_LIMIT),
++      inject: [APP_CONFIG],
++    },
++  ],
++})
++export class TransportModule {}

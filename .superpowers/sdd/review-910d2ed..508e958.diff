@@ -1,0 +1,131 @@
+# Review package: 910d2ed..508e958
+
+## Commits
+508e958 feat(sdk): identityKind + memberRole contract vocabulary (REQ-ID-001, REQ-ID-011)
+
+## Files changed
+ packages/sdk/src/identity/identity-kind.contract.spec.ts | 16 ++++++++++++++++
+ packages/sdk/src/identity/identity-kind.fixtures.ts      |  6 ++++++
+ packages/sdk/src/identity/identity-kind.ts               |  8 ++++++++
+ packages/sdk/src/index.ts                                |  4 ++++
+ packages/sdk/src/membership/member-role.contract.spec.ts | 16 ++++++++++++++++
+ packages/sdk/src/membership/member-role.fixtures.ts      |  6 ++++++
+ packages/sdk/src/membership/member-role.ts               |  8 ++++++++
+ 7 files changed, 64 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/identity/identity-kind.contract.spec.ts b/packages/sdk/src/identity/identity-kind.contract.spec.ts
+new file mode 100644
+index 0000000..4fd5004
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { IDENTITY_KINDS, identityKindSchema } from './identity-kind';
++import { validKinds, invalidKinds } from './identity-kind.fixtures';
++
++describe('identityKind contract (REQ-ID-001)', () => {
++  it('declares exactly the two kinds of REQ-ID-001', () => {
++    expect([...IDENTITY_KINDS]).toEqual(['REGISTERED', 'GUEST']);
++  });
++
++  it.each(validKinds)('accepts %s', (kind) => {
++    expect(identityKindSchema.safeParse(kind).success).toBe(true);
++  });
++
++  it.each(invalidKinds.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(identityKindSchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/identity/identity-kind.fixtures.ts b/packages/sdk/src/identity/identity-kind.fixtures.ts
+new file mode 100644
+index 0000000..6954710
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { IdentityKind } from './identity-kind';
++
++export const validKinds: IdentityKind[] = ['REGISTERED', 'GUEST'];
++
++// Unknown roles, wrong case, empty, non-strings — all rejected.
++export const invalidKinds: unknown[] = ['ADMIN', 'guest', 'registered', '', null, 42];
+diff --git a/packages/sdk/src/identity/identity-kind.ts b/packages/sdk/src/identity/identity-kind.ts
+new file mode 100644
+index 0000000..00d3218
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.ts
+@@ -0,0 +1,8 @@
++import { z } from 'zod';
++
++// REQ-ID-001: single identity table, kind REGISTERED | GUEST. Contract vocabulary,
++// fixed here so membership, JWT claims and draw_eligibility don't fork literals
++// before their slices land.
++export const IDENTITY_KINDS = ['REGISTERED', 'GUEST'] as const;
++export const identityKindSchema = z.enum(IDENTITY_KINDS);
++export type IdentityKind = z.infer<typeof identityKindSchema>;
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index ce665fe..ac2ac9f 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -6,10 +6,14 @@ export * from './events/event-type';
+ export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
+ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+ export * from './manifest/manifest.schema';
+ export * from './manifest/manifest.fixtures';
+ export * from './manifest/app-settings-visibility';
+ export * from './manifest/define-app';
+ export * from './manifest/define-app.fixtures';
++export * from './identity/identity-kind';
++export * from './identity/identity-kind.fixtures';
++export * from './membership/member-role';
++export * from './membership/member-role.fixtures';
+diff --git a/packages/sdk/src/membership/member-role.contract.spec.ts b/packages/sdk/src/membership/member-role.contract.spec.ts
+new file mode 100644
+index 0000000..a38dff3
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { MEMBER_ROLES, memberRoleSchema } from './member-role';
++import { validRoles, invalidRoles } from './member-role.fixtures';
++
++describe('memberRole contract (REQ-ID-011)', () => {
++  it('declares exactly the four roles of REQ-ID-011', () => {
++    expect([...MEMBER_ROLES]).toEqual(['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR']);
++  });
++
++  it.each(validRoles)('accepts %s', (role) => {
++    expect(memberRoleSchema.safeParse(role).success).toBe(true);
++  });
++
++  it.each(invalidRoles.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(memberRoleSchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/membership/member-role.fixtures.ts b/packages/sdk/src/membership/member-role.fixtures.ts
+new file mode 100644
+index 0000000..a6e0378
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { MemberRole } from './member-role';
++
++export const validRoles: MemberRole[] = ['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR'];
++
++// Unknown roles, wrong case, empty, non-strings — all rejected.
++export const invalidRoles: unknown[] = ['ADMIN', 'organizer', 'owner', '', null, 42];
+diff --git a/packages/sdk/src/membership/member-role.ts b/packages/sdk/src/membership/member-role.ts
+new file mode 100644
+index 0000000..85476bc
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.ts
+@@ -0,0 +1,8 @@
++import { z } from 'zod';
++
++// REQ-ID-011: membership role model. MODERATOR holds no privileges beyond
++// PARTICIPANT until phase 4 (amendment v1.3) but stays in the enumeration;
++// the access matrix lands with the membership entity.
++export const MEMBER_ROLES = ['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR'] as const;
++export const memberRoleSchema = z.enum(MEMBER_ROLES);
++export type MemberRole = z.infer<typeof memberRoleSchema>;

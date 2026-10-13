@@ -1,0 +1,112 @@
+# Review package: 59c8ee4..HEAD
+
+## Commits
+519fd8a fix(core): log refresh reuse/invalid events server-side (design §11 investigation trail)
+
+## Files changed
+ .../core/src/transport/http-exception.filter.spec.ts | 20 ++++++++++++++++++--
+ packages/core/src/transport/http-exception.filter.ts | 11 ++++++++++-
+ 2 files changed, 28 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index ed4cc90..6fc978c 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -17,24 +17,29 @@ const makeFilter = () => {
+   return { filter, reply };
+ };
+ 
+ // Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую.
+ const makeHost = (reply: ReplyMock): ArgumentsHost =>
+   ({ switchToHttp: () => ({ getResponse: () => reply }) }) as unknown as ArgumentsHost;
+ 
+ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+   // Глушим серверный лог на всём сьюте: 5xx-кейсы иначе печатают исключение в консоль jest.
+   let errorSpy: jest.SpyInstance;
++  let warnSpy: jest.SpyInstance;
+   beforeEach(() => {
+     errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
++    warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
++  });
++  afterEach(() => {
++    errorSpy.mockRestore();
++    warnSpy.mockRestore();
+   });
+-  afterEach(() => errorSpy.mockRestore());
+ 
+   // Полная таблица маппинга design §5 + инвариант REQ-SEC-006: наружу ровно {code}.
+   const cases: Array<[string, unknown, number, string]> = [
+     ['join denied', new RoomJoinDeniedError('no room for code'), 403, 'ROOM_JOIN_DENIED'],
+     // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+     ['rate limited', new JoinRateLimitedError('x'), 429, 'RATE_LIMITED'],
+     ['room full', new RoomParticipantLimitReachedError('x'), 409, 'ROOM_PARTICIPANT_LIMIT_REACHED'],
+     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
+     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
+     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],
+@@ -77,17 +82,28 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+   });
+ 
+   describe('server logging', () => {
+     it('logs the full exception to the server log on 5xx', () => {
+       const err = new Error('boom');
+       const { filter, reply } = makeFilter();
+       filter.catch(err, makeHost(reply));
+       expect(errorSpy).toHaveBeenCalledWith(err);
+     });
+ 
+-    it('does not log 4xx as server errors', () => {
++    it('logs AuthError message at warn level (design §11: различие reuse/expired/unknown живёт в серверном логе)', () => {
++      const err = new AuthError('SESSION_INVALID', 'refresh reuse detected, family <uuid> revoked');
++      const { filter, reply } = makeFilter();
++      filter.catch(err, makeHost(reply));
++      expect(warnSpy).toHaveBeenCalledWith('refresh reuse detected, family <uuid> revoked');
++      expect(errorSpy).not.toHaveBeenCalled();
++      // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
++      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
++    });
++
++    it('does not log non-auth 4xx at all', () => {
+       const { filter, reply } = makeFilter();
+       filter.catch(new RoomJoinDeniedError('no room for code'), makeHost(reply));
+       expect(errorSpy).not.toHaveBeenCalled();
++      expect(warnSpy).not.toHaveBeenCalled();
+     });
+   });
+ });
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index 89a7084..eb8b326 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -27,21 +27,30 @@ interface ReplyLike {
+ export class HttpExceptionFilter implements ExceptionFilter {
+   private readonly logger = new Logger(HttpExceptionFilter.name);
+ 
+   catch(exception: unknown, host: ArgumentsHost): void {
+     const reply = host.switchToHttp().getResponse<ReplyLike>();
+     const code = this.toWireCode(exception);
+     // Nest-встроенные HttpException (404 неизвестного роута и т.п.) сохраняют свой
+     // статус («его status», маппинг design §5); wire-код при этом типизированный.
+     const status: number =
+       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
+-    if (status >= 500) this.logger.error(exception);
++    if (status >= 500) {
++      this.logger.error(exception);
++    } else if (exception instanceof AuthError) {
++      // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
++      // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
++      // токена не оставляет следа для расследования. Message AuthError безопасен:
++      // token.service.ts кладёт туда только фиксированные строки и familyId (UUID),
++      // без token-материала.
++      this.logger.warn(exception.message);
++    }
+     void reply.status(status).send({ code });
+   }
+ 
+   private toWireCode(exception: unknown): WireCode {
+     if (exception instanceof MembershipError) {
+       // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+       return exception.code === 'JOIN_RATE_LIMITED' ? 'RATE_LIMITED' : exception.code;
+     }
+     if (exception instanceof AuthError) return 'SESSION_INVALID';
+     if (exception instanceof ZodError) return 'REQUEST_INVALID';

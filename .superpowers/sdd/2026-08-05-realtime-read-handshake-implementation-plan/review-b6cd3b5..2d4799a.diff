@@ -1,0 +1,346 @@
+# Review package: b6cd3b5..HEAD
+
+## Commits
+2d4799a fix(core): realtime — containment handleSubscribe, httpServer в io-adapter, нормализация visibility staged-событий
+
+## Files changed
+ apps/server/src/main.ts                            |  3 +-
+ packages/core/src/realtime/event-log.service.ts    | 22 ++++-
+ .../core/src/realtime/event-outbox.int-spec.ts     | 15 ++++
+ packages/core/src/realtime/io-adapter.ts           | 13 ++-
+ .../core/src/realtime/realtime.gateway.spec.ts     | 18 +++++
+ packages/core/src/realtime/realtime.gateway.ts     | 94 ++++++++++++----------
+ 6 files changed, 117 insertions(+), 48 deletions(-)
+
+## Diff
+diff --git a/apps/server/src/main.ts b/apps/server/src/main.ts
+index c852696..acfa795 100644
+--- a/apps/server/src/main.ts
++++ b/apps/server/src/main.ts
+@@ -17,15 +17,16 @@ async function bootstrap(): Promise<void> {
+     AppModule,
+     new FastifyAdapter({ trustProxy: config.TRUST_PROXY }),
+   );
+   // Обязателен: transport-контроллеры читают req.cookies по структурному типу —
+   // без плагина refresh вернёт 500 вместо 401.
+   await app.register(fastifyCookie);
+   await app.register(fastifyHelmet);
+   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
+   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
+   // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
+-  app.useWebSocketAdapter(new ConfigurableIoAdapter(config));
++  // HTTP-сервер передаём явно: Nest не инжектирует его в пользовательский адаптер.
++  app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
+   await app.listen(config.PORT, '0.0.0.0');
+ }
+ 
+ void bootstrap();
+diff --git a/packages/core/src/realtime/event-log.service.ts b/packages/core/src/realtime/event-log.service.ts
+index 69ff709..b3f23db 100644
+--- a/packages/core/src/realtime/event-log.service.ts
++++ b/packages/core/src/realtime/event-log.service.ts
+@@ -33,20 +33,36 @@ function stringifyAppPayload(payload: unknown, eventType: string): string {
+     serialized = JSON.stringify(payload);
+   } catch {
+     throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
+   }
+   if (serialized === undefined) {
+     throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
+   }
+   return serialized;
+ }
+ 
++// $queryRaw обходит клиентское маппирование enum (schema.prisma: PUBLIC @map("public")):
++// INSERT ... RETURNING * отдаёт сырую DB-метку ('public'), а контракт LogEvent —
++// Prisma-enum ('PUBLIC'). Staged/возвращаемое событие обязано быть LogEvent: fan-out
++// gateway сравнивает visibility с Prisma-enum (вскрыто realtime e2e, Task 8 —
++// live-доставка молча пропадала для всех событий; replay читает через Prisma-клиент
++// и затронут не был).
++const VISIBILITY_FROM_DB: Record<string, LogEvent['visibility']> = {
++  public: 'PUBLIC',
++  organizer: 'ORGANIZER',
++  'module-private': 'MODULE_PRIVATE',
++};
++
++function asLogEvent(row: LogEvent): LogEvent {
++  return { ...row, visibility: VISIBILITY_FROM_DB[row.visibility as string] ?? row.visibility };
++}
++
+ // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
+ // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
+ // Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
+ // ДО advisory lock, размер payload не влияет на исход гонки за seq.
+ // Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
+ // комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
+ // в room."Room".
+ // Commit без EventOutbox.run отклоняется (fail-closed staging в appendLocked).
+ @Injectable()
+ export class EventLogService {
+@@ -207,14 +223,16 @@ export class EventLogService {
+              ${JSON.stringify(payload)}::jsonb,
+              ${actorId}::uuid,
+              ${visibility}::realtime."EventVisibility",
+              ${schemaVersion}
+       FROM realtime."LogEvent"
+       WHERE "roomId" = ${roomId}::uuid
+       RETURNING *
+     `;
+     // Staging в tx-outbox (design §5): доставка — после коммита, через runner.
+     // Вне контекста — fail-closed: событие без пути доставки не коммитится.
+-    this.outbox.stage(rows[0]);
+-    return rows[0];
++    // asLogEvent: RETURNING * — сырой результат, enum-метки нормализуются (см. выше).
++    const event = asLogEvent(rows[0]);
++    this.outbox.stage(event);
++    return event;
+   }
+ }
+diff --git a/packages/core/src/realtime/event-outbox.int-spec.ts b/packages/core/src/realtime/event-outbox.int-spec.ts
+index bf5d703..e3125b1 100644
+--- a/packages/core/src/realtime/event-outbox.int-spec.ts
++++ b/packages/core/src/realtime/event-outbox.int-spec.ts
+@@ -1,11 +1,12 @@
+ import type { AppManifest } from '@mymozhem/sdk';
++import type { LogEvent } from '@prisma/client';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+@@ -112,20 +113,34 @@ describe('EventOutbox', () => {
+     bus.subscribe((events) => batches.push(events.length));
+ 
+     await outbox.run(async (tx) => {
+       await eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1);
+       await eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 2 }, 'public', P1);
+     });
+ 
+     expect(batches).toEqual([2]);
+   });
+ 
++  it('delivered events carry the Prisma-enum visibility (LogEvent contract for fan-out)', async () => {
++    const room = await activeRoom();
++    await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
++    const delivered: LogEvent[] = [];
++    bus.subscribe((events) => delivered.push(...events));
++
++    await outbox.run((tx) => eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1));
++
++    // INSERT ... RETURNING * отдаёт сырую DB-метку enum ('public'); staged событие
++    // обязано быть нормализовано до Prisma-enum — fan-out gateway сравнивает
++    // visibility с 'PUBLIC' (вскрыто realtime e2e, Task 8: live-доставка пропадала).
++    expect(delivered.map((e) => e.visibility)).toEqual(['PUBLIC']);
++  });
++
+   it('rollback delivers nothing and writes nothing (REQ-DEV-008)', async () => {
+     const room = await activeRoom();
+     await db.prisma.membership.create({ data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' } });
+     let publishCalls = 0;
+     bus.subscribe(() => {
+       publishCalls += 1;
+     });
+ 
+     await expect(
+       outbox.run(async (tx) => {
+diff --git a/packages/core/src/realtime/io-adapter.ts b/packages/core/src/realtime/io-adapter.ts
+index 17913a5..e667272 100644
+--- a/packages/core/src/realtime/io-adapter.ts
++++ b/packages/core/src/realtime/io-adapter.ts
+@@ -1,18 +1,27 @@
+ import { IoAdapter } from '@nestjs/platform-socket.io';
+ import type { AppConfig } from '../config/config.schema';
+ 
+ // CORS сокета повторяет HTTP-политику из того же конфига (design §8); wildcard в
+ // production запрещён superRefine конфиг-схемы (REQ-SEC-008). Подключается в
+ // apps/server main.ts и в e2e-boot (там своя копия boot-последовательности).
++//
++// httpServer обязателен: Nest НЕ инжектирует HTTP-сервер в пользовательский
++// адаптер (useWebSocketAdapter лишь сохраняет его в конфиг), а IoAdapter без
++// httpServer создаёт `new Server(port)` — socket.io слушал бы отдельный
++// случайный порт, не тот, что у Fastify (вскрыто realtime e2e, Task 8).
++// Канонический паттерн Nest: адаптер получает app/httpServer в конструкторе.
+ export class ConfigurableIoAdapter extends IoAdapter {
+-  constructor(private readonly config: AppConfig) {
+-    super();
++  constructor(
++    private readonly config: AppConfig,
++    httpServer: object,
++  ) {
++    super(httpServer);
+   }
+ 
+   override createIOServer(port: number, options?: Record<string, unknown>): unknown {
+     return super.createIOServer(port, {
+       ...options,
+       cors: { origin: this.config.CORS_ORIGINS },
+     });
+   }
+ }
+diff --git a/packages/core/src/realtime/realtime.gateway.spec.ts b/packages/core/src/realtime/realtime.gateway.spec.ts
+index 5acc42f..5f141a7 100644
+--- a/packages/core/src/realtime/realtime.gateway.spec.ts
++++ b/packages/core/src/realtime/realtime.gateway.spec.ts
+@@ -84,20 +84,38 @@ describe('RealtimeGateway.handleSubscribe', () => {
+     expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
+   });
+ 
+   it('non-member gets ACTOR_NOT_MEMBER (REQ-SEC-003)', async () => {
+     const { gateway } = makeGateway({ membership: { findActiveMembership: jest.fn().mockResolvedValue(null) } });
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack);
+     expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
+   });
+ 
++  // Санкционированный фикс (леджер Task 7 → Task 8): неожиданный throw внутри
++  // handleSubscribe (prisma упала, join отклонился) не должен улетать unhandled
++  // rejection'ом через `void this.handleSubscribe(...)` — клиент получает ack
++  // ровно {code: 'INTERNAL_ERROR'}, детали только в серверный лог (REQ-SEC-006).
++  it('unexpected infrastructure failure is contained: ack INTERNAL_ERROR, no throw escapes', async () => {
++    const { gateway } = makeGateway({
++      membership: { findActiveMembership: jest.fn().mockRejectedValue(new Error('prisma down')) },
++    });
++    const logger = { error: jest.fn(), warn: jest.fn() };
++    (gateway as unknown as { logger: unknown }).logger = logger;
++    const { ack, calls } = ackOf();
++    await expect(
++      gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack),
++    ).resolves.toBeUndefined();
++    expect(calls).toEqual([{ code: 'INTERNAL_ERROR' }]);
++    expect(logger.error).toHaveBeenCalledTimes(1);
++  });
++
+   it('participant joins the room channel with a public snapshot', async () => {
+     const registry = new SubscriptionRegistry();
+     const { gateway } = makeGateway({ registry });
+     const socket = fakeSocket();
+     const { ack, calls } = ackOf();
+     await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
+     expect(socket.joined).toEqual([`room:${ROOM}`]);
+     expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
+     expect(registry.get('socket-1')).toMatchObject({ identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
+   });
+diff --git a/packages/core/src/realtime/realtime.gateway.ts b/packages/core/src/realtime/realtime.gateway.ts
+index fd6fe50..874c0c4 100644
+--- a/packages/core/src/realtime/realtime.gateway.ts
++++ b/packages/core/src/realtime/realtime.gateway.ts
+@@ -102,64 +102,72 @@ export class RealtimeGateway implements OnGatewayInit<Server> {
+     socket.data.claims = claims;
+     next();
+   }
+ 
+   async handleSubscribe(socket: Socket, payload: unknown, ack: Ack<SubscribeOkAck>): Promise<void> {
+     const parsed = subscribeRequestSchema.safeParse(payload);
+     if (!parsed.success) {
+       ack({ code: 'REQUEST_INVALID' });
+       return;
+     }
+-    const claims = claimsOf(socket);
+-    const { roomId } = parsed.data;
+-    // REQ-ID-016: гостевой scope зашит в токен — GUEST подписывается только на свою
+-    // комнату; REGISTERED (токены — с OAuth-среза) решает membership-гейт.
+-    if (claims.kind === 'GUEST' && claims.roomId !== roomId) {
+-      ack({ code: 'ACTOR_NOT_MEMBER' });
+-      return;
+-    }
+-    // Мульти-подписка не строится (design §4): re-subscribe в ту же комнату —
+-    // идемпотентный повторный snapshot, в чужую — отказ.
+-    const existing = this.registry.get(socket.id);
+-    if (existing !== undefined && existing.roomId !== roomId) {
+-      ack({ code: 'REQUEST_INVALID' });
+-      return;
+-    }
+-    // REQ-SEC-003: чтение подресурсов комнаты — только членам.
+-    const membership = await this.membership.findActiveMembership(roomId, claims.sub);
+-    if (!membership) {
+-      ack({ code: 'ACTOR_NOT_MEMBER' });
+-      return;
++    // Error containment (санкционированный фикс, леджер Task 7 → Task 8): вызов идёт
++    // через `void this.handleSubscribe(...)` — неожиданный throw (prisma, join) без
++    // try/catch стал бы unhandled rejection и клиент остался бы без ack. Семантика
++    // — та же, что у handlePublish: wireCodeOf, наружу ровно {code} (REQ-SEC-006).
++    try {
++      const claims = claimsOf(socket);
++      const { roomId } = parsed.data;
++      // REQ-ID-016: гостевой scope зашит в токен — GUEST подписывается только на свою
++      // комнату; REGISTERED (токены — с OAuth-среза) решает membership-гейт.
++      if (claims.kind === 'GUEST' && claims.roomId !== roomId) {
++        ack({ code: 'ACTOR_NOT_MEMBER' });
++        return;
++      }
++      // Мульти-подписка не строится (design §4): re-subscribe в ту же комнату —
++      // идемпотентный повторный snapshot, в чужую — отказ.
++      const existing = this.registry.get(socket.id);
++      if (existing !== undefined && existing.roomId !== roomId) {
++        ack({ code: 'REQUEST_INVALID' });
++        return;
++      }
++      // REQ-SEC-003: чтение подресурсов комнаты — только членам.
++      const membership = await this.membership.findActiveMembership(roomId, claims.sub);
++      if (!membership) {
++        ack({ code: 'ACTOR_NOT_MEMBER' });
++        return;
++      }
++      // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
++      const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
++      const room = await this.prisma.room.findUnique({ where: { id: roomId } });
++      const events = await this.prisma.logEvent.findMany({
++        where: { roomId },
++        orderBy: { seq: 'asc' },
++      });
++      const manifest =
++        room?.appId != null && room.manifestVersion != null
++          ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
++          : undefined;
++      const snapshot: RoomSnapshot = {
++        events: this.projection.projectEvents(events, level),
++        appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
++      };
++      // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
++      // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
++      // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
++      // индексов не возникает.
++      this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
++      await socket.join(roomChannel(roomId));
++      if (level === 'organizer') await socket.join(organizerChannel(roomId));
++      ack({ ok: true, snapshot });
++    } catch (err) {
++      ack({ code: this.wireCodeOf(err) });
+     }
+-    // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
+-    const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
+-    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+-    const events = await this.prisma.logEvent.findMany({
+-      where: { roomId },
+-      orderBy: { seq: 'asc' },
+-    });
+-    const manifest =
+-      room?.appId != null && room.manifestVersion != null
+-        ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
+-        : undefined;
+-    const snapshot: RoomSnapshot = {
+-      events: this.projection.projectEvents(events, level),
+-      appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
+-    };
+-    // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
+-    // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
+-    // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
+-    // индексов не возникает.
+-    this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
+-    await socket.join(roomChannel(roomId));
+-    if (level === 'organizer') await socket.join(organizerChannel(roomId));
+-    ack({ ok: true, snapshot });
+   }
+ 
+   async handlePublish(socket: Socket, payload: unknown, ack: Ack<PublishOkAck>): Promise<void> {
+     const parsed = publishRequestSchema.safeParse(payload);
+     if (!parsed.success) {
+       ack({ code: 'REQUEST_INVALID' });
+       return;
+     }
+     // roomId — из подписки, actorId — из claims: из payload не берётся ничего,
+     // кроме данных самого события (REQ-RT-009, design §5).

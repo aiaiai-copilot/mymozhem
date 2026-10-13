@@ -1,0 +1,623 @@
+# Review package: 0f16856..b9cf868
+
+## Commits
+b9cf868 feat(core): серверные псевдонимы гостей (ADR-012 §3) — displayName необязателен, генератор «Лиса-42» с retry по ростеру, join-ответ несёт фактическое имя
+
+## Files changed
+ apps/server/test/lottery.e2e-spec.ts               |  4 +--
+ apps/server/test/quiz-points.e2e-spec.ts           |  4 +--
+ apps/server/test/quiz.e2e-spec.ts                  |  4 +--
+ apps/server/test/realtime.e2e-spec.ts              |  6 ++--
+ apps/server/test/transport.e2e-spec.ts             | 20 ++++++++++---
+ .../src/membership/membership.service.int-spec.ts  | 22 ++++++++++++++
+ packages/core/src/membership/membership.service.ts | 29 +++++++++++++++---
+ packages/core/src/membership/pseudonym.spec.ts     | 29 ++++++++++++++++++
+ packages/core/src/membership/pseudonym.ts          | 35 ++++++++++++++++++++++
+ packages/core/src/transport/join.controller.ts     | 17 +++++++----
+ 10 files changed, 148 insertions(+), 22 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/lottery.e2e-spec.ts b/apps/server/test/lottery.e2e-spec.ts
+index 9da0c6c..b7cc63f 100644
+--- a/apps/server/test/lottery.e2e-spec.ts
++++ b/apps/server/test/lottery.e2e-spec.ts
+@@ -1,17 +1,17 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
+-import { REALTIME_MESSAGES, tokenResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
++import { REALTIME_MESSAGES, joinResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
+ import { LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION, type LotterySettings } from '@mymozhem/app-lottery';
+ import {
+   ConfigurableIoAdapter,
+   loadConfig,
+   RoomService,
+   seedIdentity,
+   startTestDb,
+   TEST_CONFIG,
+   TokenService,
+   type PrismaService,
+@@ -184,21 +184,21 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
+   async function joinGuest(
+     roomCode: string,
+     name: string,
+   ): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
+     const res = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: roomCode, displayName: name },
+     });
+     expect(res.statusCode).toBe(201);
+-    const { accessToken } = tokenResponseSchema.parse(res.json());
++    const { accessToken } = joinResponseSchema.parse(res.json());
+     const identityId = tokens.verifyAccessToken(accessToken).sub;
+     return { socket: await connect(port, accessToken), token: accessToken, identityId };
+   }
+ 
+   // REST с Bearer организатора: guest-claims (kind GUEST + roomId), роль ORGANIZER
+   // берётся из membership — прецедент transport.e2e-spec.ts:362-367.
+   async function organizerRestToken(roomId: string): Promise<string> {
+     return (await tokens.issueGuestTokens(ORG, roomId)).accessToken;
+   }
+ 
+diff --git a/apps/server/test/quiz-points.e2e-spec.ts b/apps/server/test/quiz-points.e2e-spec.ts
+index 8670f83..cbd003a 100644
+--- a/apps/server/test/quiz-points.e2e-spec.ts
++++ b/apps/server/test/quiz-points.e2e-spec.ts
+@@ -1,17 +1,17 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
+-import { REALTIME_MESSAGES, tokenResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
++import { REALTIME_MESSAGES, joinResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
+ import { QUIZ_APP_ID, QUIZ_MANIFEST_VERSION, type QuizSettings } from '@mymozhem/app-quiz';
+ import {
+   ConfigurableIoAdapter,
+   loadConfig,
+   RoomService,
+   seedIdentity,
+   startTestDb,
+   TEST_CONFIG,
+   TokenService,
+   type PrismaService,
+@@ -186,21 +186,21 @@ describe('Quiz points ↔ rewards ledger (e2e, приёмка фазы 3)', () =
+   async function joinGuest(
+     roomCode: string,
+     name: string,
+   ): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
+     const res = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: roomCode, displayName: name },
+     });
+     expect(res.statusCode).toBe(201);
+-    const { accessToken } = tokenResponseSchema.parse(res.json());
++    const { accessToken } = joinResponseSchema.parse(res.json());
+     const identityId = tokens.verifyAccessToken(accessToken).sub;
+     return { socket: await connect(port, accessToken), token: accessToken, identityId };
+   }
+ 
+   async function organizerSocket(): Promise<ClientSocket> {
+     const issued = await tokens.issueRegisteredTokens(ORG);
+     return connect(port, issued.accessToken);
+   }
+ 
+   function subscribe(socket: ClientSocket, roomId: string): Promise<SubscribeAck> {
+diff --git a/apps/server/test/quiz.e2e-spec.ts b/apps/server/test/quiz.e2e-spec.ts
+index 8bb6ce5..94ad721 100644
+--- a/apps/server/test/quiz.e2e-spec.ts
++++ b/apps/server/test/quiz.e2e-spec.ts
+@@ -1,17 +1,17 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
+-import { REALTIME_MESSAGES, tokenResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
++import { REALTIME_MESSAGES, joinResponseSchema, type ProjectedEvent } from '@mymozhem/sdk';
+ import { QUIZ_APP_ID, QUIZ_MANIFEST_VERSION, type QuizSettings } from '@mymozhem/app-quiz';
+ import {
+   AppRuntimeService,
+   ConfigurableIoAdapter,
+   loadConfig,
+   RoomService,
+   seedIdentity,
+   startTestDb,
+   TEST_CONFIG,
+   TokenService,
+@@ -194,21 +194,21 @@ describe('Quiz (e2e, приёмка фазы 2)', () => {
+     roomCode: string,
+     name: string,
+     role?: 'spectator',
+   ): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
+     const res = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: roomCode, displayName: name, ...(role ? { role } : {}) },
+     });
+     expect(res.statusCode).toBe(201);
+-    const { accessToken } = tokenResponseSchema.parse(res.json());
++    const { accessToken } = joinResponseSchema.parse(res.json());
+     const identityId = tokens.verifyAccessToken(accessToken).sub;
+     return { socket: await connect(port, accessToken), token: accessToken, identityId };
+   }
+ 
+   // Организатор на ws: REGISTERED-токен без room-scope (прецедент realtime.e2e).
+   async function organizerSocket(): Promise<ClientSocket> {
+     const issued = await tokens.issueRegisteredTokens(ORG);
+     return connect(port, issued.accessToken);
+   }
+ 
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index 1fa6a80..c57ba15 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -1,17 +1,17 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+ import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
+-import { tokenResponseSchema, REALTIME_MESSAGES, type AppManifest, type AppRuntimeModule } from '@mymozhem/sdk';
++import { joinResponseSchema, REALTIME_MESSAGES, type AppManifest, type AppRuntimeModule } from '@mymozhem/sdk';
+ import {
+   APP_MANIFESTS,
+   APP_RUNTIME_MODULES,
+   AppRegistryService,
+   ConfigurableIoAdapter,
+   EventEmitLimiter,
+   EventLogService,
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+@@ -217,21 +217,21 @@ describe('Realtime (e2e)', () => {
+       manifestVersion: 1,
+       settings: { label: 'live', orgNote: 'o', answers: { r1: 2 } },
+     });
+     await roomService.activate(room.id, ORG);
+     const res = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: room.code, displayName: 'Гостя' },
+     });
+     expect(res.statusCode).toBe(201);
+-    const { accessToken } = tokenResponseSchema.parse(res.json());
++    const { accessToken } = joinResponseSchema.parse(res.json());
+     return { room, accessToken };
+   }
+ 
+   async function organizerToken(roomId: string): Promise<string> {
+     const issued = await tokens.issueGuestTokens(ORG, roomId);
+     return issued.accessToken;
+   }
+ 
+   it('late-join replay: snapshot несёт видимую проекцию без seq/visibility/cursor (критерий ф.1, REQ-RT-003/011a)', async () => {
+     const { room, accessToken } = await activeRoomWithGuest();
+@@ -440,21 +440,21 @@ describe('Realtime (e2e)', () => {
+       manifestVersion: 1,
+       settings: { label: 'live', orgNote: 'o', answers: { r1: 2 } },
+     });
+     await roomService.activate(room.id, ORG);
+     const joinRes = await app.inject({
+       method: 'POST',
+       url: '/rooms/join',
+       payload: { code: room.code, displayName: 'Гостя' },
+     });
+     expect(joinRes.statusCode).toBe(201);
+-    const { accessToken } = tokenResponseSchema.parse(joinRes.json());
++    const { accessToken } = joinResponseSchema.parse(joinRes.json());
+     const refreshCookie = joinRes.cookies.find((c) => c.name === 'mm_refresh');
+     expect(refreshCookie).toBeDefined();
+     const participantId = tokens.verifyAccessToken(accessToken).sub;
+ 
+     const socket = await connect(port, accessToken);
+     await emitAck(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+     const disconnected = new Promise<void>((resolve) => socket.on('disconnect', () => resolve()));
+ 
+     const orgToken = await organizerToken(room.id);
+     const res = await app.inject({
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index c893f82..f099f7e 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -1,16 +1,16 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+-import { tokenResponseSchema } from '@mymozhem/sdk';
++import { tokenResponseSchema, joinResponseSchema } from '@mymozhem/sdk';
+ import {
+   AppRegistryService,
+   EventEmitLimiter,
+   EventLogService,
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
+   MetricsService,
+   RealtimeBus,
+@@ -169,21 +169,23 @@ describe('Transport HTTP (e2e)', () => {
+       expect(res.headers['x-request-id']).toMatch(
+         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+       );
+     });
+ 
+     it('join happy path: 201, SDK-валидное тело, refresh-кука, access claims', async () => {
+       const room = await roomService.create(ORG);
+       const res = await join(app, { code: room.code, displayName: 'Саша' });
+       expect(res.statusCode).toBe(201); // Nest default для POST — пин осознанный
+       // Тело валидно по SDK-схеме — контракт на проводе (REQ-SEC-006, REQ-ID-016).
+-      const body = tokenResponseSchema.parse(res.json());
++      // ADR-012 §3: ответ join — JoinResponse (TokenResponse + фактический displayName).
++      const body = joinResponseSchema.parse(res.json());
++      expect(body.displayName).toBe('Саша');
+       // REQ-ID-008: refresh живёт только в httpOnly-куке, не в теле.
+       const setCookie = res.headers['set-cookie'];
+       const cookieHeader = (Array.isArray(setCookie) ? setCookie.join('; ') : setCookie) ?? '';
+       expect(cookieHeader).toContain('mm_refresh=');
+       expect(cookieHeader).toContain('HttpOnly');
+       expect(cookieHeader).toContain('SameSite=Strict');
+       expect(cookieHeader).toContain('Path=/auth');
+       // Secure — только в production; e2e гоняется не в production → флага нет.
+       expect(cookieHeader).not.toContain('Secure');
+       const claims = tokens.verifyAccessToken(body.accessToken);
+@@ -201,25 +203,35 @@ describe('Transport HTTP (e2e)', () => {
+       const room = await roomService.create(ORG);
+       await db.prisma.room.update({ where: { id: room.id }, data: { joinPolicy: 'REGISTERED' } });
+       const resWrong = await join(app, { code: 'zzzzzzzz', displayName: 'A' });
+       const resClosed = await join(app, { code: room.code, displayName: 'A' });
+       // Неразличимость на проводе: статус и тело — байт-в-байт.
+       expect(resClosed.statusCode).toBe(resWrong.statusCode);
+       expect(resClosed.body).toBe(resWrong.body);
+     });
+ 
+     it('невалидное тело → 400 {code: REQUEST_INVALID}', async () => {
+-      const res = await join(app, { code: 'ABCDEFGH' }); // нет displayName
++      // ADR-012 §3: отсутствие displayName — НЕ ошибка (сервер назначит псевдоним),
++      // поэтому 400 проверяется на по-настоящему невалидном теле (пустое имя).
++      const res = await join(app, { code: 'ABCDEFGH', displayName: '' });
+       expect(res.statusCode).toBe(400);
+       expect(res.json()).toEqual({ code: 'REQUEST_INVALID' });
+     });
+ 
++    it('join без displayName → 201, сервер назначает псевдоним (ADR-012 §3, Review Focus 2)', async () => {
++      const room = await roomService.create(ORG);
++      const res = await join(app, { code: room.code }); // displayName не передан
++      expect(res.statusCode).toBe(201); // 400 быть не должно
++      const body = joinResponseSchema.parse(res.json());
++      expect(body.displayName).toMatch(/^[А-ЯЁ][а-яё]+-\d+$/);
++    });
++
+     it('refresh happy: ротация; повтор старого → 401 и ревок всего семейства (REQ-ID-007)', async () => {
+       const room = await roomService.create(ORG);
+       const joinRes = await join(app, { code: room.code, displayName: 'Гость' });
+       expect(joinRes.statusCode).toBe(201);
+       const oldCookie = refreshCookieOf(joinRes);
+ 
+       const rotated = await refresh(app, oldCookie);
+       expect(rotated.statusCode).toBe(200); // пин осознанный (@HttpCode(200))
+       tokenResponseSchema.parse(rotated.json());
+       const newCookie = refreshCookieOf(rotated);
+@@ -375,21 +387,21 @@ describe('Transport HTTP (e2e)', () => {
+     async function organizerToken(roomId: string, organizer: string = ORG): Promise<string> {
+       const issued = await tokens.issueGuestTokens(organizer, roomId);
+       return issued.accessToken;
+     }
+ 
+     // Комната + вошедший по HTTP гость; возвращает id гостя и токен организатора.
+     async function roomWithGuest() {
+       const room = await roomService.create(ORG);
+       const joinRes = await join(app, { code: room.code, displayName: 'Гость' });
+       expect(joinRes.statusCode).toBe(201);
+-      const { accessToken } = tokenResponseSchema.parse(joinRes.json());
++      const { accessToken } = joinResponseSchema.parse(joinRes.json());
+       const guestId = tokens.verifyAccessToken(accessToken).sub;
+       return { room, guestId, guestToken: accessToken };
+     }
+ 
+     it('без Bearer → 401 SESSION_INVALID', async () => {
+       const room = await roomService.create(ORG);
+       const res = await exclude(app, room.id, STRANGER);
+       expect(res.statusCode).toBe(401);
+       expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
+     });
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 4b87621..be2fce2 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -81,20 +81,42 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   it('joins a DRAFT room by code + name (REQ-ID-003)', async () => {
+     const room = await roomService.create(ORG);
+     const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+     expect(result.identity.kind).toBe('GUEST');
+     expect(result.identity.displayName).toBe('Саша');
+     expect(result.membership.roomId).toBe(room.id);
+     expect(result.membership.identityId).toBe(result.identity.id);
+     expect(result.membership.role).toBe('PARTICIPANT');
+   });
+ 
++  it('join без displayName: сервер назначает псевдоним «Слово-NN» (ADR-012 §3, Review Focus 2)', async () => {
++    const room = await roomService.create(ORG);
++    const result = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.1' });
++    expect(result.identity.displayName).toMatch(/^[А-ЯЁ][а-яё]+-\d+$/);
++    // JoinResult несёт фактическое имя — то же, что записано в identity.
++    expect(result.displayName).toBe(result.identity.displayName);
++  });
++
++  it('два безымянных гостя получают РАЗНЫЕ псевдонимы в одной комнате', async () => {
++    const room = await roomService.create(ORG);
++    const a = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.2' });
++    const b = await makeMembership().join({ code: room.code, displayName: undefined, ip: '10.0.0.3' });
++    expect(a.identity.displayName).not.toBe(b.identity.displayName);
++  });
++
++  it('заданное имя проходит без изменений (свободный ввод сохранён)', async () => {
++    const room = await roomService.create(ORG);
++    const result = await makeMembership().join({ code: room.code, displayName: 'Маша', ip: '10.0.0.4' });
++    expect(result.identity.displayName).toBe('Маша');
++    expect(result.displayName).toBe('Маша');
++  });
++
+   it('stores joinIp on the membership row (REQ-ID-006 rejoin-блок)', async () => {
+     const room = await roomService.create(ORG);
+     const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+     const row = await db.prisma.membership.findUnique({ where: { id: result.membership.id } });
+     expect(row?.joinIp).toBe(IP);
+   });
+ 
+   it('findActiveMembership returns null for a soft-deleted membership (REQ-SEC-003)', async () => {
+     const room = await roomService.create(ORG);
+     const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+diff --git a/packages/core/src/membership/membership.service.ts b/packages/core/src/membership/membership.service.ts
+index 64a3035..2435f34 100644
+--- a/packages/core/src/membership/membership.service.ts
++++ b/packages/core/src/membership/membership.service.ts
+@@ -1,32 +1,36 @@
+ import { Inject, Injectable } from '@nestjs/common';
+ import type { Identity, MemberRole, Membership, Prisma } from '@prisma/client';
+ import { displayNameSchema, type DrawPoolEntry } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { PinoLogger } from '../observability/pino-logger.module';
+ import { JoinRateLimiter } from './join-rate-limiter';
++import { generatePseudonym } from './pseudonym';
+ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+   TargetNotExcludableError,
+   TargetNotMemberError,
+ } from './membership.errors';
+ 
+ export interface JoinResult {
+   membership: Membership;
+   identity: Identity;
++  // Фактическое имя — заданное гостем или назначенный сервером псевдоним (ADR-012 §3);
++  // join-ответ отдаёт его клиенту для авто-rejoin (потребитель — join-form).
++  displayName: string;
+ }
+ 
+ // void | Promise<void>: sync-обработчики (RealtimeGateway.revokeRoomAccess) остаются
+ // совместимыми; async-обработчик тоже легален — его rejection изолируется в exclude.
+ export type AccessRevokedHandler = (identityId: string, roomId: string) => void | Promise<void>;
+ 
+ @Injectable()
+ export class MembershipService {
+   constructor(
+     private readonly prisma: PrismaService,
+@@ -183,30 +187,34 @@ export class MembershipService {
+         role: 'PARTICIPANT',
+         deletedAt: null,
+         room: { deletedAt: null },
+         identity: { deletedAt: null }, // P2: swept-гость (TTL-анонимизация) вне пула розыгрыша
+       },
+       select: { identityId: true, identity: { select: { kind: true } } },
+     });
+     return rows.map((r) => ({ identityId: r.identityId, kind: r.identity.kind }));
+   }
+ 
+-  // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
++  // Guest join by room code (REQ-ID-003; уточнение амендмента v1.5 / ADR-012 §3:
++  // displayName необязателен — безымянному гостю сервер назначает псевдоним).
++  // Порядок проверок значим (design §3):
+   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
+   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
+   // в один ROOM_JOIN_DENIED (REQ-ID-013).
+-  async join(params: { code: string; displayName: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
++  async join(params: { code: string; displayName?: string; ip: string; role?: 'participant' | 'spectator' }): Promise<JoinResult> {
+     if (!this.joinRateLimiter.tryAcquire(params.ip)) {
+       throw new JoinRateLimitedError('Join rate limit exceeded');
+     }
++    // Ранняя валидация — только заданного имени (до tx); отсутствие имени — не ошибка,
++    // а сигнал к генерации псевдонима внутри tx (ADR-012 §3).
+     // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
+-    const name = displayNameSchema.parse(params.displayName);
++    const providedName = params.displayName === undefined ? undefined : displayNameSchema.parse(params.displayName);
+ 
+     const room = await this.prisma.room.findUnique({ where: { code: params.code } });
+     if (!room) {
+       throw new RoomJoinDeniedError('no room for code');
+     }
+     if (room.deletedAt !== null) {
+       throw new RoomJoinDeniedError(`room ${room.id} deleted`);
+     }
+     if (room.status === 'COMPLETED' || room.status === 'CANCELLED') {
+       throw new RoomJoinDeniedError(`room ${room.id} status ${room.status}`);
+@@ -234,25 +242,38 @@ export class MembershipService {
+     if (params.role !== 'spectator') {
+       const participantCount = await this.prisma.membership.count({
+         where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
+       });
+       if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
+         throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
+       }
+     }
+ 
+     return this.prisma.$transaction(async (tx) => {
++      // Псевдоним генерируется ВНУТРИ tx: чтение ростера и createGuest в одной
++      // транзакции — retry видит свежие join этого же запроса.
++      const name = providedName ?? generatePseudonym(await this.takenDisplayNames(tx, room.id));
+       const identity = await this.identity.createGuest(name, tx);
+       const membership = await tx.membership.create({
+         data: {
+           roomId: room.id,
+           identityId: identity.id,
+           joinIp: params.ip,
+           // REQ-ID-011: самоназначение зрителем (фаза 2). Только два wire-значения
+           // (SDK-схема), маппинг здесь — единственная точка.
+           role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
+         },
+       });
+-      return { membership, identity };
++      return { membership, identity, displayName: name };
+     });
+   }
++
++  // Имена активного ростера комнаты — для retry псевдонима (решение §0.1).
++  // Чтение в той же tx, что и создание гостя: видим свежие join этого запроса.
++  private async takenDisplayNames(tx: Prisma.TransactionClient, roomId: string): Promise<Set<string>> {
++    const rows = await tx.membership.findMany({
++      where: { roomId, deletedAt: null },
++      select: { identity: { select: { displayName: true } } },
++    });
++    return new Set(rows.map((r) => r.identity.displayName).filter((n): n is string => n !== null));
++  }
+ }
+diff --git a/packages/core/src/membership/pseudonym.spec.ts b/packages/core/src/membership/pseudonym.spec.ts
+new file mode 100644
+index 0000000..c9d526c
+--- /dev/null
++++ b/packages/core/src/membership/pseudonym.spec.ts
+@@ -0,0 +1,29 @@
++import { generatePseudonym } from './pseudonym';
++
++// Детерминизм — инжекцией rnd (bound) => number. sequence([...]) отдаёт значения по кругу.
++const sequence = (values: number[]) => {
++  let i = 0;
++  return () => values[i++ % values.length];
++};
++
++describe('generatePseudonym (ADR-012 §3)', () => {
++  it('формат «Слово-NN»: словарное существительное + число 10–99', () => {
++    const name = generatePseudonym(new Set(), sequence([0, 32]));
++    expect(name).toMatch(/^[А-ЯЁ][а-яё]+-\d{2}$/);
++  });
++  it('retry при коллизии с активным ростером', () => {
++    const first = generatePseudonym(new Set(), sequence([0, 42]));
++    const second = generatePseudonym(new Set([first]), sequence([0, 42, 1, 42]));
++    expect(second).not.toBe(first);
++  });
++  it('исчерпание 10–99 по слову ведёт к расширению диапазона 100–999', () => {
++    // Ruling контроллера B-pre.2: слово НЕ хардкодится — словарь начинается с
++    // «Барсук», дословный «Лиса»-пин брифа был бы красным. Выбранное rnd=[0,0]
++    // существительное выводится пробным вызовом, exhaustion-сет строится для него.
++    const probe = generatePseudonym(new Set(), sequence([0, 0]));
++    const word = probe.slice(0, probe.indexOf('-'));
++    const taken = new Set(Array.from({ length: 90 }, (_, i) => `${word}-${10 + i}`));
++    const name = generatePseudonym(taken, sequence([0, 0]));
++    expect(name).toMatch(new RegExp(`^${word}-(1\\d\\d|\\d{4})$`));
++  });
++});
+diff --git a/packages/core/src/membership/pseudonym.ts b/packages/core/src/membership/pseudonym.ts
+new file mode 100644
+index 0000000..92a8b9f
+--- /dev/null
++++ b/packages/core/src/membership/pseudonym.ts
+@@ -0,0 +1,35 @@
++import { randomInt } from 'node:crypto';
++
++// Серверные псевдонимы гостей (ADR-012 §3, уточнение REQ-ID-003): система не
++// требует реального имени ни в одном сценарии. Словарь — константа (решение
++// §0.1 дизайна); случайность — crypto.randomInt, НЕ Math.random (дух REQ-RWD-011).
++const NOUNS = [
++  'Барсук', 'Белка', 'Ворона', 'Выдра', 'Ёж', 'Журавль', 'Заяц', 'Иволга', 'Кабан', 'Коза',
++  'Коршун', 'Кошка', 'Куница', 'Ласка', 'Лиса', 'Лось', 'Мангуст', 'Медведь', 'Нерпа', 'Олень',
++  'Орлан', 'Панда', 'Песец', 'Рысь', 'Сайга', 'Соболь', 'Сорока', 'Тигр', 'Уж', 'Филин',
++  'Хорёк', 'Цапля', 'Чайка', 'Шакал', 'Щегол', 'Ястреб', 'Бобр', 'Гусь', 'Дрофа', 'Енот',
++  'Жерех', 'Зубр', 'Крот', 'Лебедь', 'Мартышка', 'Ондатра', 'Пума', 'Росомаха', 'Сокол', 'Тюлень',
++] as const;
++
++export type RandomInt = (bound: number) => number;
++
++// Уникальность — в рамках комнаты (пересечение с активным ростером — retry).
++// 5 попыток «Слово-NN» (10–99), затем расширение «Слово-NNN» (100–999);
++// теоретическое исчерпание — детерминированный скан suffix от 10 вверх
++// (всегда терминирует; на практике недостижим — 50 слов × 990 номеров).
++export function generatePseudonym(taken: ReadonlySet<string>, rnd: RandomInt = randomInt): string {
++  const word = () => NOUNS[rnd(NOUNS.length)];
++  for (let attempt = 0; attempt < 5; attempt++) {
++    const candidate = `${word()}-${10 + rnd(90)}`;
++    if (!taken.has(candidate)) return candidate;
++  }
++  for (let attempt = 0; attempt < 5; attempt++) {
++    const candidate = `${word()}-${100 + rnd(900)}`;
++    if (!taken.has(candidate)) return candidate;
++  }
++  const base = word();
++  for (let suffix = 10; ; suffix++) {
++    const candidate = `${base}-${suffix}`;
++    if (!taken.has(candidate)) return candidate;
++  }
++}
+diff --git a/packages/core/src/transport/join.controller.ts b/packages/core/src/transport/join.controller.ts
+index b3b482a..9c106da 100644
+--- a/packages/core/src/transport/join.controller.ts
++++ b/packages/core/src/transport/join.controller.ts
+@@ -1,12 +1,12 @@
+ import { Body, Controller, Inject, Post, Req, Res } from '@nestjs/common';
+-import { joinRequestSchema, type TokenResponse } from '@mymozhem/sdk';
++import { joinRequestSchema, type JoinResponse } from '@mymozhem/sdk';
+ import { MembershipService } from '../membership/membership.service';
+ import { TokenService } from '../auth/token.service';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { setRefreshCookie } from './refresh-cookie';
+ import type { ReplyLike, RequestLike } from './http.types';
+ 
+ @Controller()
+ export class JoinController {
+   constructor(
+@@ -16,18 +16,25 @@ export class JoinController {
+   ) {}
+ 
+   // actorId НЕ принимается из payload — актор определяется только выданным токеном
+   // (REQ-RT-009 по духу для HTTP). ZodError/доменные ошибки уходят в фильтр —
+   // контроллер статусов не знает (design §5).
+   @Post('rooms/join')
+   async join(
+     @Body() body: unknown,
+     @Req() req: RequestLike,
+     @Res({ passthrough: true }) reply: ReplyLike,
+-  ): Promise<TokenResponse> {
++  ): Promise<JoinResponse> {
+     const { code, displayName, role } = joinRequestSchema.parse(body);
+-    const { identity, membership } = await this.membership.join({ code, displayName, role, ip: req.ip });
+-    const issued = await this.tokens.issueGuestTokens(identity.id, membership.roomId);
++    const result = await this.membership.join({ code, displayName, role, ip: req.ip });
++    const issued = await this.tokens.issueGuestTokens(result.identity.id, result.membership.roomId);
+     setRefreshCookie(reply, issued.refreshToken, this.config, issued.kind);
+-    return { accessToken: issued.accessToken, tokenType: 'Bearer', expiresIn: issued.expiresIn };
++    // displayName — фактический (заданный или серверный псевдоним, ADR-012 §3):
++    // клиент сохраняет его для авто-rejoin (потребитель — join-form).
++    return {
++      accessToken: issued.accessToken,
++      tokenType: 'Bearer',
++      expiresIn: issued.expiresIn,
++      displayName: result.displayName,
++    };
+   }
+ }

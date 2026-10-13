@@ -1,0 +1,244 @@
+# Review package: 670e10d..56636cb
+
+## Commits
+56636cb feat(sdk): contract version = SDK version, with range satisfaction (REQ-CTR-004)
+
+## Files changed
+ packages/sdk/package.json                          |  8 +++-
+ packages/sdk/src/contract-version.contract.spec.ts | 50 ++++++++++++++++++++++
+ packages/sdk/src/contract-version.ts               | 33 ++++++++++++++
+ packages/sdk/src/index.ts                          |  1 +
+ pnpm-lock.yaml                                     | 11 +++++
+ 5 files changed, 101 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index e49c147..75a2a53 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,21 +1,25 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "0.0.0",
++  "version": "1.0.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+-  "dependencies": { "zod": "^4.0.0" },
++  "dependencies": {
++    "semver": "^7.8.5",
++    "zod": "^4.0.0"
++  },
+   "devDependencies": {
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
++    "@types/semver": "^7.7.1",
+     "jest": "^29.7.0",
+     "ts-jest": "^29.2.5",
+     "typescript": "^5.7.0"
+   }
+ }
+diff --git a/packages/sdk/src/contract-version.contract.spec.ts b/packages/sdk/src/contract-version.contract.spec.ts
+new file mode 100644
+index 0000000..a871d6c
+--- /dev/null
++++ b/packages/sdk/src/contract-version.contract.spec.ts
+@@ -0,0 +1,50 @@
++import { readFileSync } from 'node:fs';
++import { join } from 'node:path';
++import { valid } from 'semver';
++import {
++  CONTRACT_VERSION,
++  assertContractRangeSatisfied,
++  isContractRangeSatisfied,
++} from './contract-version';
++import { ContractError } from './errors/error-codes';
++
++describe('contract version', () => {
++  it('is a valid semver version', () => {
++    expect(valid(CONTRACT_VERSION)).not.toBeNull();
++  });
++
++  // REQ-CTR-004: "Версия SDK = версия контракта". Two sources of the same truth
++  // drift; this test is what keeps them one.
++  it('equals the SDK package version', () => {
++    const pkg = JSON.parse(
++      readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
++    ) as { version: string };
++    expect(pkg.version).toBe(CONTRACT_VERSION);
++  });
++
++  it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
++    expect(isContractRangeSatisfied(range)).toBe(true);
++  });
++
++  it.each(['^2.0.0', '>=1.5.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
++    expect(isContractRangeSatisfied(range)).toBe(false);
++  });
++
++  it.each(['garbage!!', '', 'not-a-range', '*'])(
++    'rejects a range that constrains nothing or is malformed: %s',
++    (range) => {
++      expect(isContractRangeSatisfied(range)).toBe(false);
++    },
++  );
++
++  it('asserts with a typed error the core can return outward', () => {
++    expect(() => assertContractRangeSatisfied('^1.0.0')).not.toThrow();
++    try {
++      assertContractRangeSatisfied('^2.0.0');
++      throw new Error('should have thrown');
++    } catch (err) {
++      expect(err).toBeInstanceOf(ContractError);
++      expect((err as ContractError).code).toBe('CONTRACT_VERSION_INCOMPATIBLE');
++    }
++  });
++});
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+new file mode 100644
+index 0000000..b1c587d
+--- /dev/null
++++ b/packages/sdk/src/contract-version.ts
+@@ -0,0 +1,33 @@
++import { satisfies, validRange } from 'semver';
++import { ContractError } from './errors/error-codes';
++
++// The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
++// contract version — packages/sdk/package.json is kept equal to this by a contract
++// test. Versioning from day one is the enforcement mechanism of the boundary, not
++// preparation for a future consumer (ADR-002).
++export const CONTRACT_VERSION = '1.0.0';
++
++// A manifest declares the range of contract versions it is compatible with; the
++// core checks it at registration (REQ-CTR-004). We normalize the range with semver
++// before judging it, rather than pattern-matching the input spelling: many strings
++// normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
++// normalized form catches all of them instead of an incomplete enumeration of
++// spellings. A range that constrains nothing has not declared compatibility — it has
++// opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
++// range that fails to parse at all. It never silently passes as "no constraint".
++export const isContractRangeSatisfied = (range: string): boolean => {
++  const normalized = validRange(range);
++  if (normalized === null || normalized === '*') return false;
++  return satisfies(CONTRACT_VERSION, range);
++};
++
++// Exported so the registration service in the later core plan cannot express this
++// check any other way than with the typed error the norm requires.
++export const assertContractRangeSatisfied = (range: string): void => {
++  if (!isContractRangeSatisfied(range)) {
++    throw new ContractError(
++      'CONTRACT_VERSION_INCOMPATIBLE',
++      `manifest requires contract range "${range}", core provides ${CONTRACT_VERSION}`,
++    );
++  }
++};
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index c91f13c..54cd093 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -1,9 +1,10 @@
++export * from './contract-version';
+ export * from './errors/error-codes';
+ export * from './visibility/visibility';
+ export * from './visibility/visibility.fixtures';
+ export * from './events/event-type';
+ export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
+ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index cab6ecc..5d9d4ed 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -123,30 +123,36 @@ importers:
+         version: 7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
+   packages/sdk:
+     dependencies:
++      semver:
++        specifier: ^7.8.5
++        version: 7.8.5
+       zod:
+         specifier: ^4.0.0
+         version: 4.4.3
+     devDependencies:
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/node':
+         specifier: ^24.0.0
+         version: 24.13.3
++      '@types/semver':
++        specifier: ^7.7.1
++        version: 7.7.1
+       jest:
+         specifier: ^29.7.0
+         version: 29.7.0(@types/node@24.13.3)
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
+@@ -800,20 +806,23 @@ packages:
+ 
+   '@types/node@24.13.3':
+     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+ 
+   '@types/pg@8.20.0':
+     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
+ 
+   '@types/react@19.2.17':
+     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
+ 
++  '@types/semver@7.7.1':
++    resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
++
+   '@types/stack-utils@2.0.3':
+     resolution: {integrity: sha512-9aEbYZ3TbYMznPdcdr3SmIrLXwC/AKZXQeCf9Pgao5CKb8CyHuEX5jzWPTkvregvhRJHcpRO6BFoGW9ycaOkYw==}
+ 
+   '@types/yargs-parser@21.0.3':
+     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
+ 
+   '@types/yargs@17.0.35':
+     resolution: {integrity: sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==}
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0':
+@@ -3286,20 +3295,22 @@ snapshots:
+   '@types/pg@8.20.0':
+     dependencies:
+       '@types/node': 24.13.3
+       pg-protocol: 1.15.0
+       pg-types: 2.2.0
+ 
+   '@types/react@19.2.17':
+     dependencies:
+       csstype: 3.2.3
+ 
++  '@types/semver@7.7.1': {}
++
+   '@types/stack-utils@2.0.3': {}
+ 
+   '@types/yargs-parser@21.0.3': {}
+ 
+   '@types/yargs@17.0.35':
+     dependencies:
+       '@types/yargs-parser': 21.0.3
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0(@typescript-eslint/parser@8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
+     dependencies:

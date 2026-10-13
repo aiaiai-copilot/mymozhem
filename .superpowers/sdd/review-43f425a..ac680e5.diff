@@ -1,0 +1,74 @@
+# Review package: 43f425a..ac680e5
+
+## Commits
+ac680e5 ci: lint/typecheck/test/build + boundary-check + guardrails on every PR (REQ-DEV-001)
+
+## Files changed
+ .github/workflows/ci.yml | 31 +++++++++++++++++++++++++++++++
+ package.json             |  1 +
+ 2 files changed, 32 insertions(+)
+
+## Diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..491fe2f
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,31 @@
++name: CI
++on:
++  push:
++    branches: [main]
++  pull_request:
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: pnpm/action-setup@v4
++        with:
++          version: 11.1.3
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 24
++          cache: pnpm
++      - run: pnpm install --frozen-lockfile
++      - run: pnpm exec prisma generate
++        env:
++          # CI-only placeholder so prisma.config.ts's env('DATABASE_URL') resolves
++          # during config loading. `prisma generate` does not connect to a DB;
++          # mirrors the same placeholder used in the Dockerfile build stage.
++          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
++      - run: pnpm run typecheck
++      - run: pnpm run lint
++      - run: pnpm run test
++      - run: pnpm run build
++      - run: pnpm run boundary-check
++      - run: pnpm run guardrails
+diff --git a/package.json b/package.json
+index b39bd60..9f6b974 100644
+--- a/package.json
++++ b/package.json
+@@ -1,20 +1,21 @@
+ {
+   "name": "mymozhem",
+   "private": true,
+   "packageManager": "pnpm@11.1.3",
+   "engines": { "node": ">=24" },
+   "scripts": {
+     "build": "turbo run build",
+     "lint": "turbo run lint",
+     "typecheck": "turbo run typecheck",
+     "test": "turbo run test",
++    "boundary-check": "depcruise apps packages --config .dependency-cruiser.cjs",
+     "guardrails": "node scripts/verify-guardrails.mjs"
+   },
+   "devDependencies": {
+     "@eslint/js": "^9.17.0",
+     "dependency-cruiser": "^16.5.0",
+     "dotenv": "^16.4.0",
+     "eslint": "^9.17.0",
+     "prisma": "^7.6.0",
+     "turbo": "^2.3.0",
+     "typescript": "^5.7.0",

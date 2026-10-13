@@ -1,0 +1,714 @@
+# Review package: 934ae8b..82ea28b
+
+## Commits
+82ea28b feat(server): wire observability — /metrics, pino system logger, e2e acceptance (REQ-OPS-004)
+
+## Files changed
+ apps/server/package.json                           |  1 +
+ apps/server/src/app.module.ts                      |  2 +
+ apps/server/src/main.ts                            |  3 ++
+ apps/server/test/realtime.e2e-spec.ts              | 54 +++++++++++++++++++++-
+ apps/server/test/transport.e2e-spec.ts             |  9 ++++
+ .../src/observability/observability.int-spec.ts    | 47 ++++++++++++++++++-
+ .../core/src/observability/observability.module.ts |  7 ++-
+ .../core/src/observability/pino-logger.module.ts   | 41 ++++++++++++++--
+ .../core/src/observability/pino-options.spec.ts    | 15 +++++-
+ .../src/transport/http-exception.filter.spec.ts    | 12 +++--
+ .../core/src/transport/http-exception.filter.ts    |  9 ++--
+ pnpm-lock.yaml                                     | 10 ++++
+ 12 files changed, 193 insertions(+), 17 deletions(-)
+
+## Diff
+diff --git a/apps/server/package.json b/apps/server/package.json
+index a6fbbc5..9a8d2f5 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -17,20 +17,21 @@
+     "@fastify/helmet": "^13.1.0",
+     "@fastify/static": "^9.3.0",
+     "@mymozhem/app-lottery": "workspace:*",
+     "@mymozhem/app-quiz": "workspace:*",
+     "@mymozhem/core": "workspace:*",
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-fastify": "^11.0.0",
+     "@nestjs/schedule": "^6.1.3",
++    "nestjs-pino": "^4.6.1",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
+     "jest": "^29.7.0",
+     "socket.io-client": "^4.8.3",
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 84f7425..7f788fa 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -2,35 +2,37 @@ import { Module } from '@nestjs/common';
+ import { ScheduleModule } from '@nestjs/schedule';
+ import { createQuizApp } from '@mymozhem/app-quiz';
+ import { createLotteryApp } from '@mymozhem/app-lottery';
+ import {
+   AppRegistryModule,
+   AppRuntimeModule,
+   HealthModule,
+   IdentityModule,
+   IdentitySweepModule,
+   MembershipModule,
++  ObservabilityModule,
+   PrismaModule,
+   RealtimeModule,
+   RewardsModule,
+   RoomModule,
+   TransportModule,
+ } from '@mymozhem/core';
+ import { AnonymizationGuardsModule } from './anonymization-guards.module';
+ 
+ const quiz = createQuizApp();
+ const lottery = createLotteryApp();
+ 
+ @Module({
+   imports: [
+     PrismaModule,
+     HealthModule,
++    ObservabilityModule, // REQ-OPS-004: /metrics + pino (requestId, логи запросов)
+     ScheduleModule.forRoot(), // REQ-ID-010: регламентные джобы; одна реплика (REQ-OPS-005)
+     AppRegistryModule.register([quiz.manifest, lottery.manifest]),
+     AppRuntimeModule.register([quiz.runtime, lottery.runtime]),
+     RoomModule,
+     IdentityModule,
+     MembershipModule,
+     RealtimeModule,
+     TransportModule,
+     RewardsModule, // global: AWARD_EFFECT_HANDLER для app-runtime (REQ-RWD-001)
+     IdentitySweepModule, // TTL-свип гостей (REQ-ID-003/014) с приостановкой (REQ-RWD-013)
+diff --git a/apps/server/src/main.ts b/apps/server/src/main.ts
+index fa8bec2..d5db28f 100644
+--- a/apps/server/src/main.ts
++++ b/apps/server/src/main.ts
+@@ -1,30 +1,33 @@
+ import 'reflect-metadata';
+ import { NestFactory } from '@nestjs/core';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
++import { Logger } from 'nestjs-pino';
+ import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
+ import { AppModule } from './app.module';
+ import { registerStaticWeb } from './static-web';
+ 
+ async function bootstrap(): Promise<void> {
+   // REQ-SEC-002: конфиг (включая JWT_SECRET) валидируется до создания приложения —
+   // старт с невалидным env невозможен (fail-closed, REQ-OPS-003).
+   const config = loadConfig(process.env);
+   // trustProxy — осознанное доверие X-Forwarded-For из конфига деплоя (REQ-ID-006,
+   // parked minor): при false req.ip — непосредственный peer, XFF игнорируется.
+   const app = await NestFactory.create<NestFastifyApplication>(
+     AppModule,
+     new FastifyAdapter({ trustProxy: config.TRUST_PROXY }),
+   );
++  // REQ-OPS-004: системные логи Nest — тоже через pino (единая стека).
++  app.useLogger(app.get(Logger));
+   // Обязателен: transport-контроллеры читают req.cookies по структурному типу —
+   // без плагина refresh вернёт 500 вместо 401.
+   await app.register(fastifyCookie);
+   await app.register(fastifyHelmet);
+   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
+   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
+   // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
+   // HTTP-сервер передаём явно: Nest не инжектирует его в пользовательский адаптер.
+   app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
+   // Явный init до раздачи статики: корневой not-found handler Nest встаёт в
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index 238c4a6..cdd7e48 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -15,20 +15,21 @@ import {
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
+   MetricsService,
+   RealtimeBus,
+   RealtimeGateway,
+   RoomService,
+   TEST_CONFIG,
+   TokenService,
++  fakeLogger,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+   type TestDb,
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ 
+ jest.setTimeout(180_000);
+ 
+ // RFC 9562-валидный v4 UUID: z.uuid() (zod v4) отклоняет версию 0, поэтому
+@@ -139,20 +140,26 @@ function connect(port: number, token: string): Promise<ClientSocket> {
+ }
+ 
+ function emitAck<T>(socket: ClientSocket, event: string, payload: unknown): Promise<T> {
+   return new Promise((resolve) => socket.emit(event, payload, (res: T) => resolve(res)));
+ }
+ 
+ function waitEvent<T>(socket: ClientSocket, event: string): Promise<T> {
+   return new Promise((resolve) => socket.once(event, (data: T) => resolve(data)));
+ }
+ 
++// Значение числовой серии формата `<name>{<label>="<value>"} N`; отсутствие — 0.
++function metricSeriesCount(body: string, name: string, label: string, value: string): number {
++  const match = body.match(new RegExp(`^${name}\\{${label}="${value}"\\} (\\d+)$`, 'm'));
++  return match === null ? 0 : Number(match[1]);
++}
++
+ // 4xx-отказ handshake: connect_error.message — wire-код (design §4).
+ function connectError(port: number, token: string): Promise<string> {
+   return connect(port, token).then(
+     (socket) => {
+       socket.close();
+       throw new Error('connected unexpectedly');
+     },
+     (err: Error) => err.message,
+   );
+ }
+@@ -174,21 +181,21 @@ describe('Realtime (e2e)', () => {
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     const bus = new RealtimeBus();
+     const outbox = new EventOutbox(db.prisma, bus, new MetricsService());
+     const registry = new AppRegistryService([TEST_APP]);
+     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     roomService = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG),
++      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+     app = await createApp();
+     port = portOf(app);
+   });
+ 
+   afterAll(async () => {
+     await app.close();
+     await db.stop();
+@@ -257,20 +264,65 @@ describe('Realtime (e2e)', () => {
+     expect(ack.ok).toBe(true);
+     const event = await received;
+     expect(event.type).toBe('test-app.note.posted');
+     expect(event.payload).toEqual({ n: 1, actorId: 'spoofed' }); // payload — данные приложения как есть
+     const claims = tokens.verifyAccessToken(accessToken);
+     expect(event.actorId).toBe(claims.sub); // actorId конверта — только из токена
+     pub.close();
+     sub.close();
+   });
+ 
++  it('/metrics отражает realtime-жизнь комнаты: gauge, replay, publish→deliver (REQ-OPS-004)', async () => {
++    // Гистограммы накопительные и app один на файл (другие тесты тоже публикуют) —
++    // ассертим приращение рядов, а не абсолютные значения. Gauge — per-room,
++    // комната свежая, поэтому там абсолютная серия ` 1`.
++    const body0 = (await app.inject({ method: 'GET', url: '/metrics' })).body;
++    const replayBefore = metricSeriesCount(body0, 'mymozhem_replay_duration_seconds_count', 'level', 'public');
++    const deliverBefore = metricSeriesCount(body0, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public');
++
++    const { room, accessToken } = await activeRoomWithGuest();
++    const socket = await connect(port, accessToken);
++    const ack = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
++    expect(ack.ok).toBe(true);
++
++    const during = (await app.inject({ method: 'GET', url: '/metrics' })).body;
++    expect(during).toContain(`mymozhem_active_connections{roomId="${room.id}"} 1`);
++    expect(metricSeriesCount(during, 'mymozhem_replay_duration_seconds_count', 'level', 'public')).toBe(replayBefore + 1);
++
++    // publish client-initiated public-события → fan-out → замер publish→deliver.
++    // Приём события на сокете — маркер: observe в fanOut идёт синхронно следом за emit.
++    const received = waitEvent<{ type: string }>(socket, REALTIME_MESSAGES.EVENT);
++    const pubAck = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.PUBLISH, {
++      type: 'test-app.note.posted',
++      payload: { n: 42 },
++    });
++    expect(pubAck.ok).toBe(true);
++    await received;
++    const afterPublish = (await app.inject({ method: 'GET', url: '/metrics' })).body;
++    expect(metricSeriesCount(afterPublish, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public')).toBe(
++      deliverBefore + 1,
++    );
++
++    socket.close();
++    // disconnect обрабатывается асинхронно: poll /metrics до исчезновения gauge-серии
++    // комнаты (≤ 2 с; серия убирается на нуле — кардинальность = живым комнатам).
++    const deadline = Date.now() + 2000;
++    let body = '';
++    for (;;) {
++      body = (await app.inject({ method: 'GET', url: '/metrics' })).body;
++      if (!body.includes(`mymozhem_active_connections{roomId="${room.id}"}`)) break;
++      if (Date.now() > deadline) break;
++      await new Promise((resolve) => setTimeout(resolve, 50));
++    }
++    expect(body).not.toContain(`mymozhem_active_connections{roomId="${room.id}"}`);
++  });
++
+   it('publish в запечатанную комнату → ROOM_LOG_SEALED (REQ-RT-016 через провод)', async () => {
+     const { room, accessToken } = await activeRoomWithGuest();
+     const socket = await connect(port, accessToken);
+     await emitAck(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+     await roomService.complete(room.id, ORG);
+     const ack = await emitAck(socket, REALTIME_MESSAGES.PUBLISH, {
+       type: 'test-app.note.posted',
+       payload: { n: 1 },
+     });
+     expect(ack).toEqual({ code: 'ROOM_LOG_SEALED' });
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index 1f6fda6..44dee75 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -10,20 +10,21 @@ import {
+   EventLogService,
+   EventOutbox,
+   IdentityService,
+   JoinRateLimiter,
+   MembershipService,
+   MetricsService,
+   RealtimeBus,
+   RoomService,
+   TEST_CONFIG,
+   TokenService,
++  fakeLogger,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+   type TestDb,
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ 
+ jest.setTimeout(120_000);
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+@@ -126,20 +127,21 @@ describe('Transport HTTP (e2e)', () => {
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
++        fakeLogger,
+       ),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+   });
+ 
+   afterAll(async () => {
+     await db.stop();
+     restoreEnv('DATABASE_URL', savedDatabaseUrl);
+     restoreEnv('JWT_SECRET', savedJwtSecret);
+@@ -156,20 +158,27 @@ describe('Transport HTTP (e2e)', () => {
+     let app: NestFastifyApplication;
+ 
+     beforeAll(async () => {
+       app = await createApp();
+     });
+ 
+     afterAll(async () => {
+       await app.close();
+     });
+ 
++    it('ответ несёт x-request-id (REQ-OPS-004)', async () => {
++      const res = await app.inject({ method: 'GET', url: '/health/live' });
++      expect(res.headers['x-request-id']).toMatch(
++        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
++      );
++    });
++
+     it('join happy path: 201, SDK-валидное тело, refresh-кука, access claims', async () => {
+       const room = await roomService.create(ORG);
+       const res = await join(app, { code: room.code, displayName: 'Саша' });
+       expect(res.statusCode).toBe(201); // Nest default для POST — пин осознанный
+       // Тело валидно по SDK-схеме — контракт на проводе (REQ-SEC-006, REQ-ID-016).
+       const body = tokenResponseSchema.parse(res.json());
+       // REQ-ID-008: refresh живёт только в httpOnly-куке, не в теле.
+       const setCookie = res.headers['set-cookie'];
+       const cookieHeader = (Array.isArray(setCookie) ? setCookie.join('; ') : setCookie) ?? '';
+       expect(cookieHeader).toContain('mm_refresh=');
+diff --git a/packages/core/src/observability/observability.int-spec.ts b/packages/core/src/observability/observability.int-spec.ts
+index 67c87a3..0f2e764 100644
+--- a/packages/core/src/observability/observability.int-spec.ts
++++ b/packages/core/src/observability/observability.int-spec.ts
+@@ -1,33 +1,57 @@
++import { Writable } from 'node:stream';
++import { Global, Module } from '@nestjs/common';
+ import { Test, type TestingModule } from '@nestjs/testing';
+ import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { MetricsService } from './metrics.service';
+ import { ObservabilityModule } from './observability.module';
++import { PINO_STREAM } from './pino-logger.module';
++
++// Приёмник логов pino для спеки (тестовое состояние файла — REQ-CORE-004
++// запрещает мутабельный module-level state в src ПРОД-кода, не в спеках).
++const logLines: string[] = [];
++const logBuffer = new Writable({
++  write(chunk, _enc, cb) {
++    logLines.push(chunk.toString());
++    cb();
++  },
++});
++
++// PINO_STREAM инжектится в фабрику динамического (и @Global) LoggerModule —
++// провайдер из корневого TestingModule туда не виден; виден только глобальный.
++@Global()
++@Module({
++  providers: [{ provide: PINO_STREAM, useValue: logBuffer }],
++  exports: [PINO_STREAM],
++})
++class TestPinoStreamModule {}
+ 
+ // HTTP-граница экспозиции метрик (REQ-OPS-004, дизайн ф.4 §3/§0.3): fastify-
+ // адаптер, дерево ConfigModule + ObservabilityModule. БД не нужна — контроллер
+ // читает только registry MetricsService. Эндпоинт открытый (решение владельца)
+ // — как /health: авторизация и CORS-гейты не применяются.
+ describe('Observability /metrics (int)', () => {
+   let moduleRef: TestingModule;
+   let app: NestFastifyApplication;
+ 
+   beforeAll(async () => {
+     moduleRef = await Test.createTestingModule({
+-      imports: [ConfigModule, ObservabilityModule],
++      imports: [ConfigModule, ObservabilityModule, TestPinoStreamModule],
+     })
+       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      // LOG_LEVEL поднят до info: строка лога запроса пишется на уровне info,
++      // а с PINO_STREAM-буфером шум в консоль всё равно не уходит.
+       .overrideProvider(APP_CONFIG)
+-      .useValue(TEST_CONFIG)
++      .useValue({ ...TEST_CONFIG, LOG_LEVEL: 'info' })
+       .compile();
+     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+     await app.init();
+     await app.listen(0, '127.0.0.1');
+   });
+ 
+   afterAll(async () => {
+     await app.close();
+   });
+ 
+@@ -40,11 +64,30 @@ describe('Observability /metrics (int)', () => {
+     expect(res.body).toContain('mymozhem_active_connections{roomId="11111111-1111-4111-8111-111111111111"} 1');
+     expect(res.body).toContain('mymozhem_publish_to_deliver_seconds');
+     expect(res.body).toContain('mymozhem_replay_duration_seconds');
+     expect(res.body).toContain('mymozhem_event_commit_errors_total');
+   });
+ 
+   it('GET /metrics не требует авторизации (открытый — решение владельца, дизайн §0.3)', async () => {
+     const res = await app.inject({ method: 'GET', url: '/metrics' }); // без заголовков
+     expect(res.statusCode).toBe(200);
+   });
++
++  it('строка лога запроса — JSON с requestId; authorization/cookie замаскированы (Review Focus 5)', async () => {
++    const res = await app.inject({
++      method: 'GET',
++      url: '/metrics',
++      headers: { authorization: 'Bearer SECRET-TOKEN', cookie: 'mm_refresh=SECRET-COOKIE' },
++    });
++    expect(res.statusCode).toBe(200);
++    const requestId = res.headers['x-request-id'];
++    const line = logLines
++      .map((l) => l.trim())
++      .filter((l) => l.includes('"req"'))
++      .pop();
++    expect(line).toBeDefined();
++    const parsed = JSON.parse(line!);
++    expect(parsed.req.id).toBe(requestId);
++    expect(line).not.toContain('SECRET-TOKEN');
++    expect(line).not.toContain('SECRET-COOKIE');
++  });
+ });
+diff --git a/packages/core/src/observability/observability.module.ts b/packages/core/src/observability/observability.module.ts
+index a03d93e..bd20dd5 100644
+--- a/packages/core/src/observability/observability.module.ts
++++ b/packages/core/src/observability/observability.module.ts
+@@ -1,12 +1,15 @@
+ import { Module } from '@nestjs/common';
+ import { MetricsController } from './metrics.controller';
+ import { MetricsModule } from './metrics.module';
++import { PinoLoggerModule, RequestIdModule } from './pino-logger.module';
+ 
+-// Фасад наблюдаемости (ф.4): /metrics + (батч C) pino-конфигурация. Листовой —
++// Фасад наблюдаемости (ф.4): /metrics + pino-конфигурация (батч C). Листовой —
+ // доменные модули импортируют его, не наоборот (observability-is-leaf).
++// Порядок imports ЗНАЧИМ: RequestIdModule обязан зарегистрировать свой middleware
++// раньше LoggerModule (см. pino-logger.module.ts) — оба @Global, решает порядок.
+ @Module({
+-  imports: [MetricsModule],
++  imports: [RequestIdModule, PinoLoggerModule, MetricsModule],
+   controllers: [MetricsController],
+   exports: [MetricsModule],
+ })
+ export class ObservabilityModule {}
+diff --git a/packages/core/src/observability/pino-logger.module.ts b/packages/core/src/observability/pino-logger.module.ts
+index f4d1ec9..89f4f8b 100644
+--- a/packages/core/src/observability/pino-logger.module.ts
++++ b/packages/core/src/observability/pino-logger.module.ts
+@@ -1,42 +1,75 @@
+ import { randomUUID } from 'node:crypto';
++import { Global, Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
+ import { LoggerModule } from 'nestjs-pino';
+ import type { DestinationStream } from 'pino';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ 
+ // REQ-OPS-004 (ф.4, дизайн §2): структурные JSON-логи поверх nestjs-pino.
+-// Корреляция requestId — из genReqId (pino-http кладёт его в req.id и в каждую
+-// строку лога запроса); roomId/actorId привязываются потребителями через
+-// logger.assign/поля в операционных точках (Task 8), не middleware-магией.
++// Корреляция requestId — uuid в req.id (pino-http кладёт его в каждую строку лога
++// запроса, а RequestIdModule отражает в x-request-id ответа); roomId/actorId
++// привязываются потребителями через logger.assign/поля в операционных точках
++// (Task 8), не middleware-магией.
+ 
+ // Опциональное назначение логов: прод — stdout (pino default); тесты подставляют
+ // буферный Writable и читают фактические JSON-строки (observability.int-spec).
+ export const PINO_STREAM = Symbol('PINO_STREAM');
+ 
+ interface GenReqIdReq {
+   headers: Record<string, unknown>;
+ }
+ interface GenReqIdRes {
+   setHeader(name: string, value: string): void;
+ }
+ 
++// requestId — uuid; отражаем в ответ для разбора инцидентов с игроками.
++// Nest-Fastify присваивает raw req.id ДО middleware (fastify-middie: raw.id = req.id
++// — счётчик 'req-N'), а pino-http зовёт genReqId только на пустой req.id — поэтому
++// uuid обязан присвоить pre-middleware, иначе в лог уйдёт платформенный 'req-N'.
++export function requestIdMiddleware(
++  req: { id?: unknown },
++  res: GenReqIdRes,
++  next: () => void,
++): void {
++  const id = randomUUID();
++  req.id = id;
++  res.setHeader('x-request-id', id);
++  next();
++}
++
++// Pre-middleware requestId: ОБЯЗАН исполняться раньше LoggerModule (pino-http
++// замораживает req.id в child-логгере при входе — позже его не переопределить).
++// Nest сортирует middleware по distance модуля, @Global-модули — первыми, а между
++// собой — в порядке регистрации. LoggerModule nestjs-pino — @Global, поэтому этот
++// модуль тоже @Global и обязан импортироваться РАНЬШЕ PinoLoggerModule
++// (см. ObservabilityModule — порядок в imports значим).
++@Global()
++@Module({})
++export class RequestIdModule implements NestModule {
++  configure(consumer: MiddlewareConsumer): void {
++    consumer.apply(requestIdMiddleware).forRoutes('*');
++  }
++}
++
+ // Чистая фабрика опций pino-http — юнит-тестируема без Nest (pino-options.spec).
+ export function buildPinoHttpOptions(config: AppConfig): {
+   level: string;
+   genReqId: (req: GenReqIdReq, res: GenReqIdRes) => string;
+   redact: { paths: string[]; censor: string };
+ } {
+   return {
+     level: config.LOG_LEVEL,
+-    // requestId — uuid; отражаем в ответ для разбора инцидентов с игроками.
++    // Запасной путь для платформ без предустановленного req.id (не Nest-Fastify):
++    // pino-http зовёт genReqId, только если req.id ещё пуст; в нашем стеке
++    // requestIdMiddleware присваивает uuid раньше (см. выше).
+     genReqId: (_req: GenReqIdReq, res: GenReqIdRes): string => {
+       const id = randomUUID();
+       res.setHeader('x-request-id', id);
+       return id;
+     },
+     // Тела и payload'ы не логируются нормой дизайна; секретные заголовки маскируем.
+     redact: {
+       paths: ['req.headers.authorization', 'req.headers.cookie'],
+       censor: '[redacted]',
+     },
+diff --git a/packages/core/src/observability/pino-options.spec.ts b/packages/core/src/observability/pino-options.spec.ts
+index dd888ab..f3a2b81 100644
+--- a/packages/core/src/observability/pino-options.spec.ts
++++ b/packages/core/src/observability/pino-options.spec.ts
+@@ -1,21 +1,34 @@
+ import { TEST_CONFIG } from '../testing/test-config';
+-import { buildPinoHttpOptions } from './pino-logger.module';
++import { buildPinoHttpOptions, requestIdMiddleware } from './pino-logger.module';
+ 
+ // REQ-OPS-004 (ф.4, дизайн §2): опции pino-http — чистая фабрика, юнит-гейты.
+ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
+   it('уровень — из конфига', () => {
+     expect(buildPinoHttpOptions({ ...TEST_CONFIG, LOG_LEVEL: 'debug' }).level).toBe('debug');
+   });
+ 
+   it('redact маскирует authorization и cookie (Review Focus 5)', () => {
+     const opts = buildPinoHttpOptions(TEST_CONFIG);
+     expect(opts.redact.paths).toEqual(['req.headers.authorization', 'req.headers.cookie']);
+   });
+ 
+   it('genReqId генерирует uuid и отражает его в заголовок x-request-id', () => {
+     const setHeader = jest.fn();
+     const id = buildPinoHttpOptions(TEST_CONFIG).genReqId({ headers: {} }, { setHeader });
+     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+     expect(setHeader).toHaveBeenCalledWith('x-request-id', id);
+   });
++
++  // Nest-Fastify присваивает raw req.id ДО middleware (fastify-middie: raw.id = req.id,
++  // счётчик 'req-N'), поэтому genReqId pino-http не вызывается — uuid и отражение в
++  // заголовок обеспечивает pre-middleware (RequestIdModule).
++  it('requestIdMiddleware: uuid в req.id (перезапись платформенного req-N) и x-request-id, next()', () => {
++    const setHeader = jest.fn();
++    const next = jest.fn();
++    const req: { id?: unknown } = { id: 'req-1' };
++    requestIdMiddleware(req, { setHeader }, next);
++    expect(req.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
++    expect(setHeader).toHaveBeenCalledWith('x-request-id', req.id);
++    expect(next).toHaveBeenCalledTimes(1);
++  });
+ });
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index d042454..432bf51 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -25,24 +25,30 @@ type ReplyMock = { status: jest.Mock; send: jest.Mock };
+ 
+ const makeFilter = () => {
+   // Структурный фейк PinoLogger (REQ-OPS-004): фильтр логирует через инжектированный
+   // логгер с корреляцией requestId — ассерты идут по этим мокам.
+   const logger = { setContext: jest.fn(), error: jest.fn(), warn: jest.fn() };
+   const filter = new HttpExceptionFilter(logger as never);
+   const reply: ReplyMock = { status: jest.fn().mockReturnThis(), send: jest.fn() };
+   return { filter, reply, logger };
+ };
+ 
+-// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую;
+-// request несёт id, который pino-http кладёт в req.id (requestId корреляции).
++// Фильтр тестируется без Nest-контекста: мок ArgumentsHost отдаёт reply напрямую.
++// Request отражает форму Nest-Fastify: wrapper.id — платформенный счётчик 'req-N',
++// а requestId корреляции (uuid от requestIdMiddleware) лежит в raw.id.
+ const makeHost = (reply: ReplyMock): ArgumentsHost =>
+-  ({ switchToHttp: () => ({ getResponse: () => reply, getRequest: () => ({ id: 'req-1' }) }) }) as unknown as ArgumentsHost;
++  ({
++    switchToHttp: () => ({
++      getResponse: () => reply,
++      getRequest: () => ({ id: 'req-platform', raw: { id: 'req-1' } }),
++    }),
++  }) as unknown as ArgumentsHost;
+ 
+ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+   // Полная таблица маппинга design §5 + инвариант REQ-SEC-006: наружу ровно {code}.
+   const cases: Array<[string, unknown, number, string]> = [
+     ['join denied', new RoomJoinDeniedError('no room for code'), 403, 'ROOM_JOIN_DENIED'],
+     // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+     ['rate limited', new JoinRateLimitedError('x'), 429, 'RATE_LIMITED'],
+     ['room full', new RoomParticipantLimitReachedError('x'), 409, 'ROOM_PARTICIPANT_LIMIT_REACHED'],
+     // Срез исключения (REQ-ID-006): статусы добавлены в Task 4 (exhaustive-гейт),
+     // кейсы здесь — регрессия маппинга.
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index 8ff9e2b..e8a5453 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -61,24 +61,25 @@ interface ReplyLike {
+ }
+ 
+ @Catch()
+ export class HttpExceptionFilter implements ExceptionFilter {
+   constructor(private readonly logger: PinoLogger) {
+     this.logger.setContext(HttpExceptionFilter.name);
+   }
+ 
+   catch(exception: unknown, host: ArgumentsHost): void {
+     const reply = host.switchToHttp().getResponse<ReplyLike>();
+-    // requestId — из req.id, который кладёт pino-http (genReqId, observability-модуль):
+-    // корреляция строки лога с запросом (REQ-OPS-004).
+-    const req = host.switchToHttp().getRequest<{ id?: string }>();
+-    const requestId = req.id;
++    // requestId — uuid, который requestIdMiddleware (observability-модуль) кладёт в
++    // RAW req.id. Под Nest-Fastify getRequest() отдаёт wrapper, чей .id —
++    // платформенный счётчик 'req-N'; корреляционный uuid — в raw.id (REQ-OPS-004).
++    const req = host.switchToHttp().getRequest<{ id?: string; raw?: { id?: string } }>();
++    const requestId = req.raw?.id ?? req.id;
+     const code = this.toWireCode(exception);
+     // Nest-встроенные HttpException (404 неизвестного роута и т.п.) сохраняют свой
+     // статус («его status», маппинг design §5); wire-код при этом типизированный.
+     const status: number =
+       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
+     if (status >= 500) {
+       this.logger.error({ requestId, err: exception }, 'request failed');
+     } else if (exception instanceof AuthError || exception instanceof OAuthError) {
+       // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
+       // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index a4cb6c5..0ab0469 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -64,20 +64,23 @@ importers:
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/platform-fastify':
+         specifier: ^11.0.0
+         version: 11.1.28(@fastify/static@9.3.0)(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@nestjs/schedule':
+         specifier: ^6.1.3
+         version: 6.1.3(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
++      nestjs-pino:
++        specifier: ^4.6.1
++        version: 4.6.1(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@10.5.0)(pino@10.3.1)(rxjs@7.8.2)
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+@@ -6588,20 +6591,27 @@ snapshots:
+     optional: true
+ 
+   nanoid@3.3.19: {}
+ 
+   natural-compare@1.4.0: {}
+ 
+   negotiator@0.6.3: {}
+ 
+   neo-async@2.6.2: {}
+ 
++  nestjs-pino@4.6.1(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@10.5.0)(pino@10.3.1)(rxjs@7.8.2):
++    dependencies:
++      '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      pino: 10.3.1
++      pino-http: 10.5.0
++      rxjs: 7.8.2
++
+   nestjs-pino@4.6.1(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@10.5.0)(pino@9.14.0)(rxjs@7.8.2):
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       pino: 9.14.0
+       pino-http: 10.5.0
+       rxjs: 7.8.2
+ 
+   node-int64@0.4.0: {}
+ 
+   node-releases@2.0.51: {}

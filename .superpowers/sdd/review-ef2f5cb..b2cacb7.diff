@@ -1,0 +1,751 @@
+# Review package: ef2f5cb..b2cacb7
+
+## Commits
+b2cacb7 feat(core): export and register RealtimeModule in server (REQ-RT-010)
+bcce15a feat(core): emit room.completed/room.cancelled to log in transition transaction (REQ-RT-010, REQ-DEV-008)
+ab20211 feat(core): EventLogService.commitCoreEvent primitive + RealtimeModule (REQ-RT-001, REQ-RT-007)
+b5dee43 feat(core): realtime.LogEvent table + EventVisibility enum migration (REQ-RT-001)
+
+## Files changed
+ apps/server/src/app.module.ts                      | 10 ++-
+ .../migration.sql                                  | 25 ++++++
+ packages/core/prisma/schema.prisma                 | 33 +++++++-
+ packages/core/src/index.ts                         |  2 +
+ packages/core/src/realtime/event-log.int-spec.ts   | 94 ++++++++++++++++++++++
+ packages/core/src/realtime/event-log.service.ts    | 48 +++++++++++
+ .../core/src/realtime/log-event-schema.int-spec.ts | 64 +++++++++++++++
+ packages/core/src/realtime/realtime.module.ts      | 10 +++
+ packages/core/src/room/room.module.ts              |  3 +-
+ packages/core/src/room/room.service.int-spec.ts    | 88 +++++++++++++++++++-
+ packages/core/src/room/room.service.ts             | 52 ++++++++----
+ packages/core/src/testing/read-room-log.ts         | 24 ++++++
+ 12 files changed, 430 insertions(+), 23 deletions(-)
+
+## Diff
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 6d4d9ba..b3220e1 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,7 +1,13 @@
+ import { Module } from '@nestjs/common';
+-import { AppRegistryModule, HealthModule, PrismaModule, RoomModule } from '@mymozhem/core';
++import {
++  AppRegistryModule,
++  HealthModule,
++  PrismaModule,
++  RealtimeModule,
++  RoomModule,
++} from '@mymozhem/core';
+ 
+ @Module({
+-  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule],
++  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule, RealtimeModule],
+ })
+ export class AppModule {}
+diff --git a/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql b/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql
+new file mode 100644
+index 0000000..f4fe89e
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql
+@@ -0,0 +1,25 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "realtime";
++
++-- CreateEnum
++CREATE TYPE "realtime"."EventVisibility" AS ENUM ('public', 'organizer', 'module-private');
++
++-- CreateTable
++CREATE TABLE "realtime"."LogEvent" (
++    "roomId" UUID NOT NULL,
++    "seq" INTEGER NOT NULL,
++    "type" TEXT NOT NULL,
++    "payload" JSONB NOT NULL,
++    "actorId" UUID,
++    "visibility" "realtime"."EventVisibility" NOT NULL,
++    "schemaVersion" INTEGER NOT NULL,
++    "recordedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "LogEvent_pkey" PRIMARY KEY ("roomId","seq")
++);
++
++-- AddForeignKey
++ALTER TABLE "realtime"."LogEvent" ADD CONSTRAINT "LogEvent_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "realtime"."LogEvent" ADD CONSTRAINT "LogEvent_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index f61ee23..337b895 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,17 +1,17 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["identity", "room"]
++  schemas  = ["identity", "realtime", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+@@ -22,20 +22,21 @@ enum RoomStatus {
+ // INSERT in RoomService.create, not by the FK itself.
+ // appSettings/pin/freeze (REQ-RT-004) deferred to a later plan.
+ model Room {
+   id          String     @id @default(uuid()) @db.Uuid
+   organizer   Identity   @relation(fields: [organizerId], references: [id])
+   organizerId String     @db.Uuid
+   status      RoomStatus @default(DRAFT)
+   deletedAt   DateTime?
+   createdAt   DateTime   @default(now())
+   updatedAt   DateTime   @updatedAt
++  logEvents   LogEvent[]
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+   REGISTERED
+   GUEST
+ 
+   @@schema("identity")
+ }
+@@ -46,13 +47,43 @@ enum IdentityKind {
+ // REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+ // NOT a Prisma preview feature.
+ model Identity {
+   id        String       @id @default(uuid()) @db.Uuid
+   kind      IdentityKind
+   email     String?
+   deletedAt DateTime?
+   createdAt DateTime     @default(now())
+   updatedAt DateTime     @updatedAt
+   rooms     Room[]
++  logEvents LogEvent[]
+ 
+   @@schema("identity")
+ }
++
++enum EventVisibility {
++  PUBLIC         @map("public")
++  ORGANIZER      @map("organizer")
++  MODULE_PRIVATE @map("module-private")
++
++  @@schema("realtime")
++}
++
++// Append-only лог событий комнаты (REQ-RT-001, ADR-005). Составной PK = unique(roomId, seq).
++// seq назначает сервер в критической секции (advisory lock, REQ-RT-007).
++// recordedAt — storage-only колонка (отладка/ретеншн); в контракт (logEventSchema) не
++// входит и наружу не проецируется (design §2). onDelete: Restrict у actorId указан явно:
++// дефолт Prisma для optional-релейшна — SetNull, а норма — Restrict (REQ-CORE-003).
++model LogEvent {
++  roomId        String          @db.Uuid
++  seq           Int
++  type          String
++  payload       Json
++  actorId       String?         @db.Uuid
++  visibility    EventVisibility
++  schemaVersion Int
++  recordedAt    DateTime        @default(now())
++  room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  actor         Identity?       @relation(fields: [actorId], references: [id], onDelete: Restrict)
++
++  @@id([roomId, seq])
++  @@schema("realtime")
++}
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index d530392..a4eeba6 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -4,10 +4,12 @@ export * from './prisma/prisma.module';
+ export * from './health/health.controller';
+ export * from './health/health.module';
+ export * from './app-registry/app-registry';
+ export * from './app-registry/app-registry.tokens';
+ export * from './app-registry/app-registry.service';
+ export * from './app-registry/app-registry.module';
+ export * from './room/room.errors';
+ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
++export * from './realtime/event-log.service';
++export * from './realtime/realtime.module';
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+new file mode 100644
+index 0000000..0393c6d
+--- /dev/null
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -0,0 +1,94 @@
++import { ContractError } from '@mymozhem/sdk';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import { readRoomLog } from '../testing/read-room-log';
++import { RoomService } from '../room/room.service';
++import { EventLogService } from './event-log.service';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++
++describe('EventLogService.commitCoreEvent', () => {
++  let db: TestDb;
++  let rooms: RoomService;
++  let eventLog: EventLogService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    rooms = new RoomService(db.prisma, new EventLogService());
++    eventLog = new EventLogService();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    // CASCADE чистит и realtime."LogEvent" (FK-ссылка), и room."Room".
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('commits one event with the contract shape (REQ-RT-001)', async () => {
++    const room = await rooms.create(ORG);
++    await db.prisma.$transaction((tx) =>
++      eventLog.commitCoreEvent(tx, room.id, 'room.completed', {}),
++    );
++
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(1);
++    expect(log[0]).toMatchObject({
++      seq: 1,
++      type: 'core.room.completed',
++      visibility: 'public', // REQ-RT-010
++      actorId: null, // lifecycle/system — auth-контекста ещё нет
++      payload: {},
++      schemaVersion: 1,
++    });
++  });
++
++  it('assigns dense per-room seq, independent across rooms', async () => {
++    const a = await rooms.create(ORG);
++    const b = await rooms.create(ORG);
++    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.completed', {}));
++    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, a.id, 'room.cancelled', {}));
++    await db.prisma.$transaction((tx) => eventLog.commitCoreEvent(tx, b.id, 'room.cancelled', {}));
++
++    expect((await readRoomLog(db.prisma, a.id)).map((e) => e.seq)).toEqual([1, 2]);
++    expect((await readRoomLog(db.prisma, b.id)).map((e) => e.seq)).toEqual([1]);
++  });
++
++  it('rejects a payload mismatch with EVENT_PAYLOAD_INVALID and writes nothing', async () => {
++    const room = await rooms.create(ORG);
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitCoreEvent(tx, room.id, 'room.completed', { bogus: 1 }),
++      )
++      .catch((e: unknown) => e);
++
++    expect(err).toBeInstanceOf(ContractError);
++    expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
++  });
++
++  it('serializes concurrent commits via the advisory lock: dense seqs 1..N (REQ-RT-007)', async () => {
++    const room = await rooms.create(ORG);
++    const N = 8;
++
++    const committed = await Promise.all(
++      Array.from({ length: N }, () =>
++        db.prisma.$transaction((tx) =>
++          eventLog.commitCoreEvent(tx, room.id, 'room.cancelled', {}),
++        ),
++      ),
++    );
++
++    // Детерминированное свойство, не статистика: все коммиты успешны,
++    // seq — ровно множество {1..N} без дублей.
++    expect(new Set(committed.map((e) => e.seq))).toEqual(
++      new Set(Array.from({ length: N }, (_, i) => i + 1)),
++    );
++    expect((await readRoomLog(db.prisma, room.id)).map((e) => e.seq)).toEqual(
++      Array.from({ length: N }, (_, i) => i + 1),
++    );
++  });
++});
+diff --git a/packages/core/src/realtime/event-log.service.ts b/packages/core/src/realtime/event-log.service.ts
+new file mode 100644
+index 0000000..82a479a
+--- /dev/null
++++ b/packages/core/src/realtime/event-log.service.ts
+@@ -0,0 +1,48 @@
++import { Injectable } from '@nestjs/common';
++import type { LogEvent, Prisma } from '@prisma/client';
++import { CORE_EVENTS, ContractError, coreEventType, type CoreEventName } from '@mymozhem/sdk';
++
++// Append-only commit-примитив для core-типов событий (design §3). ЕДИНСТВЕННЫЙ путь
++// записи в realtime."LogEvent". Порядок шагов контрактуален (SDK-дизайн §7):
++// валидация payload — ДО входа в критическую секцию, затем advisory lock на комнату
++// и атомарное присвоение seq — размер payload не влияет на исход гонки (REQ-RT-007).
++// Шаги 1–7 цепочки app-событий (sealing REQ-RT-016, размер REQ-RT-012, rate-limit
++// REQ-RT-014, actorId из auth REQ-RT-009, реестр REQ-CTR-008) встают перед шагом 3
++// без изменения шагов 3–4 — шов event-commit плана (design §10).
++@Injectable()
++export class EventLogService {
++  async commitCoreEvent(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    name: CoreEventName,
++    payload: unknown = {},
++    actorId: string | null = null,
++  ): Promise<LogEvent> {
++    const definition = CORE_EVENTS[name];
++    const parsed = definition.schema.safeParse(payload);
++    if (!parsed.success) {
++      throw new ContractError(
++        'EVENT_PAYLOAD_INVALID',
++        `payload of ${coreEventType(name)} does not match its core schema`,
++      );
++    }
++    // $executeRaw, не $queryRaw: pg_advisory_xact_lock возвращает void, а $queryRaw
++    // пытается десериализовать колонку результата и падает на типе 'void'.
++    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roomId}, 0))`;
++    const rows = await tx.$queryRaw<LogEvent[]>`
++      INSERT INTO realtime."LogEvent"
++        ("roomId", "seq", "type", "payload", "actorId", "visibility", "schemaVersion")
++      SELECT ${roomId}::uuid,
++             COALESCE(MAX("seq"), 0) + 1,
++             ${coreEventType(name)},
++             ${JSON.stringify(parsed.data)}::jsonb,
++             ${actorId}::uuid,
++             ${definition.visibility}::realtime."EventVisibility",
++             ${definition.version}
++      FROM realtime."LogEvent"
++      WHERE "roomId" = ${roomId}::uuid
++      RETURNING *
++    `;
++    return rows[0];
++  }
++}
+diff --git a/packages/core/src/realtime/log-event-schema.int-spec.ts b/packages/core/src/realtime/log-event-schema.int-spec.ts
+new file mode 100644
+index 0000000..70dc636
+--- /dev/null
++++ b/packages/core/src/realtime/log-event-schema.int-spec.ts
+@@ -0,0 +1,64 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++// REQ-RT-001: таблица append-only лога существует в мигрированной БД с контрактной
++// формой — составной PK (roomId, seq) [= unique(roomId, seq)], Restrict FK на
++// core-таблицы без каскадов (REQ-CORE-003), контрактные строки visibility.
++describe('Realtime LogEvent table (migration presence)', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('exists in schema realtime', async () => {
++    const rows = await db.prisma.$queryRaw<{ tablename: string }[]>`
++      SELECT tablename FROM pg_tables
++      WHERE schemaname = 'realtime' AND tablename = 'LogEvent'
++    `;
++    expect(rows).toHaveLength(1);
++  });
++
++  it('has composite PK (roomId, seq) — unique(roomId, seq) of REQ-RT-001', async () => {
++    const rows = await db.prisma.$queryRaw<{ constraintdef: string }[]>`
++      SELECT pg_get_constraintdef(oid) AS constraintdef
++      FROM pg_constraint
++      WHERE conrelid = 'realtime."LogEvent"'::regclass AND contype = 'p'
++    `;
++    expect(rows).toHaveLength(1);
++    // pg_get_constraintdef канонизирует идентификаторы: "roomId" квотится
++    // (mixed-case), seq — нет (валидный lowercase-идентификатор).
++    expect(rows[0].constraintdef).toBe('PRIMARY KEY ("roomId", seq)');
++  });
++
++  it('has exactly two Restrict FKs to the core tables (REQ-CORE-003, no cascades)', async () => {
++    const rows = await db.prisma.$queryRaw<{ conname: string; constraintdef: string }[]>`
++      SELECT conname, pg_get_constraintdef(oid) AS constraintdef
++      FROM pg_constraint
++      WHERE conrelid = 'realtime."LogEvent"'::regclass AND contype = 'f'
++      ORDER BY conname
++    `;
++    expect(rows.map((r) => r.conname)).toEqual([
++      'LogEvent_actorId_fkey',
++      'LogEvent_roomId_fkey',
++    ]);
++    for (const row of rows) {
++      expect(row.constraintdef).toContain('ON DELETE RESTRICT');
++    }
++  });
++
++  it('stores contract-string visibility values (module-private with a hyphen)', async () => {
++    const rows = await db.prisma.$queryRaw<{ enumlabel: string }[]>`
++      SELECT e.enumlabel
++      FROM pg_type t
++      JOIN pg_enum e ON e.enumtypid = t.oid
++      JOIN pg_namespace n ON n.oid = t.typnamespace
++      WHERE n.nspname = 'realtime' AND t.typname = 'EventVisibility'
++      ORDER BY e.enumsortorder
++    `;
++    expect(rows.map((r) => r.enumlabel)).toEqual(['public', 'organizer', 'module-private']);
++  });
++});
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+new file mode 100644
+index 0000000..cb5e55d
+--- /dev/null
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -0,0 +1,10 @@
++import { Module } from '@nestjs/common';
++import { EventLogService } from './event-log.service';
++
++// PrismaModule намеренно НЕ импортируется: примитив работает на транзакционном
++// клиенте вызывающего (атомарность «действие + лог», REQ-DEV-008).
++@Module({
++  providers: [EventLogService],
++  exports: [EventLogService],
++})
++export class RealtimeModule {}
+diff --git a/packages/core/src/room/room.module.ts b/packages/core/src/room/room.module.ts
+index 63098ed..787a339 100644
+--- a/packages/core/src/room/room.module.ts
++++ b/packages/core/src/room/room.module.ts
+@@ -1,10 +1,11 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
++import { RealtimeModule } from '../realtime/realtime.module';
+ import { RoomService } from './room.service';
+ 
+ @Module({
+-  imports: [PrismaModule],
++  imports: [PrismaModule, RealtimeModule],
+   providers: [RoomService],
+   exports: [RoomService],
+ })
+ export class RoomModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 4f8a1ae..de7e749 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,25 +1,27 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
++import { readRoomLog } from '../testing/read-room-log';
++import { EventLogService } from '../realtime/event-log.service';
+ import { RoomService } from './room.service';
+ import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma);
++    service = new RoomService(db.prisma, new EventLogService());
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -105,21 +107,21 @@ describe('RoomService lifecycle', () => {
+   });
+ });
+ 
+ describe('RoomService transition atomicity', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma);
++    service = new RoomService(db.prisma, new EventLogService());
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
+   // serialize instead of interleave, the second one reads ACTIVE, and
+   // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
+   // fail with no defect present. That pairing is schedule-dependent and cannot
+@@ -152,21 +154,21 @@ describe('RoomService transition atomicity', () => {
+   });
+ });
+ 
+ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma);
++    service = new RoomService(db.prisma, new EventLogService());
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -216,10 +218,90 @@ describe('Room organizerId FK', () => {
+   it('rejects a room whose organizerId is not an identity, at the database level', async () => {
+     await expect(
+       db.prisma.$executeRawUnsafe(
+         `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
+          VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
+         '00000000-0000-0000-0000-0000000000ee',
+       ),
+     ).rejects.toThrow(/Room_organizerId_fkey/);
+   });
+ });
++
++describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    service = new RoomService(db.prisma, new EventLogService());
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('complete() emits exactly one public core.room.completed event (seq=1)', async () => {
++    const room = await service.create(ORG);
++    await service.activate(room.id);
++    await service.complete(room.id);
++
++    // Полный путь DRAFT→ACTIVE→COMPLETED: ровно ОДНА строка — activation осознанно
++    // не эмитит (шов: payload room.activated = пин REQ-RT-004, appSettings-срез).
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(1);
++    expect(log[0]).toMatchObject({
++      seq: 1,
++      type: 'core.room.completed',
++      visibility: 'public',
++      actorId: null,
++      payload: {},
++      schemaVersion: 1,
++    });
++  });
++
++  it('cancel() from DRAFT and from ACTIVE emits core.room.cancelled (seq=1 each)', async () => {
++    const a = await service.create(ORG);
++    await service.cancel(a.id);
++    const b = await service.create(ORG);
++    await service.activate(b.id);
++    await service.cancel(b.id);
++
++    expect((await readRoomLog(db.prisma, a.id)).map((e) => e.type)).toEqual(['core.room.cancelled']);
++    expect((await readRoomLog(db.prisma, b.id)).map((e) => [e.seq, e.type])).toEqual([
++      [1, 'core.room.cancelled'],
++    ]);
++  });
++
++  it('emits nothing on illegal transition, terminal transition, create or softDelete', async () => {
++    const room = await service.create(ORG);
++    await expect(service.complete(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
++
++    await service.activate(room.id);
++    await service.complete(room.id);
++    await expect(service.cancel(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1); // только completed
++
++    const plain = await service.create(ORG);
++    await service.softDelete(plain.id);
++    expect(await readRoomLog(db.prisma, plain.id)).toHaveLength(0);
++  });
++
++  it('two competing cancels emit exactly one event, from the winner (atomicity)', async () => {
++    const room = await service.create(ORG);
++
++    await Promise.allSettled([service.cancel(room.id), service.cancel(room.id)]);
++
++    // Проигравший откатился целиком: ни статуса, ни события (REQ-DEV-008).
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log).toHaveLength(1);
++    expect(log[0]).toMatchObject({ seq: 1, type: 'core.room.cancelled', visibility: 'public' });
++    expect(
++      (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } })).status,
++    ).toBe('CANCELLED');
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index acc8a1d..af6a478 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,35 +1,48 @@
+ import { Injectable } from '@nestjs/common';
+ import type { Room, $Enums } from '@prisma/client';
++import type { CoreEventName } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
++import { EventLogService } from '../realtime/event-log.service';
+ import {
+   assertTransition,
+   assertDeletable,
+   DELETABLE_STATUSES,
+   type RoomStatus,
+ } from './room-state-machine';
+ import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ // Compile-time parity assertion between the Prisma-generated enum and the domain union.
+ // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
+ // if a member is ever added to one side and not the other, this line fails to compile
+ // instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
+ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
+   ? [$Enums.RoomStatus] extends [RoomStatus]
+     ? true
+     : never
+   : never;
+ void (true satisfies RoomStatusParity);
+ 
++// Частичная таблица по дизайну (§4): 'room.activated' здесь НЕ эмитится — его payload
++// это пин (appId, manifestVersion) REQ-RT-004, который появится только в срезе
++// appSettings write path; эмит активации встаёт сюда вместе с ним (design §0 п.1, §10).
++const LIFECYCLE_EVENTS: Partial<Record<RoomStatus, CoreEventName>> = {
++  COMPLETED: 'room.completed',
++  CANCELLED: 'room.cancelled',
++};
++
+ @Injectable()
+ export class RoomService {
+-  constructor(private readonly prisma: PrismaService) {}
++  constructor(
++    private readonly prisma: PrismaService,
++    private readonly eventLog: EventLogService,
++  ) {}
+ 
+   async create(organizerId: string): Promise<Room> {
+     // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
+     // INSERT — the WHERE EXISTS predicate is the single source of truth, no
+     // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
+     // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
+     // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
+     // The same predicate lives in the "Identity_registered_email_key" index
+     // condition (design §7) — change both or neither.
+     // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
+@@ -46,36 +59,43 @@ export class RoomService {
+     `;
+     if (rows.length === 0) {
+       throw new RoomOrganizerNotRegisteredError(
+         `Organizer ${organizerId} is not a live REGISTERED identity`,
+       );
+     }
+     return rows[0];
+   }
+ 
+   async transition(roomId: string, to: RoomStatus): Promise<Room> {
+-    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
+-    if (!current || current.deletedAt !== null) {
+-      throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+-    }
+-    // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+-    assertTransition(current.status as RoomStatus, to);
+-    // Atomic guarded update: correctness of the race rests on this WHERE, not on the
+-    // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
+-    const res = await this.prisma.room.updateMany({
+-      where: { id: roomId, status: current.status, deletedAt: null },
+-      data: { status: to },
++    return this.prisma.$transaction(async (tx) => {
++      const current = await tx.room.findUnique({ where: { id: roomId } });
++      if (!current || current.deletedAt !== null) {
++        throw new RoomConflictError(`Room ${roomId} not found or deleted`);
++      }
++      // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
++      assertTransition(current.status as RoomStatus, to);
++      // Atomic guarded update: correctness of the race rests on this WHERE, not on the
++      // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
++      const res = await tx.room.updateMany({
++        where: { id: roomId, status: current.status, deletedAt: null },
++        data: { status: to },
++      });
++      if (res.count === 0) {
++        // → rollback: ни перехода, ни события у проигравшего (REQ-DEV-008).
++        throw new RoomConflictError(`Room ${roomId} changed concurrently`);
++      }
++      const eventName = LIFECYCLE_EVENTS[to];
++      if (eventName) {
++        await this.eventLog.commitCoreEvent(tx, roomId, eventName, {});
++      }
++      return tx.room.findUniqueOrThrow({ where: { id: roomId } });
+     });
+-    if (res.count === 0) {
+-      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
+-    }
+-    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
+   }
+ 
+   activate(roomId: string): Promise<Room> {
+     return this.transition(roomId, 'ACTIVE');
+   }
+ 
+   complete(roomId: string): Promise<Room> {
+     return this.transition(roomId, 'COMPLETED');
+   }
+ 
+diff --git a/packages/core/src/testing/read-room-log.ts b/packages/core/src/testing/read-room-log.ts
+new file mode 100644
+index 0000000..60a6c7c
+--- /dev/null
++++ b/packages/core/src/testing/read-room-log.ts
+@@ -0,0 +1,24 @@
++import type { PrismaService } from '../prisma/prisma.service';
++
++export type RoomLogRow = {
++  roomId: string;
++  seq: number;
++  type: string;
++  payload: unknown;
++  actorId: string | null;
++  visibility: string;
++  schemaVersion: number;
++};
++
++// Сырой читатель лога в его storage- (= контрактной) форме: enum как text, payload как
++// JSON. Тестовый хелпер: read-path сервиса в ядре осознанно нет (design §10 — шов
++// realtime read плана), тесты читают таблицу напрямую.
++export function readRoomLog(prisma: PrismaService, roomId: string): Promise<RoomLogRow[]> {
++  return prisma.$queryRaw<RoomLogRow[]>`
++    SELECT "roomId", "seq", "type", "payload", "actorId",
++           "visibility"::text AS "visibility", "schemaVersion"
++    FROM realtime."LogEvent"
++    WHERE "roomId" = ${roomId}::uuid
++    ORDER BY "seq"
++  `;
++}

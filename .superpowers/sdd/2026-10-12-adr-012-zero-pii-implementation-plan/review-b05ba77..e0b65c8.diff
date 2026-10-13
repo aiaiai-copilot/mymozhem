@@ -1,0 +1,1542 @@
+# Review package: b05ba77..e0b65c8
+
+## Commits
+e0b65c8 feat: prize_mode-гейт и lottery v2 (ADR-012 §4) — PRIZES_DISABLED на createPrize/award.prize при off; prizeId необязателен, draw_eligibility удалена, winner-exclusion по null-ключу
+
+## Files changed
+ apps/server/test/lottery.e2e-spec.ts               | 334 +++++++++++++--------
+ packages/app-lottery/src/lottery-events.ts         |   7 +-
+ packages/app-lottery/src/lottery-handlers.spec.ts  |  56 +++-
+ packages/app-lottery/src/lottery-handlers.ts       |  24 +-
+ .../src/lottery-manifest.contract.spec.ts          |  47 +--
+ packages/app-lottery/src/lottery-manifest.ts       |   3 +-
+ packages/app-lottery/src/lottery-settings.ts       |  13 +-
+ packages/app-lottery/src/lottery-state.spec.ts     |   6 +
+ packages/app-lottery/src/lottery-state.ts          |   2 +-
+ .../core/src/app-runtime/app-runtime.int-spec.ts   |   7 +-
+ packages/core/src/identity/guest-sweep.int-spec.ts |   4 +-
+ .../src/rewards/rewards.controller.int-spec.ts     |  62 +++-
+ packages/core/src/rewards/rewards.errors.ts        |   8 +
+ packages/core/src/rewards/rewards.int-spec.ts      | 119 +++++++-
+ packages/core/src/rewards/rewards.module.ts        |   6 +-
+ packages/core/src/rewards/rewards.service.ts       |  12 +-
+ .../src/transport/http-exception.filter.spec.ts    |   3 +
+ .../core/src/transport/http-exception.filter.ts    |   2 +
+ .../rooms-lifecycle.controller.int-spec.ts         |  17 +-
+ 19 files changed, 526 insertions(+), 206 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/lottery.e2e-spec.ts b/apps/server/test/lottery.e2e-spec.ts
+index b7cc63f..0316a5f 100644
+--- a/apps/server/test/lottery.e2e-spec.ts
++++ b/apps/server/test/lottery.e2e-spec.ts
+@@ -17,24 +17,24 @@ import {
+   type PrismaService,
+   type TestDb,
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ 
+ jest.setTimeout(180_000);
+ 
+ // RFC 9562-валидный v4 UUID (прецедент realtime.e2e): z.uuid() (zod v4) отклоняет
+ // версию 0 — иначе проекция core.room.activated (actorId = ORG) падает на parse.
+ const ORG = '00000000-0000-4000-8000-000000000001';
+-// REGISTERED-участник сценария 4 (verified eligibility).
+-const REG = '00000000-0000-4000-8000-000000000002';
+ 
+-const LOTTERY_SETTINGS: LotterySettings = { drawEligibility: 'guests_allowed' };
++// ADR-012 (lottery v2): draw_eligibility удалена (verified-ветка REQ-RWD-014
++// приостановлена) — appSettings лотереи пусты; `{}` — единственный валидный snapshot.
++const LOTTERY_SETTINGS: LotterySettings = {};
+ 
+ function restoreEnv(key: string, value: string | undefined): void {
+   if (value === undefined) delete process.env[key];
+   else process.env[key] = value;
+ }
+ 
+ // Boot зеркалит quiz.e2e (composition root регистрирует lottery + rewards глобально —
+ // override'ы APP_MANIFESTS/APP_RUNTIME_MODULES не нужны, прецедент quiz.e2e).
+ async function createApp(envOverrides: Record<string, string> = {}): Promise<NestFastifyApplication> {
+   const saved: Record<string, string | undefined> = {};
+@@ -124,139 +124,157 @@ function readRoomLog(prisma: PrismaService, roomId: string): Promise<RoomLogRow[
+     ORDER BY "seq"
+   `;
+ }
+ 
+ type SubscribeAck = {
+   ok: true;
+   snapshot: { events: ProjectedEvent[]; appSettings: Record<string, unknown> };
+ };
+ type PublishAck = { ok: true } | { code: string };
+ 
+-describe('Lottery (e2e, приёмка фазы 3)', () => {
+-  let db: TestDb;
+-  let app: NestFastifyApplication;
+-  let port: number;
+-  let roomService: RoomService;
+-  let tokens: TokenService;
+-  let savedDatabaseUrl: string | undefined;
+-  let savedJwtSecret: string | undefined;
++// Общий стенд файла: одна testcontainer-БД и сидированный организатор на оба
++// сьюта (призовой при PRIZE_MODE='on' и RF3-гейт при 'off'); app-инстансы —
++// свои у каждого describe, describes бегут серийно (рулинг C-pre.1).
++let db: TestDb;
++let app: NestFastifyApplication;
++let port: number;
++let roomService: RoomService;
++let tokens: TokenService;
++let savedDatabaseUrl: string | undefined;
++let savedJwtSecret: string | undefined;
++
++beforeAll(async () => {
++  savedDatabaseUrl = process.env.DATABASE_URL;
++  savedJwtSecret = process.env.JWT_SECRET;
++  db = await startTestDb();
++  process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
++  await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++});
+ 
+-  beforeAll(async () => {
+-    savedDatabaseUrl = process.env.DATABASE_URL;
+-    savedJwtSecret = process.env.JWT_SECRET;
+-    db = await startTestDb();
+-    process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+-    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    app = await createApp();
+-    port = portOf(app);
+-    roomService = app.get(RoomService);
+-    tokens = app.get(TokenService);
+-  });
++afterAll(async () => {
++  await db.stop();
++  restoreEnv('DATABASE_URL', savedDatabaseUrl);
++  restoreEnv('JWT_SECRET', savedJwtSecret);
++});
+ 
+-  afterAll(async () => {
+-    await app.close();
+-    await db.stop();
+-    restoreEnv('DATABASE_URL', savedDatabaseUrl);
+-    restoreEnv('JWT_SECRET', savedJwtSecret);
++afterEach(async () => {
++  await db.prisma.$executeRawUnsafe(
++    'TRUNCATE TABLE identity."Session", membership."Membership", rewards."Award", rewards."Prize", room."Room" CASCADE',
++  );
++});
++
++// Комната лотереи в ACTIVE (сервисный путь, прецедент quiz.e2e). Settings
++// всегда явно: у лотереи v2 они пусты (ADR-012), но configure требует ключ.
++async function activeLotteryRoom(
++  settings: LotterySettings = LOTTERY_SETTINGS,
++): Promise<{ id: string; code: string }> {
++  const room = await roomService.create(ORG);
++  await roomService.configure(room.id, {
++    appId: LOTTERY_APP_ID,
++    manifestVersion: LOTTERY_MANIFEST_VERSION,
++    settings,
+   });
++  await roomService.activate(room.id, ORG);
++  return room;
++}
+ 
+-  afterEach(async () => {
+-    await db.prisma.$executeRawUnsafe(
+-      'TRUNCATE TABLE identity."Session", membership."Membership", rewards."Award", rewards."Prize", room."Room" CASCADE',
+-    );
++// Гость через HTTP (транспортный путь): POST /rooms/join → accessToken → connect.
++async function joinGuest(
++  roomCode: string,
++  name: string,
++): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
++  const res = await app.inject({
++    method: 'POST',
++    url: '/rooms/join',
++    payload: { code: roomCode, displayName: name },
+   });
++  expect(res.statusCode).toBe(201);
++  const { accessToken } = joinResponseSchema.parse(res.json());
++  const identityId = tokens.verifyAccessToken(accessToken).sub;
++  return { socket: await connect(port, accessToken), token: accessToken, identityId };
++}
+ 
+-  // Комната лотереи в ACTIVE (сервисный путь, прецедент quiz.e2e). Settings — всегда
+-  // явно: открытый вопрос контракта о дефолте, `{}` отклоняется.
+-  async function activeLotteryRoom(
+-    settings: LotterySettings = LOTTERY_SETTINGS,
+-  ): Promise<{ id: string; code: string }> {
+-    const room = await roomService.create(ORG);
+-    await roomService.configure(room.id, {
+-      appId: LOTTERY_APP_ID,
+-      manifestVersion: LOTTERY_MANIFEST_VERSION,
+-      settings,
+-    });
+-    await roomService.activate(room.id, ORG);
+-    return room;
+-  }
++// REST с Bearer организатора: guest-claims (kind GUEST + roomId), роль ORGANIZER
++// берётся из membership — прецедент transport.e2e-spec.ts:362-367.
++async function organizerRestToken(roomId: string): Promise<string> {
++  return (await tokens.issueGuestTokens(ORG, roomId)).accessToken;
++}
+ 
+-  // Гость через HTTP (транспортный путь): POST /rooms/join → accessToken → connect.
+-  async function joinGuest(
+-    roomCode: string,
+-    name: string,
+-  ): Promise<{ socket: ClientSocket; token: string; identityId: string }> {
+-    const res = await app.inject({
+-      method: 'POST',
+-      url: '/rooms/join',
+-      payload: { code: roomCode, displayName: name },
+-    });
+-    expect(res.statusCode).toBe(201);
+-    const { accessToken } = joinResponseSchema.parse(res.json());
+-    const identityId = tokens.verifyAccessToken(accessToken).sub;
+-    return { socket: await connect(port, accessToken), token: accessToken, identityId };
+-  }
++async function createPrize(roomId: string, name: string, quantity: number): Promise<{ id: string }> {
++  const res = await app.inject({
++    method: 'POST',
++    url: `/rooms/${roomId}/prizes`,
++    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
++    payload: { name, quantity },
++  });
++  expect(res.statusCode).toBe(201);
++  return res.json() as { id: string };
++}
+ 
+-  // REST с Bearer организатора: guest-claims (kind GUEST + roomId), роль ORGANIZER
+-  // берётся из membership — прецедент transport.e2e-spec.ts:362-367.
+-  async function organizerRestToken(roomId: string): Promise<string> {
+-    return (await tokens.issueGuestTokens(ORG, roomId)).accessToken;
+-  }
++async function fulfillAward(roomId: string, awardId: string) {
++  return app.inject({
++    method: 'POST',
++    url: `/rooms/${roomId}/awards/${awardId}/fulfill`,
++    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
++  });
++}
+ 
+-  async function createPrize(roomId: string, name: string, quantity: number): Promise<{ id: string }> {
+-    const res = await app.inject({
+-      method: 'POST',
+-      url: `/rooms/${roomId}/prizes`,
+-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+-      payload: { name, quantity },
+-    });
+-    expect(res.statusCode).toBe(201);
+-    return res.json() as { id: string };
+-  }
++async function revokeAward(roomId: string, awardId: string) {
++  return app.inject({
++    method: 'POST',
++    url: `/rooms/${roomId}/awards/${awardId}/revoke`,
++    headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
++  });
++}
+ 
+-  async function fulfillAward(roomId: string, awardId: string) {
+-    return app.inject({
+-      method: 'POST',
+-      url: `/rooms/${roomId}/awards/${awardId}/fulfill`,
+-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+-    });
+-  }
++// Организатор на ws: guest-claims токен, роль из membership; subscribe сразу —
++// publish адресуется комнатой подписки (roomId в publish-body не принимается,
++// publishRequestSchema strict).
++async function organizerSocket(roomId: string): Promise<ClientSocket> {
++  const socket = await connect(port, await organizerRestToken(roomId));
++  const ack = await emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
++  expect(ack.ok).toBe(true);
++  return socket;
++}
+ 
+-  async function revokeAward(roomId: string, awardId: string) {
+-    return app.inject({
+-      method: 'POST',
+-      url: `/rooms/${roomId}/awards/${awardId}/revoke`,
+-      headers: { authorization: `Bearer ${await organizerRestToken(roomId)}` },
+-    });
+-  }
++function subscribe(socket: ClientSocket, roomId: string): Promise<SubscribeAck> {
++  return emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
++}
+ 
+-  // Организатор на ws: guest-claims токен, роль из membership; subscribe сразу —
+-  // publish адресуется комнатой подписки (roomId в publish-body не принимается,
+-  // publishRequestSchema strict).
+-  async function organizerSocket(roomId: string): Promise<ClientSocket> {
+-    const socket = await connect(port, await organizerRestToken(roomId));
+-    const ack = await emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
+-    expect(ack.ok).toBe(true);
+-    return socket;
+-  }
++function publish(socket: ClientSocket, type: string, payload: Record<string, unknown>): Promise<PublishAck> {
++  return emitAck<PublishAck>(socket, REALTIME_MESSAGES.PUBLISH, { type, payload });
++}
+ 
+-  function subscribe(socket: ClientSocket, roomId: string): Promise<SubscribeAck> {
+-    return emitAck<SubscribeAck>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId });
+-  }
++// prizeId необязателен (lottery v2, ADR-012): без ключа — безпризовой розыгрыш.
++function runDraw(orgSocket: ClientSocket, drawId: string, prizeId?: string): Promise<PublishAck> {
++  return publish(orgSocket, 'lottery.draw.run', prizeId === undefined ? { drawId } : { drawId, prizeId });
++}
+ 
+-  function publish(socket: ClientSocket, type: string, payload: Record<string, unknown>): Promise<PublishAck> {
+-    return emitAck<PublishAck>(socket, REALTIME_MESSAGES.PUBLISH, { type, payload });
+-  }
++describe('Lottery (e2e, приёмка фазы 3)', () => {
++  let savedPrizeMode: string | undefined;
+ 
+-  function runDraw(orgSocket: ClientSocket, drawId: string, prizeId: string): Promise<PublishAck> {
+-    return publish(orgSocket, 'lottery.draw.run', { drawId, prizeId });
+-  }
++  beforeAll(async () => {
++    // ADR-012 §4 (рулинг C-pre.1): призовые сценарии — прежнее поведение при
++    // PRIZE_MODE='on' (env-дефолт off загейчил бы createPrize и draw.run с
++    // призом). Прецедент JWT_SECRET выше: env ДО createApp, restore в afterAll.
++    savedPrizeMode = process.env.PRIZE_MODE;
++    process.env.PRIZE_MODE = 'on';
++    app = await createApp();
++    port = portOf(app);
++    roomService = app.get(RoomService);
++    tokens = app.get(TokenService);
++  });
++
++  afterAll(async () => {
++    await app.close();
++    restoreEnv('PRIZE_MODE', savedPrizeMode);
++  });
+ 
+   it('1. полный цикл: гости входят → приз → draw.run → draw.completed из пула → AWARDED → fulfill; события публичны live и в replay', async () => {
+     const room = await activeLotteryRoom();
+     const g1 = await joinGuest(room.code, 'Гость-1');
+     const g2 = await joinGuest(room.code, 'Гость-2');
+     expect((await subscribe(g1.socket, room.id)).ok).toBe(true);
+     expect((await subscribe(g2.socket, room.id)).ok).toBe(true);
+     const prize = await createPrize(room.id, 'Главный приз', 1);
+ 
+     const orgSocket = await organizerSocket(room.id);
+@@ -332,51 +350,58 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
+     // откатывается целиком (коммит draw.run второго розыгрыша тоже не ложится).
+     const oks = acks.filter((a): a is { ok: true } => 'ok' in a);
+     const rejects = acks.filter((a): a is { code: string } => 'code' in a);
+     expect(oks).toHaveLength(1);
+     expect(rejects).toEqual([{ code: 'PRIZE_FUND_EXHAUSTED' }]);
+     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(0);
+     expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(1);
+     for (const s of [g1.socket, g2.socket, g3.socket, orgSocket]) s.close();
+   });
+ 
+-  // ADR-012 / амендмент v1.5: verified-ветка REQ-RWD-014 приостановлена, а второй
+-  // живой REGISTERED непредставим ("Identity_single_registered_key" — один REGISTERED
+-  // на инстанс, и это организатор). Сценарий засыпает до задачи манифеста lottery v2
+-  // (draw_eligibility снимается из манифеста); реактивация — с возвратом аккаунтов.
+-  it.skip('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
+-    // Рулинг D-pre.2 (поправка к brief): sketch «10 розыгрышей с quantity 10 → все
+-    // winnerId === registered.id» противоречил реализованному исключению прежних
+-    // победителей ЭТОГО приза из пула (lottery-handlers.ts: после первого розыгрыша
+-    // единственный eligible REGISTERED исключён → DRAW_POOL_EMPTY на повторах).
+-    // Вместо этого — ОДИН розыгрыш (quantity 1): пул verified = {registered}
+-    // детерминированно, гости отфильтрованы.
+-    // HTTP-входа для REGISTERED нет (JoinController создаёт только гостей) —
+-    // членство REGISTERED-партисипанта сеем на уровне БД; пул розыгрыша читается
+-    // из membership (listActiveParticipantPool), так что это честная посадка.
+-    const room = await activeLotteryRoom({ drawEligibility: 'verified' });
++  it('4. безпризовой розыгрыш: draw.run без prizeId → draw.completed с prizeId=null, award НЕ создан; следующий безпризовой исключает прежнего победителя (null-ключ, §0.4)', async () => {
++    const room = await activeLotteryRoom();
+     const g1 = await joinGuest(room.code, 'Гость-1');
+     const g2 = await joinGuest(room.code, 'Гость-2');
+-    await seedIdentity(db.prisma, { id: REG, kind: 'REGISTERED' });
+-    await db.prisma.membership.create({
+-      data: { roomId: room.id, identityId: REG, role: 'PARTICIPANT' },
+-    });
+-    const prize = await createPrize(room.id, 'Приз', 1);
+     const orgSocket = await organizerSocket(room.id);
+ 
+-    const completedFrame = waitEventWhere(orgSocket, 'lottery.draw.completed');
+-    const drawId = crypto.randomUUID();
+-    expect(await runDraw(orgSocket, drawId, prize.id)).toEqual({ ok: true });
+-    expect((await completedFrame).payload).toEqual({ drawId, prizeId: prize.id, winnerId: REG });
++    const drawId1 = crypto.randomUUID();
++    const frame1 = waitEventWhere(orgSocket, 'lottery.draw.completed');
++    expect(await runDraw(orgSocket, drawId1)).toEqual({ ok: true });
++    const completed1 = await frame1;
++    expect(completed1.payload).toMatchObject({ drawId: drawId1, prizeId: null });
++    const winner1 = (completed1.payload as { winnerId: string }).winnerId;
++    expect([g1.identityId, g2.identityId]).toContain(winner1);
+ 
+-    const award = await db.prisma.award.findFirstOrThrow({ where: { roomId: room.id } });
+-    expect(award.winnerId).toBe(REG);
++    // Юридического факта выигрыша нет (ADR-012 §4): awards пуст — и по REST…
++    const list = await app.inject({
++      method: 'GET',
++      url: `/rooms/${room.id}/rewards`,
++      headers: { authorization: `Bearer ${await organizerRestToken(room.id)}` },
++    });
++    expect(list.statusCode).toBe(200);
++    expect((list.json() as { awards: unknown[] }).awards).toHaveLength(0);
++
++    // Второй безпризовой draw (новый drawId): победитель ≠ первому — прежние
++    // безпризовые победители вне пула (ключ null, решение §0.4).
++    const drawId2 = crypto.randomUUID();
++    const frame2 = waitEventWhere(
++      orgSocket,
++      'lottery.draw.completed',
++      (e) => (e.payload as { drawId: string }).drawId === drawId2,
++    );
++    expect(await runDraw(orgSocket, drawId2)).toEqual({ ok: true });
++    const winner2 = ((await frame2).payload as { winnerId: string }).winnerId;
++    expect(winner2).not.toBe(winner1);
++    expect([g1.identityId, g2.identityId]).toContain(winner2);
++
++    // …и прямой проверкой таблицы после обоих розыгрышей.
++    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
+     g1.socket.close();
+     g2.socket.close();
+     orgSocket.close();
+   });
+ 
+   it('5. revoke возвращает quantity ровно один раз и освобождает фонд: приз переразыгрывается (REQ-RWD-007)', async () => {
+     // Поправка к sketch brief'а («переразыгрывается ТОМУ ЖЕ победителю»): то же
+     // исключение прежних победителей, что в рулинге D-pre.2, — прежний победитель
+     // вне пула повторного розыгрыша (state.draws не забывает draw.completed даже
+     // после revoke). Поэтому пул из 2 гостей: повторный розыгрыш детерминированно
+@@ -467,10 +492,53 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
+         winnerId: g.identityId,
+       }),
+     ).toEqual({ code: 'PUBLISH_FORBIDDEN' });
+     // clientInitiated, но роль PARTICIPANT — отказ модуля.
+     expect(
+       await publish(g.socket, 'lottery.draw.run', { drawId: crypto.randomUUID(), prizeId: crypto.randomUUID() }),
+     ).toEqual({ code: 'PUBLISH_FORBIDDEN' });
+     g.socket.close();
+   });
+ });
++
++// RF3 (ADR-012 §4): draw.run С призом при PRIZE_MODE='off' отклонён PRIZES_DISABLED
++// на уровне эффекта — до коммитов, поэтому откат всего dispatch. Отдельный
++// app-инстанс на той же testcontainer-БД (рулинг C-pre.1); describes серийны.
++describe('Lottery prize_mode=off (e2e, ADR-012 §4)', () => {
++  beforeAll(async () => {
++    app = await createApp({ PRIZE_MODE: 'off' });
++    port = portOf(app);
++    roomService = app.get(RoomService);
++    tokens = app.get(TokenService);
++  });
++
++  afterAll(async () => {
++    await app.close();
++  });
++
++  it('draw.run с prizeId при off → ack PRIZES_DISABLED; в логе нет ни draw.run, ни draw.completed (эффект до коммитов); безпризовой draw гейтом не затронут', async () => {
++    const room = await activeLotteryRoom();
++    const g = await joinGuest(room.code, 'Гость');
++    const orgSocket = await organizerSocket(room.id);
++
++    // Приз создать нельзя (createPrize тоже загейчен) — prizeId произвольный uuid;
++    // гейт срабатывает ДО findFirst (порядок строк в awardPrize), поэтому отказ —
++    // PRIZES_DISABLED, а не PRIZE_UNKNOWN.
++    expect(await runDraw(orgSocket, crypto.randomUUID(), crypto.randomUUID())).toEqual({
++      code: 'PRIZES_DISABLED',
++    });
++    const log = await readRoomLog(db.prisma, room.id);
++    expect(log.filter((e) => e.type === 'lottery.draw.run')).toHaveLength(0);
++    expect(log.filter((e) => e.type === 'lottery.draw.completed')).toHaveLength(0);
++    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
++
++    // Контроль: безпризовой розыгрыш при off работает — гейтится сущность приза,
++    // не выбор победителя (REQ-RWD-002b).
++    const frame = waitEventWhere(orgSocket, 'lottery.draw.completed');
++    const drawId = crypto.randomUUID();
++    expect(await runDraw(orgSocket, drawId)).toEqual({ ok: true });
++    expect((await frame).payload).toMatchObject({ drawId, prizeId: null, winnerId: g.identityId });
++
++    g.socket.close();
++    orgSocket.close();
++  });
++});
+diff --git a/packages/app-lottery/src/lottery-events.ts b/packages/app-lottery/src/lottery-events.ts
+index b1a62e3..195f384 100644
+--- a/packages/app-lottery/src/lottery-events.ts
++++ b/packages/app-lottery/src/lottery-events.ts
+@@ -1,12 +1,15 @@
+ import { z } from 'zod';
+ 
+ // Wire-имена — dotted-lowercase (shortEventNameSchema, erratum нейминга ф.2).
+ export const drawRunPayload = z.strictObject({
+   drawId: z.uuid(), // клиентский uuid — идемпотентность команды розыгрыша
+-  prizeId: z.uuid(),
++  // ADR-012 §4 / REQ-RWD-002b: розыгрыш без сущности приза — «выбор победителя».
++  prizeId: z.uuid().optional(),
+ });
+ export const drawCompletedPayload = z.strictObject({
+   drawId: z.uuid(),
+-  prizeId: z.uuid(),
++  // Ключ обязателен (nullable ≠ optional): безпризовость — явный факт кадра
++  // (REQ-DEV-007: аддитивная эволюция — старый призовой кадр остаётся валидным).
++  prizeId: z.uuid().nullable(),
+   winnerId: z.uuid(), // только id (REQ-SEC-009); имя — из membership-проекции
+ });
+diff --git a/packages/app-lottery/src/lottery-handlers.spec.ts b/packages/app-lottery/src/lottery-handlers.spec.ts
+index c4e54ec..e52fac6 100644
+--- a/packages/app-lottery/src/lottery-handlers.spec.ts
++++ b/packages/app-lottery/src/lottery-handlers.spec.ts
+@@ -1,23 +1,26 @@
+ import {
+   AppRejection,
+   type AppHostContext,
+   type ContractErrorCode,
+ } from '@mymozhem/sdk';
+ import { handleLotteryPublish } from './lottery-handlers';
+ import { createLotteryApp, createLotteryRuntime } from './lottery-runtime';
+ import { buildLotteryManifest, LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION } from './lottery-manifest';
++import { lotterySettingsSchema } from './lottery-settings';
+ import { initialLotteryState, type LotteryState } from './lottery-state';
+ 
+ // Командный handler розыгрыша: ролевой гейт (только ORGANIZER), выбор победителя
+-// только через ctx.randomInt (REQ-RWD-011), eligibility-фильтр пула (REQ-RWD-014),
+-// идемпотентность по drawId на уровне app-команды (REQ-RWD-003, design §4).
++// только через ctx.randomInt (REQ-RWD-011), winner-exclusion по ключу prizeId
++// (null — безпризовые розыгрыши, решение §0.4), идемпотентность по drawId на
++// уровне app-команды (REQ-RWD-003, design §4). v2 (ADR-012): prizeId необязателен
++// (REQ-RWD-002b), draw_eligibility удалена (REQ-RWD-014 приостановлена).
+ 
+ const ORG = '0f8fad5b-d9cb-469f-a165-70867728950e';
+ 
+ const D0 = 'd0e0f0a1-0001-4a01-8001-000000000001';
+ const D1 = 'd1e1f1a2-0002-4a02-8002-000000000002';
+ const P1 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+ const W1 = 'a3a8d3e1-9e5b-4f1c-8a2b-3c4d5e6f7081';
+ const W2 = 'b4b9e4f2-af6c-402d-9b3c-4d5e6f708192';
+ const W3 = 'c5caf503-b07d-413e-ac4d-5e6f708192a3';
+ 
+@@ -101,28 +104,69 @@ describe('handleLotteryPublish draw.run', () => {
+     });
+   });
+ 
+   it('пустой пул → DRAW_POOL_EMPTY до коммита', () => {
+     expectRejection(
+       () => handleLotteryPublish(ctx({ actorRole: 'ORGANIZER', drawPool: [] }), 'draw.run', { drawId: D1, prizeId: P1 }),
+       'DRAW_POOL_EMPTY',
+     );
+   });
+ 
+-  it('verified: гости вне пула — победитель всегда REGISTERED (REQ-RWD-014)', () => {
+-    const settings = { drawEligibility: 'verified' };
++  it('verified-ветка удалена (REQ-RWD-014 приостановлена): настройка drawEligibility отклоняется strict-схемой', () => {
++    expect(lotterySettingsSchema.safeParse({ drawEligibility: 'verified' }).success).toBe(false);
++  });
++
++  it('безпризовой draw: draw.completed с prizeId=null, БЕЗ эффекта award.prize (REQ-RWD-002b)', () => {
++    const result = handleLotteryPublish(ctx({ settings: {}, drawPool: POOL }), 'draw.run', { drawId: D1 });
++    const completed = result.commits.find((c) => c.shortName === 'draw.completed');
++    expect(completed?.payload).toMatchObject({ drawId: D1, prizeId: null });
++    expect(result.effects).toEqual([]);
++  });
++
++  it('winner-exclusion по ключу null: победитель безпризового розыгрыша вне пула следующего безпризового (решение §0.4)', () => {
++    const state = { draws: { [D0]: { prizeId: null, winnerId: W1 } } };
++    const result = handleLotteryPublish(
++      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
++      'draw.run',
++      { drawId: D1 },
++    );
++    expect(result.commits[1].payload).toMatchObject({ prizeId: null, winnerId: W2 }); // W1 исключён, randomInt() = 0 → pool[0]
++  });
++
++  it('безпризовые и призовые пулы победителей не пересекаются: приз X не исключает безпризового победителя', () => {
++    const state = { draws: { [D0]: { prizeId: null, winnerId: W1 } } };
+     const result = handleLotteryPublish(
+-      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, settings }),
++      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
+       'draw.run',
+       { drawId: D1, prizeId: P1 },
+     );
+-    expect(result.commits[1].payload.winnerId).toBe(W3); // единственный REGISTERED
++    expect(result.commits[1].payload.winnerId).toBe(W1); // W1 остаётся в пуле приза P1
++  });
++
++  it('replay безпризового drawId: re-emit прежнего результата с prizeId=null, без эффекта', () => {
++    const state = { draws: { [D1]: { prizeId: null, winnerId: W2 } } };
++    const result = handleLotteryPublish(
++      ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }),
++      'draw.run',
++      { drawId: D1 },
++    );
++    expect(result).toEqual({
++      commits: [
++        {
++          shortName: 'draw.completed',
++          payload: { drawId: D1, prizeId: null, winnerId: W2 },
++          visibility: 'public',
++          actor: 'server',
++        },
++      ],
++      effects: [],
++    });
+   });
+ 
+   it('прежний победитель этого приза исключён из пула (UX; индекс — страховка)', () => {
+     const state = { draws: { [D0]: { prizeId: P1, winnerId: W1 } } };
+     const result = handleLotteryPublish(ctx({ actorRole: 'ORGANIZER', drawPool: POOL, state }), 'draw.run', {
+       drawId: D1,
+       prizeId: P1,
+     });
+     expect(result.commits[1].payload.winnerId).toBe(W2); // W1 исключён, randomInt() = 0 → новый pool[0]
+   });
+diff --git a/packages/app-lottery/src/lottery-handlers.ts b/packages/app-lottery/src/lottery-handlers.ts
+index f4992ae..dd82ed4 100644
+--- a/packages/app-lottery/src/lottery-handlers.ts
++++ b/packages/app-lottery/src/lottery-handlers.ts
+@@ -1,18 +1,17 @@
+ import {
+   AppRejection,
+   type AppHostContext,
+   type AppPublishResult,
+ } from '@mymozhem/sdk';
+ import type { z } from 'zod';
+ import { drawRunPayload } from './lottery-events';
+-import { lotterySettingsSchema } from './lottery-settings';
+ import type { LotteryState } from './lottery-state';
+ 
+ // actorId — только из ctx, никогда из payload (REQ-RT-009). Случайность — только
+ // ctx.randomInt (CSPRNG хоста, REQ-RWD-011); Math.random в packages/app-*
+ // запрещён lint-правилом (Task 11).
+ export function handleLotteryPublish(
+   ctx: AppHostContext<LotteryState>,
+   shortName: string,
+   payload: Record<string, unknown>,
+ ): AppPublishResult {
+@@ -33,39 +32,36 @@ export function handleLotteryPublish(
+       commits: [{
+         shortName: 'draw.completed',
+         payload: { drawId: command.drawId, prizeId: existing.prizeId, winnerId: existing.winnerId },
+         visibility: 'public',
+         actor: 'server',
+       }],
+       effects: [],
+     };
+   }
+ 
+-  const settings = lotterySettingsSchema.parse(ctx.settings);
+-  // Пул — снапшот от диспетчера (ctx.drawPool). verified: отсекаем GUEST (REQ-RWD-014).
+-  let pool = settings.drawEligibility === 'verified'
+-    ? ctx.drawPool.filter((e) => e.kind !== 'GUEST')
+-    : [...ctx.drawPool];
+-  // Прежние победители этого приза вне пула (UX; частичный индекс — страховка).
++  const prizeId = command.prizeId ?? null;
++  // Прежние победители ЭТОГО приза вне пула; безпризовый розыгрыш исключает
++  // прежних безпризовых победителей (ключ null, решение §0.4).
+   const previousWinners = new Set(
+     Object.values(ctx.state.draws)
+-      .filter((d) => d.prizeId === command.prizeId)
++      .filter((d) => d.prizeId === prizeId)
+       .map((d) => d.winnerId),
+   );
+-  pool = pool.filter((e) => !previousWinners.has(e.identityId));
+-  if (pool.length === 0) {
+-    throw new AppRejection('DRAW_POOL_EMPTY', 'draw pool is empty');
+-  }
++  const pool = ctx.drawPool.filter((e) => !previousWinners.has(e.identityId));
++  if (pool.length === 0) throw new AppRejection('DRAW_POOL_EMPTY', 'draw pool is empty');
+   const winnerId = pool[ctx.randomInt(pool.length)].identityId;
+   return {
+     commits: [
+       { shortName: 'draw.run', payload: command, visibility: 'public', actor: 'publisher' },
+       {
+         shortName: 'draw.completed',
+-        payload: { drawId: command.drawId, prizeId: command.prizeId, winnerId },
++        payload: { drawId: command.drawId, prizeId, winnerId },
+         visibility: 'public',
+         actor: 'server',
+       },
+     ],
+-    effects: [{ kind: 'award.prize', prizeId: command.prizeId, winnerId }],
++    // Эффект списания фонда — только при реальном призе; безпризовый draw
++    // юридического факта выигрыша не создаёт (ADR-012 §4).
++    effects: prizeId ? [{ kind: 'award.prize', prizeId, winnerId }] : [],
+   };
+ }
+diff --git a/packages/app-lottery/src/lottery-manifest.contract.spec.ts b/packages/app-lottery/src/lottery-manifest.contract.spec.ts
+index f72f30f..2e3bf31 100644
+--- a/packages/app-lottery/src/lottery-manifest.contract.spec.ts
++++ b/packages/app-lottery/src/lottery-manifest.contract.spec.ts
+@@ -1,14 +1,13 @@
+ import Ajv2020 from 'ajv/dist/2020';
+ import {
+   appManifestSchema,
+-  readPropertyVisibility,
+   type Visibility,
+ } from '@mymozhem/sdk';
+ import { buildLotteryManifest, LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION } from './lottery-manifest';
+ import { lotterySettingsSchema } from './lottery-settings';
+ 
+ // REQ-CTR-005: манифест лотереи валидируется против контракта, под которым он
+ // живёт, — appManifestSchema для формы, Ajv поверх ЗАРЕГИСТРИРОВАННЫХ JSON Schema
+ // для того, что ядро реально принуждает (REQ-CORE-007). Zod-исходники — поверхность
+ // авторства; зарегистрированные снапшоты — артефакт.
+ const manifest = buildLotteryManifest();
+@@ -26,21 +25,21 @@ const EXPECTED_EVENTS = {
+ 
+ describe('lottery manifest', () => {
+   it('satisfies the manifest contract (appManifestSchema)', () => {
+     expect(appManifestSchema.safeParse(manifest).success).toBe(true);
+   });
+ 
+   it('carries the lottery identity', () => {
+     expect(manifest.appId).toBe(LOTTERY_APP_ID);
+     expect(manifest.appId).toBe('lottery');
+     expect(manifest.manifestVersion).toBe(LOTTERY_MANIFEST_VERSION);
+-    expect(manifest.manifestVersion).toBe(1);
++    expect(manifest.manifestVersion).toBe(2);
+   });
+ 
+   it('declares the rewards capability (REQ-RWD-001/005)', () => {
+     expect(manifest.capabilities).toEqual(['rewards']);
+   });
+ 
+   it('registers exactly the 2 lottery event types', () => {
+     expect(Object.keys(manifest.events).sort()).toEqual(Object.keys(EXPECTED_EVENTS).sort());
+   });
+ 
+@@ -50,70 +49,78 @@ describe('lottery manifest', () => {
+       const event = manifest.events[name];
+       expect(event?.visibility).toBe(expected.visibility);
+       expect(event?.clientInitiated).toBe(expected.clientInitiated);
+     },
+   );
+ });
+ 
+ describe('registered appSettings JSON Schema', () => {
+   const validate = ajv.compile(manifest.appSettings);
+ 
+-  // Зарегистрированный артефакт (z.toJSONSchema, io:'input' — решение владельца
+-  // C-9.1, REQ-RWD-014): defaulted ключ drawEligibility НЕ required на входе —
+-  // configure `{}` проходит verdict-only гейт ядра (REQ-CORE-007). Дефолт
+-  // guests_allowed применяет zod-parse в handler'е модуля.
+-  it('accepts an empty settings snapshot (drawEligibility defaulted, optional in the registered schema)', () => {
++  // v2 (ADR-012): draw_eligibility удалена (verified-ветка REQ-RWD-014
++  // приостановлена — REGISTERED только организатор). Зарегистрированный
++  // артефакт — пустой strict-объект: единственный валидный snapshot — `{}`,
++  // посторонние ключи отклоняются verdict-only гейтом ядра (REQ-CORE-007).
++  it('accepts an empty settings snapshot', () => {
+     expect(validate({})).toBe(true);
+   });
+ 
+-  it.each([['guests_allowed'], ['verified']] as const)('accepts drawEligibility=%s', (drawEligibility) => {
+-    expect(validate({ drawEligibility })).toBe(true);
+-  });
+-
+-  it('rejects an unknown drawEligibility value', () => {
+-    expect(validate({ drawEligibility: 'everyone' })).toBe(false);
++  it.each([['guests_allowed'], ['verified']] as const)('rejects the removed drawEligibility key (%s)', (drawEligibility) => {
++    expect(validate({ drawEligibility })).toBe(false);
+   });
+ 
+   it('rejects an unknown extra key', () => {
+     expect(validate({ bogus: 1 })).toBe(false);
+   });
+ 
+-  it('defaults drawEligibility to guests_allowed (REQ-RWD-014)', () => {
+-    expect(lotterySettingsSchema.parse({}).drawEligibility).toBe('guests_allowed');
+-  });
+-
+-  it('exposes drawEligibility as public', () => {
+-    expect(readPropertyVisibility(manifest.appSettings, 'drawEligibility')).toBe('public');
++  it('zod-схема strict: parse({ drawEligibility: ... }) → отказ (REQ-RWD-014 приостановлена)', () => {
++    expect(lotterySettingsSchema.safeParse({ drawEligibility: 'verified' }).success).toBe(false);
++    expect(lotterySettingsSchema.safeParse({}).success).toBe(true);
+   });
+ });
+ 
+ describe('registered event JSON Schemas', () => {
+   const validatorFor = (name: string) => {
+     const entry = manifest.events[name];
+     if (!entry) {
+       throw new Error(`no such event in the lottery manifest: ${name}`);
+     }
+     return ajv.compile(entry.schema);
+   };
+ 
+   const PAYLOAD_CASES: ReadonlyArray<readonly [string, string, unknown, boolean]> = [
+     ['draw.run accepts a valid payload', 'draw.run', { drawId: D1, prizeId: P1 }, true],
++    // v2 (ADR-012 §4 / REQ-RWD-002b): prizeId необязателен — розыгрыш без
++    // сущности приза («выбор победителя»).
++    ['draw.run accepts a missing prizeId (безпризовой розыгрыш)', 'draw.run', { drawId: D1 }, true],
+     ['draw.run rejects an invalid drawId uuid', 'draw.run', { drawId: 'not-a-uuid', prizeId: P1 }, false],
+     ['draw.run rejects an invalid prizeId uuid', 'draw.run', { drawId: D1, prizeId: 'not-a-uuid' }, false],
+-    ['draw.run rejects a missing prizeId', 'draw.run', { drawId: D1 }, false],
+     ['draw.run rejects an extra key', 'draw.run', { drawId: D1, prizeId: P1, extra: 1 }, false],
+     [
+       'draw.completed accepts a valid payload',
+       'draw.completed',
+       { drawId: D1, prizeId: P1, winnerId: W1 },
+       true,
+     ],
++    [
++      'draw.completed accepts prizeId=null (безпризовой розыгрыш)',
++      'draw.completed',
++      { drawId: D1, prizeId: null, winnerId: W1 },
++      true,
++    ],
++    // Ключ обязателен (nullable ≠ optional): безпризовость — явный факт кадра.
++    [
++      'draw.completed rejects a missing prizeId',
++      'draw.completed',
++      { drawId: D1, winnerId: W1 },
++      false,
++    ],
+     [
+       'draw.completed rejects a missing winnerId',
+       'draw.completed',
+       { drawId: D1, prizeId: P1 },
+       false,
+     ],
+     [
+       'draw.completed rejects an invalid winnerId uuid',
+       'draw.completed',
+       { drawId: D1, prizeId: P1, winnerId: 'not-a-uuid' },
+diff --git a/packages/app-lottery/src/lottery-manifest.ts b/packages/app-lottery/src/lottery-manifest.ts
+index 87c4b0c..4ee263d 100644
+--- a/packages/app-lottery/src/lottery-manifest.ts
++++ b/packages/app-lottery/src/lottery-manifest.ts
+@@ -1,16 +1,17 @@
+ import { defineApp, type AppManifest } from '@mymozhem/sdk';
+ import { lotterySettingsSchema } from './lottery-settings';
+ import { drawCompletedPayload, drawRunPayload } from './lottery-events';
+ 
+ export const LOTTERY_APP_ID = 'lottery';
+-export const LOTTERY_MANIFEST_VERSION = 1;
++// v2 (ADR-012): prizeId необязателен, draw_eligibility удалена.
++export const LOTTERY_MANIFEST_VERSION = 2;
+ 
+ export function buildLotteryManifest(): AppManifest {
+   return defineApp({
+     appId: LOTTERY_APP_ID,
+     manifestVersion: LOTTERY_MANIFEST_VERSION,
+     capabilities: ['rewards'], // REQ-RWD-001/005: делегирование фонда/выбора — capability
+     appSettings: lotterySettingsSchema,
+     events: {
+       'draw.run': { schema: drawRunPayload, visibility: 'public', clientInitiated: true },
+       'draw.completed': { schema: drawCompletedPayload, visibility: 'public', clientInitiated: false },
+diff --git a/packages/app-lottery/src/lottery-settings.ts b/packages/app-lottery/src/lottery-settings.ts
+index 6cb423a..9715489 100644
+--- a/packages/app-lottery/src/lottery-settings.ts
++++ b/packages/app-lottery/src/lottery-settings.ts
+@@ -1,12 +1,7 @@
+ import { z } from 'zod';
+ 
+-// Атрибут розыгрыша (REQ-RWD-014): дефолт guests_allowed; verified = вес только
+-// у REGISTERED. Замораживается при ACTIVE (REQ-RT-004); изменение —
+-// переконфигурация в DRAFT (design §0.8).
+-export const lotterySettingsSchema = z.strictObject({
+-  drawEligibility: z
+-    .enum(['guests_allowed', 'verified'])
+-    .default('guests_allowed')
+-    .meta({ 'x-visibility': 'public' }),
+-});
++// ADR-012: draw_eligibility удалена (verified-ветка REQ-RWD-014 приостановлена —
++// REGISTERED только организатор). Схема сохраняется как точка расширения
++// appSettings лотереи; strict — посторонние ключи отклоняются.
++export const lotterySettingsSchema = z.strictObject({});
+ export type LotterySettings = z.infer<typeof lotterySettingsSchema>;
+diff --git a/packages/app-lottery/src/lottery-state.spec.ts b/packages/app-lottery/src/lottery-state.spec.ts
+index 5b7a365..1db903b 100644
+--- a/packages/app-lottery/src/lottery-state.spec.ts
++++ b/packages/app-lottery/src/lottery-state.spec.ts
+@@ -31,15 +31,21 @@ describe('reduceLottery', () => {
+     const s0 = initialLotteryState();
+     const e = event('draw.completed', { drawId: D1, prizeId: P1, winnerId: W1 });
+     const s1 = reduceLottery(s0, e);
+     expect(s1.draws[D1]).toEqual({ prizeId: P1, winnerId: W1 });
+     expect(reduceLottery(s1, e)).toBe(s1); // та же ссылка — ничего не изменилось
+     expect(
+       reduceLottery(s1, event('draw.completed', { drawId: D1, prizeId: P1, winnerId: W2 })).draws[D1].winnerId,
+     ).toBe(W1);
+   });
+ 
++  it('draw.completed с prizeId=null записывается с null (безпризовой розыгрыш, REQ-RWD-002b)', () => {
++    const s0 = initialLotteryState();
++    const s1 = reduceLottery(s0, event('draw.completed', { drawId: D1, prizeId: null, winnerId: W1 }));
++    expect(s1.draws[D1]).toEqual({ prizeId: null, winnerId: W1 });
++  });
++
+   it('неизвестный тип — no-op; состояние иммутабельно', () => {
+     const s0 = initialLotteryState();
+     expect(reduceLottery(s0, event('something.else', {}))).toBe(s0);
+   });
+ });
+diff --git a/packages/app-lottery/src/lottery-state.ts b/packages/app-lottery/src/lottery-state.ts
+index 6bc1401..4abaa40 100644
+--- a/packages/app-lottery/src/lottery-state.ts
++++ b/packages/app-lottery/src/lottery-state.ts
+@@ -1,19 +1,19 @@
+ import type { AppLogEvent } from '@mymozhem/sdk';
+ import type { z } from 'zod';
+ import type { drawCompletedPayload } from './lottery-events';
+ 
+ // Проекция лотереи (REQ-CORE-004): список розыгрышей из лога; своих таблиц нет —
+ // состояние наград в rewards, история в логе. Использованные drawId хранятся
+ // здесь — идемпотентность команды (design §4).
+ export interface LotteryState {
+-  readonly draws: Readonly<Record<string, { readonly prizeId: string; readonly winnerId: string }>>;
++  readonly draws: Readonly<Record<string, { readonly prizeId: string | null; readonly winnerId: string }>>;
+ }
+ 
+ export function initialLotteryState(): LotteryState {
+   return { draws: {} };
+ }
+ 
+ export function reduceLottery(state: LotteryState, event: AppLogEvent): LotteryState {
+   if (event.shortName !== 'draw.completed') return state;
+   const p = event.payload as z.infer<typeof drawCompletedPayload>;
+   if (state.draws[p.drawId]) return state; // повтор (replay/live дубль) — no-op
+diff --git a/packages/core/src/app-runtime/app-runtime.int-spec.ts b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+index 27980ce..13ea556 100644
+--- a/packages/core/src/app-runtime/app-runtime.int-spec.ts
++++ b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+@@ -635,21 +635,26 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
+         data: { roomId: room.id, name: 'Приз', quantityTotal: 2, quantity: 2 },
+       });
+       const effect: AppEffect = { kind: 'award.prize', prizeId: prize.id, winnerId: winner.id };
+       const mod = new CapableRuntime({
+         commits: [
+           { shortName: 'note.posted', payload: { n: 1 }, visibility: 'public', actor: 'publisher' },
+           { shortName: 'note.echoed', payload: { n: 2 }, visibility: 'public', actor: 'server' },
+         ],
+         effects: [effect, effect], // сетевой повтор в одном батче — не отказ
+       });
+-      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox);
++      // ADR-012 §4 (рулинг C-pre.1): реальный effect-execution — при PRIZE_MODE
++      // 'on', иначе гейт отклонил бы award.prize (PRIZES_DISABLED).
++      const rewardsHandler = new RewardsService(db.prisma, membership, eventLog, outbox, {
++        ...TEST_CONFIG,
++        PRIZE_MODE: 'on',
++      });
+       const rt = runtimeWith([mod], rewardsHandler);
+ 
+       await rt.dispatch({ roomId: room.id, actorId: P1, appId: 'test-app', shortName: 'note.posted', payload: { n: 1 } });
+ 
+       expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(1);
+       expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
+       const log = await readRoomLog(db.prisma, room.id);
+       expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(1);
+       expect(log.filter((e) => e.type === 'test-app.note.echoed')).toHaveLength(1);
+       expect(log.filter((e) => e.type === 'rewards.reward.awarded')).toHaveLength(1);
+diff --git a/packages/core/src/identity/guest-sweep.int-spec.ts b/packages/core/src/identity/guest-sweep.int-spec.ts
+index 8ecd2c4..257a9dc 100644
+--- a/packages/core/src/identity/guest-sweep.int-spec.ts
++++ b/packages/core/src/identity/guest-sweep.int-spec.ts
+@@ -164,22 +164,24 @@ describe('GuestSweepService — приостановка при открытой
+         // RealtimeGateway (провайдер RealtimeModule) разрешает AppRuntimeService
+         // через global-провайдер — без register DI не собирается.
+         AppRuntimeModule.register([]),
+         MembershipModule,
+         RealtimeModule,
+         RewardsModule,
+         IdentityModule,
+         TestAnonymizationWiringModule,
+       ],
+     })
++      // ADR-012 §4 (принцип рулинга C-pre.1): сьют исполняет эффект award.prize
++      // через RewardsService — призовый путь, работает при PRIZE_MODE='on'.
+       .overrideProvider(APP_CONFIG)
+-      .useValue(TEST_CONFIG)
++      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
+       .compile();
+     await moduleRef.init();
+     sweep = moduleRef.get(GuestSweepService);
+     rewards = moduleRef.get(RewardsService);
+     outbox = moduleRef.get(EventOutbox);
+   }, 120_000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+diff --git a/packages/core/src/rewards/rewards.controller.int-spec.ts b/packages/core/src/rewards/rewards.controller.int-spec.ts
+index d034705..0c7c293 100644
+--- a/packages/core/src/rewards/rewards.controller.int-spec.ts
++++ b/packages/core/src/rewards/rewards.controller.int-spec.ts
+@@ -44,22 +44,24 @@ describe('RewardsController (int)', () => {
+         AppRuntimeModule.register([]),
+         AuthModule,
+         MembershipModule,
+         RealtimeModule,
+         RoomModule,
+         RewardsModule,
+       ],
+       providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],
+     })
+       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      // ADR-012 §4 (рулинг C-pre.1): призовые кейсы этого сьюта — прежнее поведение
++      // при PRIZE_MODE='on'; гейт-кейс при 'off' — отдельный describe ниже.
+       .overrideProvider(APP_CONFIG)
+-      .useValue(TEST_CONFIG)
++      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
+       .compile();
+     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+     await app.init();
+     await app.listen(0, '127.0.0.1');
+     tokens = app.get(TokenService);
+     roomService = app.get(RoomService);
+     rewards = app.get(RewardsService);
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+   }, 120_000);
+ 
+@@ -199,10 +201,68 @@ describe('RewardsController (int)', () => {
+     expect(forbidden.json()).toEqual({ code: 'ACTOR_NOT_ORGANIZER' });
+   });
+ 
+   it('без токена → 401 SESSION_INVALID', async () => {
+     const { room } = await orgRoom();
+     const res = await app.inject({ method: 'GET', url: `/rooms/${room.id}/rewards` });
+     expect(res.statusCode).toBe(401);
+     expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
+   });
+ });
++
++// Гейт призового режима на HTTP-границе (ADR-012 §4): POST /rooms/:id/prizes при
++// PRIZE_MODE='off' → 403 PRIZES_DISABLED, наружу ровно {code} (REQ-SEC-006).
++// Свой app и свой testcontainer: основной сьют бежит при 'on' (рулинг C-pre.1).
++describe('RewardsController prize_mode=off (ADR-012 §4)', () => {
++  let db: TestDb;
++  let app: NestFastifyApplication;
++  let tokens: TokenService;
++  let roomService: RoomService;
++
++  const ORG = '00000000-0000-4000-8000-000000000001';
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        AppRuntimeModule.register([]),
++        AuthModule,
++        MembershipModule,
++        RealtimeModule,
++        RoomModule,
++        RewardsModule,
++      ],
++      providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],
++    })
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG) // PRIZE_MODE: 'off' — дефолт тестового конфига
++      .compile();
++    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    await app.init();
++    await app.listen(0, '127.0.0.1');
++    tokens = app.get(TokenService);
++    roomService = app.get(RoomService);
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++  }, 120_000);
++
++  afterAll(async () => {
++    await app.close();
++    await db.stop();
++  });
++
++  it('POST /rooms/:id/prizes при PRIZE_MODE=off → 403 PRIZES_DISABLED', async () => {
++    const room = await roomService.create(ORG);
++    const { accessToken } = await tokens.issueGuestTokens(ORG, room.id);
++    const res = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/prizes`,
++      headers: { authorization: `Bearer ${accessToken}` },
++      payload: { name: 'Приз', quantity: 1 },
++    });
++    expect(res.statusCode).toBe(403);
++    expect(res.json()).toEqual({ code: 'PRIZES_DISABLED' });
++    expect(await db.prisma.prize.count({ where: { roomId: room.id } })).toBe(0);
++  });
++});
+diff --git a/packages/core/src/rewards/rewards.errors.ts b/packages/core/src/rewards/rewards.errors.ts
+index a18cd1b..ba77861 100644
+--- a/packages/core/src/rewards/rewards.errors.ts
++++ b/packages/core/src/rewards/rewards.errors.ts
+@@ -26,10 +26,18 @@ export class RewardAlreadyResolvedError extends ContractError {
+   }
+ }
+ 
+ // C-8.1 (ф.4): награждение анонимизированной (свип) или неизвестной identity
+ // отклонено — приз осиротел бы (displayName уже NULL, вручать некому).
+ export class IdentityAnonymizedError extends ContractError {
+   constructor(identityId: string) {
+     super('IDENTITY_ANONYMIZED', `identity ${identityId} is anonymized or unknown — prize would be orphaned`);
+   }
+ }
++
++// ADR-012 §4: призовой режим выключен конфигурацией (дефолт). Не гейтятся:
++// fulfill/revoke/list — урегулирование существующих awards (REQ-RWD-009).
++export class PrizesDisabledError extends ContractError {
++  constructor() {
++    super('PRIZES_DISABLED', 'prize mode is off (ADR-012)');
++  }
++}
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+index 4a58546..5648068 100644
+--- a/packages/core/src/rewards/rewards.int-spec.ts
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -38,51 +38,57 @@ describe('RewardsService (int)', () => {
+         AppRegistryModule.register([]),
+         // RealtimeGateway (провайдер RealtimeModule) разрешает AppRuntimeService
+         // через global-провайдер — без register DI не собирается.
+         AppRuntimeModule.register([]),
+         MembershipModule,
+         RealtimeModule,
+         RewardsModule,
+       ],
+     })
+       // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      // ADR-012 §4 (рулинг C-pre.1): призовые кейсы этого сьюта — прежнее поведение
++      // при PRIZE_MODE='on'; гейт-кейсы при 'off' — отдельный describe ниже.
+       .overrideProvider(APP_CONFIG)
+-      .useValue(TEST_CONFIG)
++      .useValue({ ...TEST_CONFIG, PRIZE_MODE: 'on' })
+       .compile();
+     await moduleRef.init();
+     rewards = moduleRef.get(RewardsService);
+     outbox = moduleRef.get(EventOutbox);
+   }, 120_000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     // ADR-012: identity."Identity" в списке — seedPrize сеет организатора на вызов,
+     // а "Identity_single_registered_key" допускает ровно одного живого REGISTERED.
+     await db.prisma.$executeRawUnsafe(
+       'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE',
+     );
+   });
+ 
+   // Хелпер: комната DRAFT с организатором (membership нужен assertOrganizer в
+-  // fulfill/revoke) + приз с фондом quantity. Значения уникальны на вызов:
++  // fulfill/revoke/createPrize). Значения уникальны на вызов:
+   // тесты делят одну testcontainer-БД.
+-  async function seedPrize(quantity: number) {
++  async function seedRoom() {
+     const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
+     const room = await db.prisma.room.create({
+       data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+     });
+     await db.prisma.membership.create({
+       data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
+     });
++    return { org, room };
++  }
++  async function seedPrize(quantity: number) {
++    const { org, room } = await seedRoom();
+     const prize = await db.prisma.prize.create({
+       data: { roomId: room.id, name: 'Приз', quantityTotal: quantity, quantity },
+     });
+     return { org, room, prize };
+   }
+   const guest = () => seedIdentity(db.prisma, { kind: 'GUEST' });
+   const prizeEffect = (prizeId: string, winnerId: string): AppEffect => ({
+     kind: 'award.prize',
+     prizeId,
+     winnerId,
+@@ -263,22 +269,129 @@ describe('RewardsService (int)', () => {
+     await outbox.run((tx) =>
+       rewards.executeEffects(tx, room.id, 'quiz', [
+         { kind: 'award.points', identityId: p.id, points: 900, reason: 'quiz.round' },
+       ]),
+     );
+     const grants = await db.prisma.pointsGrant.findMany({ where: { roomId: room.id } });
+     expect(grants).toHaveLength(1);
+     expect(grants[0]).toMatchObject({ identityId: p.id, points: 900, reason: 'quiz.round', sourceAppId: 'quiz' });
+   });
+ 
++  it('on: createPrize работает (конфиг с PRIZE_MODE: on) — контроль гейта ADR-012 §4', async () => {
++    const { org, room } = await seedRoom();
++    const prize = await rewards.createPrize(room.id, org.id, { name: 'X', quantity: 1 });
++    expect(prize).toMatchObject({ roomId: room.id, name: 'X', quantity: 1, quantityTotal: 1 });
++  });
++
+   it('отказ эффекта откатывает транзакцию целиком — награды и события нет (подход A)', async () => {
+     const { room } = await seedPrize(1);
+     const winner = await guest();
+     await expect(
+       outbox.run((tx) =>
+         rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(randomUUID(), winner.id)]),
+       ),
+     ).rejects.toMatchObject({ code: 'PRIZE_UNKNOWN' });
+     expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
+     expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(0);
+   });
+ });
++
++// Гейт призового режима (ADR-012 §4, решение §0.3): createPrize и эффект
++// award.prize отклоняются PRIZES_DISABLED при PRIZE_MODE='off' (дефолт
++// TEST_CONFIG — покрывает первый кейс). fulfill/revoke/list НЕ гейтятся —
++// урегулирование существующих awards (REQ-RWD-009). Свой модуль и свой
++// testcontainer: основной сьют бежит при 'on' (рулинг C-pre.1).
++describe('prize_mode (ADR-012 §4, решение §0.3)', () => {
++  let db: TestDb;
++  let rewards: RewardsService;
++  let outbox: EventOutbox;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        AppRuntimeModule.register([]),
++        MembershipModule,
++        RealtimeModule,
++        RewardsModule,
++      ],
++    })
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG) // PRIZE_MODE: 'off' — дефолт тестового конфига
++      .compile();
++    await moduleRef.init();
++    rewards = moduleRef.get(RewardsService);
++    outbox = moduleRef.get(EventOutbox);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(
++      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE',
++    );
++  });
++
++  async function seedRoom() {
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
++    });
++    return { org, room };
++  }
++
++  it('off: createPrize → PRIZES_DISABLED', async () => {
++    const { org, room } = await seedRoom();
++    await expect(rewards.createPrize(room.id, org.id, { name: 'X', quantity: 1 }))
++      .rejects.toMatchObject({ code: 'PRIZES_DISABLED' });
++    expect(await db.prisma.prize.count({ where: { roomId: room.id } })).toBe(0);
++  });
++
++  it('off: award.prize effect отклонён PRIZES_DISABLED, award НЕ создан, quantity не списан', async () => {
++    // Приз сеем напрямую через prisma: createPrize загейчен (кейс выше).
++    const { room } = await seedRoom();
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: 1, quantity: 1 },
++    });
++    const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await expect(
++      outbox.run((tx) =>
++        rewards.executeEffects(tx, room.id, 'lottery', [
++          { kind: 'award.prize', prizeId: prize.id, winnerId: winner.id },
++        ]),
++      ),
++    ).rejects.toMatchObject({ code: 'PRIZES_DISABLED' });
++    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++  });
++
++  it('off: fulfill/revoke существующего award НЕ гейтятся (урегулирование, REQ-RWD-009)', async () => {
++    const { org, room } = await seedRoom();
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: 1, quantity: 0 },
++    });
++    const winner1 = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const winner2 = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    // Существующие awards (выданные до выключения режима) — напрямую через prisma.
++    const award1 = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner1.id, sourceAppId: 'lottery' },
++    });
++    const award2 = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner2.id, sourceAppId: 'lottery' },
++    });
++
++    const fulfilled = await rewards.fulfill(room.id, award1.id, org.id);
++    expect(fulfilled.status).toBe('FULFILLED');
++    const revoked = await rewards.revoke(room.id, award2.id, org.id);
++    expect(revoked.status).toBe('REVOKED');
++    // Список тоже вне гейта: организатор видит оставшиеся награды (REQ-RWD-009).
++    expect(await rewards.listAwards(room.id, org.id)).toHaveLength(2);
++  });
++});
+diff --git a/packages/core/src/rewards/rewards.module.ts b/packages/core/src/rewards/rewards.module.ts
+index aae61ee..85ac841 100644
+--- a/packages/core/src/rewards/rewards.module.ts
++++ b/packages/core/src/rewards/rewards.module.ts
+@@ -1,29 +1,31 @@
+ import { Global, Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
++import { ConfigModule } from '../config/config.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { AWARD_EFFECT_HANDLER } from '../app-runtime/effects';
+ import { RewardsService } from './rewards.service';
+ import { RewardsController } from './rewards.controller';
+ import { RewardsAnonymizationGuard } from './rewards-anonymization.guard';
+ 
+ // Контур rewards (design 2026-09-10 §2). AuthModule — TokenService для Bearer-
+-// аутентификации контроллера (прецедент TransportModule).
++// аутентификации контроллера (прецедент TransportModule). ConfigModule —
++// APP_CONFIG для prize_mode-гейта (ADR-012 §4).
+ //
+ // @Global: AppRuntimeService (AppRuntimeModule, global) опционально инжектирует
+ // AWARD_EFFECT_HANDLER; identity-свип — ANONYMIZATION_GUARDS из composition root
+ // (apps/server/src/anonymization-guards.module.ts). Ядро rewards не импортирует
+ // (boundary rewards-only-through-di-tokens).
+ @Global()
+ @Module({
+-  imports: [PrismaModule, MembershipModule, RealtimeModule, AuthModule],
++  imports: [PrismaModule, ConfigModule, MembershipModule, RealtimeModule, AuthModule],
+   controllers: [RewardsController],
+   providers: [
+     RewardsService,
+     RewardsAnonymizationGuard,
+     { provide: AWARD_EFFECT_HANDLER, useExisting: RewardsService },
+   ],
+   exports: [RewardsService, RewardsAnonymizationGuard, AWARD_EFFECT_HANDLER],
+ })
+ export class RewardsModule {}
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+index b111248..1d9cb5a 100644
+--- a/packages/core/src/rewards/rewards.service.ts
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -1,43 +1,47 @@
+-import { Injectable } from '@nestjs/common';
++import { Inject, Injectable } from '@nestjs/common';
+ import { Prisma } from '@prisma/client';
+ import type { AppEffect, CreatePrizeRequest } from '@mymozhem/sdk';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membership.errors';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { RoomNotActiveError } from '../realtime/realtime.errors';
+ import type { AwardEffectHandler } from '../app-runtime/effects';
+ import {
+   AwardUnknownError,
+   IdentityAnonymizedError,
+   PrizeFundExhaustedError,
+   PrizeUnknownError,
++  PrizesDisabledError,
+   RewardAlreadyResolvedError,
+ } from './rewards.errors';
+ 
+ // Контур rewards (design 2026-09-10 §2/§3). Два входа:
+ // 1) executeEffects — из диспетчера app-runtime, ВНУТРИ его outbox.run (вложенный
+ //    run запрещён — поэтому tx приходит параметром); отказ → откат всей транзакции.
+ // 2) REST-методы (createPrize/listAwards/fulfill/revoke) — свои outbox.run.
+ // События rewards.* коммитятся в той же транзакции (лог — нотификация и аудит,
+ // ADR-005; таблицы остаются источником состояния).
+ // implements AwardEffectHandler: DI-шов REQ-RWD-001 — app-runtime знает только
+ // интерфейс; импорт типа rewards → app-runtime/effects разрешён boundary-правилом.
+ @Injectable()
+ export class RewardsService implements AwardEffectHandler {
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly membership: MembershipService,
+     private readonly eventLog: EventLogService,
+     private readonly outbox: EventOutbox,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
+   ) {}
+ 
+   // --- Вход 1: эффекты из app-runtime (чужая транзакция) ---
+ 
+   async executeEffects(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     sourceAppId: string,
+     effects: readonly AppEffect[],
+   ): Promise<void> {
+@@ -62,20 +66,23 @@ export class RewardsService implements AwardEffectHandler {
+   // Порядок «insert Award → декремент» (не наоборот): конфликт частичного индекса
+   // — типизированный no-op (REQ-RWD-003), и он НЕ должен списывать фонд; отказ
+   // декремента откатывает insert вместе со всей транзакцией (REQ-RWD-010).
+   private async awardPrize(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     sourceAppId: string,
+     prizeId: string,
+     winnerId: string,
+   ): Promise<void> {
++    // ADR-012 §4 (решение §0.3): гейт ДО findFirst — при выключенном режиме
++    // отказ PRIZES_DISABLED, а не PRIZE_UNKNOWN (порядок запинан e2e RF3).
++    if (this.config.PRIZE_MODE === 'off') throw new PrizesDisabledError();
+     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
+     if (!prize) throw new PrizeUnknownError(prizeId);
+     // C-8.1 (ф.4, амендмент 2026-09-25): победитель не должен быть
+     // анонимизирован/отсутствовать. Чтение БЛОКИРУЮЩЕЕ (FOR NO KEY UPDATE), в той
+     // же tx, до INSERT: режим конфликтует сам с собой — в том числе с updateMany
+     // свипа на строке identity — пути сериализуются, кто первым взял блокировку,
+     // тот выиграл. Если строку держит свип, гард ждёт его коммита и перечитывает
+     // последнюю закоммиченную версию (READ COMMITTED, EPQ) → видит deletedAt.
+     // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY
+     // UPDATE она не конфликтует. Отказ — типизированный, откатывает tx без
+@@ -109,20 +116,23 @@ export class RewardsService implements AwardEffectHandler {
+       awardId: award.id,
+       prizeId,
+       winnerId,
+       sourceAppId,
+     });
+   }
+ 
+   // --- Вход 2: REST-контур организатора ---
+ 
+   async createPrize(roomId: string, actorId: string, input: CreatePrizeRequest) {
++    // ADR-012 §4: создание сущности приза — юридический факт призового фонда;
++    // при выключенном режиме отклонено конфигурацией (дефолт off).
++    if (this.config.PRIZE_MODE === 'off') throw new PrizesDisabledError();
+     await this.assertOrganizer(roomId, actorId);
+     const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+     // Добавление призов — в не-терминальной комнате (design §2: призы добавляют
+     // на ходу; fulfill/revoke при COMPLETED — отдельная норма REQ-RWD-009).
+     if (!room || room.deletedAt !== null || (room.status !== 'DRAFT' && room.status !== 'ACTIVE')) {
+       throw new RoomNotActiveError(`room ${roomId} does not accept new prizes`);
+     }
+     return this.prisma.prize.create({
+       data: { roomId, name: input.name, quantity: input.quantity, quantityTotal: input.quantity },
+     });
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index 5fdbd6e..d82d25c 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -68,20 +68,23 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+     ['room not configured', new RoomNotConfiguredError('x'), 409, 'ROOM_NOT_CONFIGURED'],
+     ['room settings frozen', new RoomSettingsFrozenError('x'), 409, 'ROOM_SETTINGS_FROZEN'],
+     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
+     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
+     // Кейсы кидают голый ContractError (не конкретные классы rewards): остальному
+     // core нельзя импортировать core/rewards (boundary Task 11 круизит и спеки).
+     ['prize unknown', new ContractError('PRIZE_UNKNOWN', 'x'), 404, 'PRIZE_UNKNOWN'],
+     ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
+     ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
+     ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
++    // ADR-012 §4: призовой режим выключен конфигурацией — отказ операции, не
++    // конфликт состояния и не отказ доступа к комнате: 403 рядом с ACTOR_NOT_*.
++    ['prizes disabled', new ContractError('PRIZES_DISABLED', 'x'), 403, 'PRIZES_DISABLED'],
+     // Фаза 4 (C-8.1): награждение анонимизированной identity — конфликт состояния.
+     ['identity anonymized', new ContractError('IDENTITY_ANONYMIZED', 'x'), 409, 'IDENTITY_ANONYMIZED'],
+     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
+     // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
+     ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],
+     // Пин второго realtime-кода ветки: realtime-вариант ActorNotMemberError (гейт
+     // эмита) — тот же wire-код/статус, что membership-вариант выше.
+     ['actor not member (realtime-вариант)', new RealtimeActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
+     // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE
+     // и ACTOR_NOT_MEMBER.
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index 9dddf7b..e98d0cb 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -34,20 +34,22 @@ const STATUS_BY_WIRE_CODE = {
+   ROOM_TRANSITION_INVALID: 409,
+   ROOM_CONFLICT: 409,
+   ROOM_NOT_CONFIGURED: 409,
+   ROOM_SETTINGS_FROZEN: 409,
+   // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
+   ROOM_NOT_ACTIVE: 409,
+   PRIZE_UNKNOWN: 404,
+   AWARD_UNKNOWN: 404,
+   PRIZE_FUND_EXHAUSTED: 409,
+   REWARD_ALREADY_RESOLVED: 409,
++  // ADR-012 §4: призовой режим выключен конфигурацией — 403 рядом с ACTOR_NOT_*.
++  PRIZES_DISABLED: 403,
+   // Фаза 4 (C-8.1): гонка свип/розыгрыш проиграна награждением — как прочие 409 конфликта состояния.
+   IDENTITY_ANONYMIZED: 409,
+   INTERNAL_ERROR: 500,
+ } as const;
+ 
+ type WireCode = keyof typeof STATUS_BY_WIRE_CODE;
+ 
+ // Core не зависит от fastify напрямую (адаптер подключается в apps/server) — фильтру
+ // достаточно структурного минимума ответа; FastifyReply совместим по форме.
+ interface ReplyLike {
+diff --git a/packages/core/src/transport/rooms-lifecycle.controller.int-spec.ts b/packages/core/src/transport/rooms-lifecycle.controller.int-spec.ts
+index aec445a..cec3797 100644
+--- a/packages/core/src/transport/rooms-lifecycle.controller.int-spec.ts
++++ b/packages/core/src/transport/rooms-lifecycle.controller.int-spec.ts
+@@ -19,33 +19,28 @@ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { RoomsLifecycleController } from './rooms-lifecycle.controller';
+ 
+ // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }
+ // (прецедент room.service.int-spec.ts).
+ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+ 
+ // Зеркало appSettings реальной лотереи (packages/app-lottery/src/lottery-settings.ts):
+-// единственный ключ defaulted → {} проходит verdict-only гейт (P1: toRegisteredSchema
+-// в io:'input', REQ-RWD-014). Прямой импорт app-пакета ядру запрещён boundary-правилом,
++// v2 (ADR-012) — draw_eligibility удалена, схема пуста; {} проходит verdict-only
++// гейт (REQ-CORE-007). Прямой импорт app-пакета ядру запрещён boundary-правилом,
+ // поэтому манифест собираем через defineApp — тем же путём, что само приложение.
+ const lotteryManifest = defineApp({
+   appId: 'lottery',
+-  manifestVersion: 1,
++  manifestVersion: 2,
+   capabilities: ['rewards'],
+-  appSettings: z.strictObject({
+-    drawEligibility: z
+-      .enum(['guests_allowed', 'verified'])
+-      .default('guests_allowed')
+-      .meta({ 'x-visibility': 'public' }),
+-  }),
++  appSettings: z.strictObject({}),
+   events: {},
+ });
+ 
+ // HTTP-контур lifecycle комнаты (дизайн UI-среза, решение №9): configure/activate/
+ // complete/cancel организатором по HTTP. Паттерн — rewards.controller.int-spec.ts:
+ // testcontainers, сидирование через сервисы, HTTP через app.inject, статусы/тела на
+ // границе (REQ-SEC-006: наружу ровно {code}).
+ describe('RoomsLifecycleController (int)', () => {
+   let db: TestDb;
+   let app: NestFastifyApplication;
+@@ -119,27 +114,27 @@ describe('RoomsLifecycleController (int)', () => {
+       joinPolicy: 'guests',
+       status: 'DRAFT',
+     });
+     // Тройка записана атомарно (REQ-RT-004) — прямая проверка строки.
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.appId).toBe('quiz');
+     expect(reread.manifestVersion).toBe(1);
+     expect(reread.appSettings).toEqual(QUIZ_SETTINGS);
+   });
+ 
+-  it('configure with {} for lottery app passes the gate (P1 end-to-end, REQ-RWD-014)', async () => {
++  it('configure with {} for lottery app passes the gate (ADR-012: appSettings лотереи v2 пусты)', async () => {
+     const { room, token } = await orgRoom();
+     const res = await app.inject({
+       method: 'POST',
+       url: `/rooms/${room.id}/configure`,
+       headers: auth(token),
+-      payload: { appId: 'lottery', manifestVersion: 1, settings: {} },
++      payload: { appId: 'lottery', manifestVersion: 2, settings: {} },
+     });
+     expect(res.statusCode).toBe(200);
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.appId).toBe('lottery');
+     expect(reread.appSettings).toEqual({});
+   });
+ 
+   it('configure as PARTICIPANT → 403 ACTOR_NOT_ORGANIZER', async () => {
+     const { room } = await orgRoom();
+     const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });

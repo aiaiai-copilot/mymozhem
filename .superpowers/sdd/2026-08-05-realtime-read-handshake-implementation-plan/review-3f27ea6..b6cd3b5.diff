@@ -1,0 +1,1745 @@
+# Review package: 3f27ea6..HEAD
+
+## Commits
+b6cd3b5 feat(core): RealtimeGateway (handshake/subscribe/publish/fan-out/revoke-hook) + ConfigurableIoAdapter (REQ-RT-006/009, REQ-SEC-003/006)
+
+## Files changed
+ .dependency-cruiser.cjs                            |   4 +-
+ apps/server/src/main.ts                            |   4 +-
+ packages/core/package.json                         |   3 +
+ packages/core/src/index.ts                         |   6 +
+ packages/core/src/realtime/io-adapter.ts           |  18 ++
+ .../core/src/realtime/realtime.gateway.spec.ts     | 291 +++++++++++++++++++++
+ packages/core/src/realtime/realtime.gateway.ts     | 255 ++++++++++++++++++
+ packages/core/src/realtime/realtime.module.ts      |  22 +-
+ pnpm-lock.yaml                                     | 243 ++++++++++++++++-
+ 9 files changed, 832 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/.dependency-cruiser.cjs b/.dependency-cruiser.cjs
+index 27a386d..b6dce1b 100644
+--- a/.dependency-cruiser.cjs
++++ b/.dependency-cruiser.cjs
+@@ -20,21 +20,23 @@ module.exports = {
+       comment:
+         'apps/* обращаются к ядру только через пакетный entrypoint @mymozhem/core, не в его src-внутренности (ADR-002, REQ-DEV-001).',
+       severity: 'error',
+       from: { path: '^apps/' },
+       to: { path: '^packages/core/src' },
+     },
+     {
+       name: 'socketio-only-in-realtime',
+       comment: 'socket.io импортируется только из Realtime-модуля ядра (REQ-RT-006).',
+       severity: 'error',
+-      from: { pathNot: '^packages/core/src/realtime' },
++      // dist/** — скомпилированное эхо src (CI круизит после build): .d.ts gateway
++      // легально ссылается на типы socket.io; правило проверяет исходники.
++      from: { pathNot: ['^packages/core/src/realtime', '[/\\\\]dist[/\\\\]'] },
+       to: { path: 'node_modules/socket[.]io' },
+     },
+     {
+       name: 'no-circular',
+       comment: 'Циклические зависимости запрещены.',
+       severity: 'error',
+       from: {},
+       to: { circular: true },
+     },
+     {
+diff --git a/apps/server/src/main.ts b/apps/server/src/main.ts
+index fb3d57a..c852696 100644
+--- a/apps/server/src/main.ts
++++ b/apps/server/src/main.ts
+@@ -1,29 +1,31 @@
+ import 'reflect-metadata';
+ import { NestFactory } from '@nestjs/core';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import fastifyCookie from '@fastify/cookie';
+ import fastifyCors from '@fastify/cors';
+ import fastifyHelmet from '@fastify/helmet';
+-import { loadConfig } from '@mymozhem/core';
++import { ConfigurableIoAdapter, loadConfig } from '@mymozhem/core';
+ import { AppModule } from './app.module';
+ 
+ async function bootstrap(): Promise<void> {
+   // REQ-SEC-002: конфиг (включая JWT_SECRET) валидируется до создания приложения —
+   // старт с невалидным env невозможен (fail-closed, REQ-OPS-003).
+   const config = loadConfig(process.env);
+   // trustProxy — осознанное доверие X-Forwarded-For из конфига деплоя (REQ-ID-006,
+   // parked minor): при false req.ip — непосредственный peer, XFF игнорируется.
+   const app = await NestFactory.create<NestFastifyApplication>(
+     AppModule,
+     new FastifyAdapter({ trustProxy: config.TRUST_PROXY }),
+   );
+   // Обязателен: transport-контроллеры читают req.cookies по структурному типу —
+   // без плагина refresh вернёт 500 вместо 401.
+   await app.register(fastifyCookie);
+   await app.register(fastifyHelmet);
+   // REQ-SEC-008: allowlist из конфига; пустой список = CORS-заголовки не выдаются.
+   await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
++  // Socket.io на том же HTTP-сервере; CORS — из того же конфига (design §8).
++  app.useWebSocketAdapter(new ConfigurableIoAdapter(config));
+   await app.listen(config.PORT, '0.0.0.0');
+ }
+ 
+ void bootstrap();
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 60dc227..eed129b 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -9,27 +9,30 @@
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest",
+     "test:int": "jest -c jest.integration.config.js",
+     "prisma:generate": "prisma generate"
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
++    "@nestjs/platform-socket.io": "^11.1.28",
++    "@nestjs/websockets": "^11.1.28",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "ajv": "^8.20.0",
+     "jsonwebtoken": "^9.0.3",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
++    "socket.io": "^4.8.3",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/jsonwebtoken": "^9.0.10",
+     "@types/node": "^24.0.0",
+     "@types/pg": "^8.11.0",
+     "jest": "^29.7.0",
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 4157519..20b8b22 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -18,20 +18,26 @@ export * from './identity/identity.module';
+ export * from './membership/membership.errors';
+ export * from './membership/join-rate-limiter';
+ export * from './membership/membership.service';
+ export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
+ export * from './realtime/event-emit-limiter';
+ export * from './realtime/realtime.errors';
+ export * from './realtime/realtime.module';
+ export * from './realtime/realtime-bus';
+ export * from './realtime/event-outbox';
++export * from './realtime/projection.service';
++export * from './realtime/subscription-registry';
++export * from './realtime/realtime.tokens';
++export * from './realtime/error-mapping';
++export * from './realtime/io-adapter';
++export * from './realtime/realtime.gateway';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
+ export * from './transport/transport.module';
+ export * from './transport/http-exception.filter';
+ export * from './transport/auth.tokens';
+ // Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+ // строятся на том же testcontainer-посеве, что и core int-спеки.
+ export * from './testing/postgres.testcontainer';
+diff --git a/packages/core/src/realtime/io-adapter.ts b/packages/core/src/realtime/io-adapter.ts
+new file mode 100644
+index 0000000..17913a5
+--- /dev/null
++++ b/packages/core/src/realtime/io-adapter.ts
+@@ -0,0 +1,18 @@
++import { IoAdapter } from '@nestjs/platform-socket.io';
++import type { AppConfig } from '../config/config.schema';
++
++// CORS сокета повторяет HTTP-политику из того же конфига (design §8); wildcard в
++// production запрещён superRefine конфиг-схемы (REQ-SEC-008). Подключается в
++// apps/server main.ts и в e2e-boot (там своя копия boot-последовательности).
++export class ConfigurableIoAdapter extends IoAdapter {
++  constructor(private readonly config: AppConfig) {
++    super();
++  }
++
++  override createIOServer(port: number, options?: Record<string, unknown>): unknown {
++    return super.createIOServer(port, {
++      ...options,
++      cors: { origin: this.config.CORS_ORIGINS },
++    });
++  }
++}
+diff --git a/packages/core/src/realtime/realtime.gateway.spec.ts b/packages/core/src/realtime/realtime.gateway.spec.ts
+new file mode 100644
+index 0000000..5acc42f
+--- /dev/null
++++ b/packages/core/src/realtime/realtime.gateway.spec.ts
+@@ -0,0 +1,291 @@
++import type { AccessClaims } from '../auth/token.service';
++import { RealtimeGateway } from './realtime.gateway';
++import { SubscriptionRegistry } from './subscription-registry';
++import { ProjectionService } from './projection.service';
++import { REALTIME_MESSAGES } from '@mymozhem/sdk';
++
++const GUEST_CLAIMS: AccessClaims = {
++  sub: '22222222-2222-4222-8222-222222222222',
++  sid: '33333333-3333-4333-8333-333333333333',
++  kind: 'GUEST',
++  roomId: '11111111-1111-4111-8111-111111111111',
++};
++const ROOM = GUEST_CLAIMS.roomId as string;
++
++function fakeSocket(claims: AccessClaims = GUEST_CLAIMS) {
++  return {
++    id: 'socket-1',
++    data: { claims },
++    handshake: { auth: { token: 'x' } },
++    joined: [] as string[],
++    left: [] as string[],
++    disconnected: false as boolean | unknown,
++    join(room: string) { this.joined.push(room); },
++    leave(room: string) { this.left.push(room); },
++    disconnect(close?: boolean) { this.disconnected = close ?? true; },
++  };
++}
++type FakeSocket = ReturnType<typeof fakeSocket>;
++
++type Ack = (value: unknown) => void;
++
++function makeGateway(overrides: {
++  membership?: { findActiveMembership: jest.Mock };
++  prisma?: { room: { findUnique: jest.Mock }; logEvent: { findMany: jest.Mock } };
++  eventLog?: { commitAppEvent: jest.Mock };
++  outbox?: { run: jest.Mock };
++  registry?: SubscriptionRegistry;
++  tokens?: { verifyAccessToken: jest.Mock };
++  reconnectLimiter?: { tryAcquire: jest.Mock };
++}) {
++  const membership = overrides.membership ?? { findActiveMembership: jest.fn().mockResolvedValue({ role: 'PARTICIPANT' }) };
++  const prisma = overrides.prisma ?? {
++    room: { findUnique: jest.fn().mockResolvedValue({ appId: 'quiz', manifestVersion: 1, appSettings: null }) },
++    logEvent: { findMany: jest.fn().mockResolvedValue([]) },
++  };
++  const eventLog = overrides.eventLog ?? { commitAppEvent: jest.fn().mockResolvedValue({}) };
++  const outbox = overrides.outbox ?? { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
++  const tokens = overrides.tokens ?? { verifyAccessToken: jest.fn().mockReturnValue(GUEST_CLAIMS) };
++  const reconnectLimiter = overrides.reconnectLimiter ?? { tryAcquire: jest.fn().mockReturnValue(true) };
++  const gateway = new RealtimeGateway(
++    tokens as never,
++    prisma as never,
++    membership as never,
++    { getManifest: jest.fn().mockReturnValue(undefined), getEventDefinition: jest.fn().mockReturnValue(undefined) } as never,
++    eventLog as never,
++    outbox as never,
++    new ProjectionService(),
++    overrides.registry ?? new SubscriptionRegistry(),
++    { subscribe: jest.fn(), publish: jest.fn() } as never,
++    reconnectLimiter as never,
++    {} as never,
++  );
++  return { gateway, membership, prisma, eventLog, outbox, tokens, reconnectLimiter };
++}
++
++const ackOf = () => {
++  const calls: unknown[] = [];
++  const ack: Ack = (v) => calls.push(v);
++  return { ack, calls };
++};
++
++describe('RealtimeGateway.handleSubscribe', () => {
++  it('rejects malformed payloads with REQUEST_INVALID', async () => {
++    const { gateway } = makeGateway({});
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(fakeSocket() as never, { roomId: 'nope' }, ack);
++    expect(calls).toEqual([{ code: 'REQUEST_INVALID' }]);
++  });
++
++  it('guest cannot subscribe to a room outside the token scope (REQ-ID-016)', async () => {
++    const { gateway } = makeGateway({});
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(fakeSocket() as never, { roomId: '99999999-9999-4999-8999-999999999999' }, ack);
++    expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
++  });
++
++  it('non-member gets ACTOR_NOT_MEMBER (REQ-SEC-003)', async () => {
++    const { gateway } = makeGateway({ membership: { findActiveMembership: jest.fn().mockResolvedValue(null) } });
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack);
++    expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
++  });
++
++  it('participant joins the room channel with a public snapshot', async () => {
++    const registry = new SubscriptionRegistry();
++    const { gateway } = makeGateway({ registry });
++    const socket = fakeSocket();
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
++    expect(socket.joined).toEqual([`room:${ROOM}`]);
++    expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
++    expect(registry.get('socket-1')).toMatchObject({ identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
++  });
++
++  it('organizer joins both channels at organizer level', async () => {
++    const { gateway } = makeGateway({ membership: { findActiveMembership: jest.fn().mockResolvedValue({ role: 'ORGANIZER' }) } });
++    const socket = fakeSocket();
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(socket as never, { roomId: ROOM }, ack);
++    expect(socket.joined).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
++    expect(calls).toEqual([{ ok: true, snapshot: { events: [], appSettings: {} } }]);
++  });
++
++  it('second subscription of the same socket to another room is REQUEST_INVALID', async () => {
++    const registry = new SubscriptionRegistry();
++    registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
++    const { gateway } = makeGateway({ registry });
++    const { ack, calls } = ackOf();
++    await gateway.handleSubscribe(fakeSocket() as never, { roomId: ROOM }, ack); // re-subscribe в ту же — ок
++    expect(calls[0]).toMatchObject({ ok: true });
++    const claims2 = { ...GUEST_CLAIMS, roomId: ROOM };
++    void claims2;
++    // чужая комната для того же сокета:
++    const other = fakeSocket({ ...GUEST_CLAIMS, roomId: '99999999-9999-4999-8999-999999999999' });
++    const { ack: ack2, calls: calls2 } = ackOf();
++    await gateway.handleSubscribe(other as never, { roomId: '99999999-9999-4999-8999-999999999999' }, ack2);
++    expect(calls2).toEqual([{ code: 'REQUEST_INVALID' }]);
++  });
++});
++
++describe('RealtimeGateway.handlePublish', () => {
++  const SUBSCRIBED_ROOM = ROOM;
++
++  function subscribedGateway(overrides: Parameters<typeof makeGateway>[0] = {}) {
++    const registry = new SubscriptionRegistry();
++    registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: SUBSCRIBED_ROOM, level: 'public' });
++    return makeGateway({ ...overrides, registry });
++  }
++
++  it('rejects malformed payloads with REQUEST_INVALID', async () => {
++    const { gateway } = subscribedGateway();
++    const { ack, calls } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'bad', payload: {} }, ack);
++    expect(calls).toEqual([{ code: 'REQUEST_INVALID' }]);
++  });
++
++  it('unsubscribed socket gets ACTOR_NOT_MEMBER', async () => {
++    const { gateway } = makeGateway({});
++    const { ack, calls } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: {} }, ack);
++    expect(calls).toEqual([{ code: 'ACTOR_NOT_MEMBER' }]);
++  });
++
++  it('core namespace is closed for clients (EVENT_UNKNOWN_TYPE)', async () => {
++    const { gateway } = subscribedGateway();
++    const { ack, calls } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'core.room.completed', payload: {} }, ack);
++    expect(calls).toEqual([{ code: 'EVENT_UNKNOWN_TYPE' }]);
++  });
++
++  it('maps commit-chain errors via the mapping table (REQ-SEC-006)', async () => {
++    const { RoomNotActiveError } = await import('./realtime.errors');
++    const outbox = { run: jest.fn().mockRejectedValue(new RoomNotActiveError('sealed')) };
++    const { gateway } = subscribedGateway({ outbox });
++    const { ack, calls } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 } }, ack);
++    expect(calls).toEqual([{ code: 'ROOM_LOG_SEALED' }]);
++  });
++
++  it('commits with actorId from claims, roomId from the subscription (REQ-RT-009)', async () => {
++    const eventLog = { commitAppEvent: jest.fn().mockResolvedValue({}) };
++    const outbox = { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
++    const { gateway } = subscribedGateway({ eventLog, outbox });
++    const { ack, calls } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 }, visibility: 'public' }, ack);
++    expect(calls).toEqual([{ ok: true }]);
++    expect(eventLog.commitAppEvent).toHaveBeenCalledWith(
++      'tx', SUBSCRIBED_ROOM, 'answer.submitted', { c: 1 }, 'public', GUEST_CLAIMS.sub,
++    );
++  });
++
++  it('defaults visibility to the type ceiling when omitted (design §0.6)', async () => {
++    const eventLog = { commitAppEvent: jest.fn().mockResolvedValue({}) };
++    const outbox = { run: jest.fn((fn: (tx: unknown) => unknown) => fn('tx')) };
++    const appRegistry = {
++      getManifest: jest.fn(),
++      getEventDefinition: jest.fn().mockReturnValue({ visibility: 'organizer', schema: {}, version: 1 }),
++    };
++    const registry = new SubscriptionRegistry();
++    registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: SUBSCRIBED_ROOM, level: 'public' });
++    const gateway = new RealtimeGateway(
++      { verifyAccessToken: jest.fn() } as never,
++      { room: { findUnique: jest.fn().mockResolvedValue({ manifestVersion: 1 }) }, logEvent: { findMany: jest.fn() } } as never,
++      { findActiveMembership: jest.fn() } as never,
++      appRegistry as never,
++      eventLog as never,
++      outbox as never,
++      new ProjectionService(),
++      registry,
++      { subscribe: jest.fn(), publish: jest.fn() } as never,
++      { tryAcquire: jest.fn() } as never,
++      {} as never,
++    );
++    const { ack } = ackOf();
++    await gateway.handlePublish(fakeSocket() as never, { type: 'quiz.answer.submitted', payload: { c: 1 } }, ack);
++    expect(eventLog.commitAppEvent).toHaveBeenCalledWith(
++      'tx', SUBSCRIBED_ROOM, 'answer.submitted', { c: 1 }, 'organizer', GUEST_CLAIMS.sub,
++    );
++  });
++});
++
++describe('RealtimeGateway fan-out and revoke', () => {
++  function gatewayWithServer() {
++    const emitted: { room: string; event: string; payload: unknown }[] = [];
++    const sockets = new Map<string, FakeSocket>();
++    const server = {
++      sockets: { sockets },
++      to(room: string) {
++        return { emit: (event: string, payload: unknown) => emitted.push({ room, event, payload }) };
++      },
++    };
++    const registry = new SubscriptionRegistry();
++    const { gateway } = makeGateway({ registry });
++    (gateway as unknown as { server: unknown }).server = server;
++    return { gateway, emitted, sockets, registry };
++  }
++
++  const EVENT_ROW = {
++    roomId: ROOM,
++    seq: 5,
++    type: 'quiz.answer.submitted',
++    payload: { c: 1 },
++    actorId: GUEST_CLAIMS.sub,
++    schemaVersion: 1,
++    recordedAt: new Date(),
++  };
++
++  it('fanOut delivers public events to the room, organizer to the organizer channel, module-private nowhere (REQ-CORE-005)', () => {
++    const { gateway, emitted } = gatewayWithServer();
++    (gateway as unknown as { fanOut(e: unknown[]): void }).fanOut([
++      { ...EVENT_ROW, visibility: 'PUBLIC' },
++      { ...EVENT_ROW, visibility: 'ORGANIZER' },
++      { ...EVENT_ROW, visibility: 'MODULE_PRIVATE' },
++    ]);
++    expect(emitted.map((e) => e.room)).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
++    expect(emitted[0].event).toBe(REALTIME_MESSAGES.EVENT);
++    expect(emitted[0].payload).toEqual({ type: 'quiz.answer.submitted', payload: { c: 1 }, actorId: GUEST_CLAIMS.sub });
++  });
++
++  // Санкционированное отклонение (леджер Task 5 → Task 7, решение владельца):
++  // доставка изолирована per-event — падающая проекция/эмит логируется и
++  // пропускается, исключение НЕ вырывается наружу (иначе throw внутри fanOut
++  // отклонил бы outbox.run ПОСЛЕ успешного коммита).
++  it('fanOut isolates per-event delivery: a throwing projection is logged and skipped, other events still delivered', () => {
++    const { gateway, emitted } = gatewayWithServer();
++    const logger = { error: jest.fn() };
++    (gateway as unknown as { logger: unknown }).logger = logger;
++    const spy = jest
++      .spyOn(ProjectionService.prototype, 'projectEvent')
++      .mockImplementationOnce(() => {
++        throw new Error('boom');
++      });
++    try {
++      expect(() =>
++        (gateway as unknown as { fanOut(e: unknown[]): void }).fanOut([
++          { ...EVENT_ROW, visibility: 'PUBLIC', type: 'quiz.boom.event' },
++          { ...EVENT_ROW, visibility: 'PUBLIC' },
++          { ...EVENT_ROW, visibility: 'ORGANIZER' },
++        ]),
++      ).not.toThrow();
++      expect(emitted.map((e) => e.room)).toEqual([`room:${ROOM}`, `room:${ROOM}:organizer`]);
++      expect(logger.error).toHaveBeenCalledTimes(1);
++    } finally {
++      spy.mockRestore();
++    }
++  });
++
++  it('revokeRoomAccess disconnects every socket of the identity in the room (REQ-SEC-003 hook)', () => {
++    const { gateway, sockets, registry } = gatewayWithServer();
++    const s1 = fakeSocket();
++    const s2 = { ...fakeSocket(), id: 'socket-2' };
++    sockets.set('socket-1', s1);
++    sockets.set('socket-2', s2);
++    registry.add({ socketId: 'socket-1', identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
++    registry.add({ socketId: 'socket-2', identityId: GUEST_CLAIMS.sub, roomId: ROOM, level: 'public' });
++    gateway.revokeRoomAccess(GUEST_CLAIMS.sub, ROOM);
++    expect(s1.disconnected).toBe(true);
++    expect(s2.disconnected).toBe(true);
++    expect(registry.socketsOf(GUEST_CLAIMS.sub, ROOM)).toEqual([]);
++  });
++});
+diff --git a/packages/core/src/realtime/realtime.gateway.ts b/packages/core/src/realtime/realtime.gateway.ts
+new file mode 100644
+index 0000000..fd6fe50
+--- /dev/null
++++ b/packages/core/src/realtime/realtime.gateway.ts
+@@ -0,0 +1,255 @@
++import { Inject, Logger } from '@nestjs/common';
++import { OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
++import type { Server, Socket } from 'socket.io';
++import {
++  ContractError,
++  publishRequestSchema,
++  REALTIME_MESSAGES,
++  resolveTypeOwner,
++  subscribeRequestSchema,
++  type ContractErrorCode,
++  type ContractErrorPayload,
++  type ProjectedEvent,
++  type PublishOkAck,
++  type PublishRequest,
++  type RoomSnapshot,
++  type SubscribeOkAck,
++  type Visibility,
++} from '@mymozhem/sdk';
++import type { LogEvent } from '@prisma/client';
++import { PrismaService } from '../prisma/prisma.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { TokenService, type AccessClaims } from '../auth/token.service';
++import { MembershipService } from '../membership/membership.service';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { AppRegistryService } from '../app-registry/app-registry.service';
++import { EventLogService } from './event-log.service';
++import { EventOutbox } from './event-outbox';
++import { ProjectionService, type OutwardLevel } from './projection.service';
++import { RealtimeBus } from './realtime-bus';
++import { RealtimeError } from './realtime.errors';
++import { contractCodeFor } from './error-mapping';
++import { SubscriptionRegistry } from './subscription-registry';
++import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
++
++type Ack<T> = (result: T | ContractErrorPayload) => void;
++
++// Socket.io-комнаты: общая (все члены) и organizer-канал (design §5). module-private
++// канала не существует — уровень наружу не доставляется никогда (REQ-CORE-005).
++const roomChannel = (roomId: string): string => `room:${roomId}`;
++const organizerChannel = (roomId: string): string => `room:${roomId}:organizer`;
++
++const claimsOf = (socket: Socket): AccessClaims => socket.data.claims as AccessClaims;
++
++// Единственный Socket.io-код ядра (REQ-RT-006; boundary-правило socketio-only-in-realtime).
++// Handshake = access JWT (REQ-RT-009: claims — единственный источник actorId).
++// Наружу ровно {code} (REQ-SEC-006); причины — только в серверный лог.
++@WebSocketGateway()
++export class RealtimeGateway implements OnGatewayInit<Server> {
++  private readonly logger = new Logger(RealtimeGateway.name);
++  private server!: Server;
++
++  constructor(
++    private readonly tokens: TokenService,
++    private readonly prisma: PrismaService,
++    private readonly membership: MembershipService,
++    private readonly appRegistry: AppRegistryService,
++    private readonly eventLog: EventLogService,
++    private readonly outbox: EventOutbox,
++    private readonly projection: ProjectionService,
++    private readonly registry: SubscriptionRegistry,
++    private readonly bus: RealtimeBus,
++    @Inject(RECONNECT_RATE_LIMITER) private readonly reconnectLimiter: JoinRateLimiter,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  afterInit(server: Server): void {
++    this.server = server;
++    server.use((socket, next) => this.authenticate(socket, next));
++    server.on('connection', (socket) => {
++      socket.on(REALTIME_MESSAGES.SUBSCRIBE, (payload: unknown, ack: Ack<SubscribeOkAck>) =>
++        void this.handleSubscribe(socket, payload, ack),
++      );
++      socket.on(REALTIME_MESSAGES.PUBLISH, (payload: unknown, ack: Ack<PublishOkAck>) =>
++        void this.handlePublish(socket, payload, ack),
++      );
++      socket.on('disconnect', () => this.registry.remove(socket.id));
++    });
++    this.bus.subscribe((events) => this.fanOut(events));
++  }
++
++  // Handshake (design §4): отказы аутентификации — один SESSION_INVALID (причины не
++  // различаются снаружи, как в refresh); потолок reconnect (REQ-RT-015, объём v1.3)
++  // — RATE_LIMITED. Код уходит в message connect_error — он и есть wire-код.
++  private authenticate(socket: Socket, next: (err?: Error) => void): void {
++    let claims: AccessClaims;
++    try {
++      const token = (socket.handshake.auth as Record<string, unknown>).token;
++      claims = this.tokens.verifyAccessToken(typeof token === 'string' ? token : '');
++    } catch (err) {
++      this.logger.warn(`socket auth failed: ${(err as Error).message}`);
++      next(new Error('SESSION_INVALID'));
++      return;
++    }
++    // Per-identity потолок на успешный handshake: каждый reconnect тянет replay —
++    // точка учёта одна и самая ранняя после аутентификации; неаутентифицированные
++    // попытки не считаются (identity ещё нет).
++    if (!this.reconnectLimiter.tryAcquire(claims.sub)) {
++      next(new Error('RATE_LIMITED'));
++      return;
++    }
++    socket.data.claims = claims;
++    next();
++  }
++
++  async handleSubscribe(socket: Socket, payload: unknown, ack: Ack<SubscribeOkAck>): Promise<void> {
++    const parsed = subscribeRequestSchema.safeParse(payload);
++    if (!parsed.success) {
++      ack({ code: 'REQUEST_INVALID' });
++      return;
++    }
++    const claims = claimsOf(socket);
++    const { roomId } = parsed.data;
++    // REQ-ID-016: гостевой scope зашит в токен — GUEST подписывается только на свою
++    // комнату; REGISTERED (токены — с OAuth-среза) решает membership-гейт.
++    if (claims.kind === 'GUEST' && claims.roomId !== roomId) {
++      ack({ code: 'ACTOR_NOT_MEMBER' });
++      return;
++    }
++    // Мульти-подписка не строится (design §4): re-subscribe в ту же комнату —
++    // идемпотентный повторный snapshot, в чужую — отказ.
++    const existing = this.registry.get(socket.id);
++    if (existing !== undefined && existing.roomId !== roomId) {
++      ack({ code: 'REQUEST_INVALID' });
++      return;
++    }
++    // REQ-SEC-003: чтение подресурсов комнаты — только членам.
++    const membership = await this.membership.findActiveMembership(roomId, claims.sub);
++    if (!membership) {
++      ack({ code: 'ACTOR_NOT_MEMBER' });
++      return;
++    }
++    // MODERATOR в MVP без прав сверх PARTICIPANT (amendment v1.3) → public.
++    const level: OutwardLevel = membership.role === 'ORGANIZER' ? 'organizer' : 'public';
++    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
++    const events = await this.prisma.logEvent.findMany({
++      where: { roomId },
++      orderBy: { seq: 'asc' },
++    });
++    const manifest =
++      room?.appId != null && room.manifestVersion != null
++        ? this.appRegistry.getManifest(room.appId, room.manifestVersion)
++        : undefined;
++    const snapshot: RoomSnapshot = {
++      events: this.projection.projectEvents(events, level),
++      appSettings: this.projection.projectAppSettings(room?.appSettings ?? null, manifest, level),
++    };
++    // Контракт вызывающего реестра (леджер Task 6): тот же socketId перезаписывает
++    // только ту же (identityId, roomId) пару — re-add той же подписки идемпотентен;
++    // подписка в чужую комнату отклонена выше (REQUEST_INVALID), поэтому расщепления
++    // индексов не возникает.
++    this.registry.add({ socketId: socket.id, identityId: claims.sub, roomId, level });
++    await socket.join(roomChannel(roomId));
++    if (level === 'organizer') await socket.join(organizerChannel(roomId));
++    ack({ ok: true, snapshot });
++  }
++
++  async handlePublish(socket: Socket, payload: unknown, ack: Ack<PublishOkAck>): Promise<void> {
++    const parsed = publishRequestSchema.safeParse(payload);
++    if (!parsed.success) {
++      ack({ code: 'REQUEST_INVALID' });
++      return;
++    }
++    // roomId — из подписки, actorId — из claims: из payload не берётся ничего,
++    // кроме данных самого события (REQ-RT-009, design §5).
++    const sub = this.registry.get(socket.id);
++    if (sub === undefined) {
++      ack({ code: 'ACTOR_NOT_MEMBER' });
++      return;
++    }
++    try {
++      // Владелец типа — из имени: core-пространство для клиента закрыто (lifecycle
++      // эмитит только ядро); тип чужого app отсутствует в пиннутом манифесте —
++      // отсекает шаг 4 commit-цепочки (EVENT_UNKNOWN_TYPE).
++      const owner = resolveTypeOwner(parsed.data.type);
++      if (owner.kind === 'core') {
++        ack({ code: 'EVENT_UNKNOWN_TYPE' });
++        return;
++      }
++      const visibility = await this.effectiveVisibility(sub.roomId, owner.appId, owner.shortName, parsed.data);
++      await this.outbox.run((tx) =>
++        this.eventLog.commitAppEvent(tx, sub.roomId, owner.shortName, parsed.data.payload, visibility, claimsOf(socket).sub),
++      );
++      ack({ ok: true });
++    } catch (err) {
++      ack({ code: this.wireCodeOf(err) });
++    }
++  }
++
++  // §0.6: умолчание visibility — декларированный потолок типа. Неизвестному типу
++  // дефолт безразличен (commit откажет EVENT_UNKNOWN_TYPE) — fail-safe module-private.
++  private async effectiveVisibility(
++    roomId: string,
++    appId: string,
++    shortName: string,
++    request: PublishRequest,
++  ): Promise<Visibility> {
++    if (request.visibility !== undefined) return request.visibility;
++    const room = await this.prisma.room.findUnique({
++      where: { id: roomId },
++      select: { manifestVersion: true },
++    });
++    const definition =
++      room?.manifestVersion != null
++        ? this.appRegistry.getEventDefinition(appId, room.manifestVersion, shortName)
++        : undefined;
++    return definition?.visibility ?? 'module-private';
++  }
++
++  // Live-доставка: проекцию строит ProjectionService — ручной фильтрации полей
++  // здесь нет и быть не может (REQ-CORE-005).
++  private fanOut(events: readonly LogEvent[]): void {
++    for (const event of events) {
++      // Изоляция per-event (санкционированное отклонение, леджер Task 5 → Task 7):
++      // RealtimeBus.publish пропагирует исключения слушателя синхронно — throw
++      // здесь отклонил бы outbox.run ПОСЛЕ успешного коммита. Падающая проекция/
++      // эмит логируется и пропускается, остальные события доставляются.
++      try {
++        const projected: ProjectedEvent = this.projection.projectEvent(event);
++        if (event.visibility === 'PUBLIC') {
++          this.server.to(roomChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
++        } else if (event.visibility === 'ORGANIZER') {
++          this.server.to(organizerChannel(event.roomId)).emit(REALTIME_MESSAGES.EVENT, projected);
++        }
++      } catch (err) {
++        this.logger.error(
++          `fan-out of ${event.type} (room ${event.roomId}, seq ${event.seq}) failed: ${(err as Error).message}`,
++        );
++      }
++    }
++  }
++
++  // Hook среза исключения (design §4, §0.2): немедленный разрыв всех подписок
++  // identity в комнате. Вызывающего пока нет — срез исключения ОБЯЗАН вызвать этот
++  // метод (шов, зафиксирован в дизайне §9).
++  revokeRoomAccess(identityId: string, roomId: string): void {
++    for (const socketId of this.registry.socketsOf(identityId, roomId)) {
++      const socket = this.server.sockets.sockets.get(socketId);
++      this.registry.remove(socketId);
++      if (socket !== undefined) {
++        socket.leave(roomChannel(roomId));
++        socket.leave(organizerChannel(roomId));
++        socket.disconnect(true);
++      }
++    }
++  }
++
++  private wireCodeOf(err: unknown): ContractErrorCode {
++    if (err instanceof RealtimeError) return contractCodeFor(err);
++    if (err instanceof ContractError) return err.code;
++    // REQ-SEC-006: неизвестное — INTERNAL_ERROR, детали только в серверный лог.
++    this.logger.error(err);
++    return 'INTERNAL_ERROR';
++  }
++}
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+index 71d6185..603faf5 100644
+--- a/packages/core/src/realtime/realtime.module.ts
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -1,29 +1,47 @@
+ import { Module } from '@nestjs/common';
+ import { ConfigModule } from '../config/config.module';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { AuthModule } from '../auth/auth.module';
++import { MembershipModule } from '../membership/membership.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
++import { ProjectionService } from './projection.service';
++import { SubscriptionRegistry } from './subscription-registry';
++import { RealtimeGateway } from './realtime.gateway';
++import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+ 
+ // PrismaModule нужен EventOutbox'у (runner владеет транзакцией); сам примитив
+ // записи по-прежнему работает на транзакционном клиенте вызывающего — атомарность
+-// «действие + лог» (REQ-DEV-008) не меняется.
++// «действие + лог» (REQ-DEV-008) не меняется. Единственный модуль ядра, импортирующий
++// socket.io (REQ-RT-006 + boundary-правило).
+ @Module({
+-  imports: [ConfigModule, AppRegistryModule, PrismaModule],
++  imports: [ConfigModule, AppRegistryModule, PrismaModule, AuthModule, MembershipModule],
+   providers: [
+     {
+       provide: EventEmitLimiter,
+       useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
+       inject: [APP_CONFIG],
+     },
++    {
++      // REQ-RT-015 (объём v1.3): отдельный инстанс — состояние не делится с
++      // join/refresh лимитерами; бэкофф/режимы — ф.4.
++      provide: RECONNECT_RATE_LIMITER,
++      useFactory: (config: AppConfig) => new JoinRateLimiter(config.RECONNECT_RATE_LIMIT_PER_MIN),
++      inject: [APP_CONFIG],
++    },
+     RealtimeBus,
+     EventOutbox,
+     EventLogService,
++    ProjectionService,
++    SubscriptionRegistry,
++    RealtimeGateway,
+   ],
+   exports: [EventLogService, EventOutbox],
+ })
+ export class RealtimeModule {}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 8972d32..df17bd0 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -48,34 +48,34 @@ importers:
+         specifier: workspace:*
+         version: link:../../packages/core
+       '@mymozhem/sdk':
+         specifier: workspace:*
+         version: link:../../packages/sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+-        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/platform-fastify':
+         specifier: ^11.0.0
+-        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+-        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@testcontainers/postgresql':
+         specifier: ^12.0.4
+         version: 12.0.4
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/node':
+         specifier: ^24.0.0
+         version: 24.13.3
+       jest:
+@@ -94,21 +94,27 @@ importers:
+   packages/core:
+     dependencies:
+       '@mymozhem/sdk':
+         specifier: workspace:*
+         version: link:../sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+-        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/platform-socket.io':
++        specifier: ^11.1.28
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(rxjs@7.8.2)
++      '@nestjs/websockets':
++        specifier: ^11.1.28
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@prisma/adapter-pg':
+         specifier: ^7.6.0
+         version: 7.8.0
+       '@prisma/client':
+         specifier: ^7.6.0
+         version: 7.8.0(prisma@7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3))(typescript@5.9.3)
+       ajv:
+         specifier: ^8.20.0
+         version: 8.20.0
+       jsonwebtoken:
+@@ -116,27 +122,30 @@ importers:
+         version: 9.0.3
+       pg:
+         specifier: ^8.13.0
+         version: 8.22.0
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
++      socket.io:
++        specifier: ^4.8.3
++        version: 4.8.3
+       zod:
+         specifier: ^4.0.0
+         version: 4.4.3
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+-        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@testcontainers/postgresql':
+         specifier: ^12.0.4
+         version: 12.0.4
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/jsonwebtoken':
+         specifier: ^9.0.10
+         version: 9.0.10
+       '@types/node':
+@@ -631,33 +640,52 @@ packages:
+       '@fastify/static': ^8.0.0 || ^9.0.0
+       '@fastify/view': ^10.0.0 || ^11.0.0 || ^12.0.0
+       '@nestjs/common': ^11.0.0
+       '@nestjs/core': ^11.0.0
+     peerDependenciesMeta:
+       '@fastify/static':
+         optional: true
+       '@fastify/view':
+         optional: true
+ 
++  '@nestjs/platform-socket.io@11.1.28':
++    resolution: {integrity: sha512-vY+GmU2jBcymvgm5rEnftUx4qNxK8cDJmXjl1/1NcpITTNJo0vg07xYR43MwXHcMqe7b0jwqt5+UCTzxqQFIqA==}
++    peerDependencies:
++      '@nestjs/common': ^11.0.0
++      '@nestjs/websockets': ^11.0.0
++      rxjs: ^7.1.0
++
+   '@nestjs/testing@11.1.28':
+     resolution: {integrity: sha512-B+VgRxeLaH7jkOMgAyUP3N3rpFlisQ7JRxixRbgHvG6a0VgKbbkNSofKExexCgKmQQak80undb3+2kE1lUBmRQ==}
+     peerDependencies:
+       '@nestjs/common': ^11.0.0
+       '@nestjs/core': ^11.0.0
+       '@nestjs/microservices': ^11.0.0
+       '@nestjs/platform-express': ^11.0.0
+     peerDependenciesMeta:
+       '@nestjs/microservices':
+         optional: true
+       '@nestjs/platform-express':
+         optional: true
+ 
++  '@nestjs/websockets@11.1.28':
++    resolution: {integrity: sha512-jeyclAURCJTN8S8lctDhfLdiJeDKjZmYWWLav653Fb9hl9c+zx5jPhavI8Xk5++R8u+lX9qzaRxtsjEoxTtjyw==}
++    peerDependencies:
++      '@nestjs/common': ^11.0.0
++      '@nestjs/core': ^11.0.0
++      '@nestjs/platform-socket.io': ^11.0.0
++      reflect-metadata: ^0.1.12 || ^0.2.0
++      rxjs: ^7.1.0
++    peerDependenciesMeta:
++      '@nestjs/platform-socket.io':
++        optional: true
++
+   '@pinojs/redact@0.4.0':
+     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
+ 
+   '@pkgjs/parseargs@0.11.0':
+     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
+     engines: {node: '>=14'}
+ 
+   '@prisma/adapter-pg@7.8.0':
+     resolution: {integrity: sha512-ygb3UkerK3v8MDpXVgCISdRNDozpxh6+JVJgiIGbSr5KBgz10LLf5ejUskPGoXlsIjxsOu6nuy1JVQr2EKGSlg==}
+ 
+@@ -824,20 +852,23 @@ packages:
+ 
+   '@sinclair/typebox@0.27.10':
+     resolution: {integrity: sha512-MTBk/3jGLNB2tVxv6uLlFh1iu64iYOQ2PbdOSK3NW8JZsmlaOh2q6sdtKowBhfw8QFLmYNzTW4/oK4uATIi6ZA==}
+ 
+   '@sinonjs/commons@3.0.1':
+     resolution: {integrity: sha512-K3mCHKQ9sVh8o1C9cxkwxaOmXoAMlDxC1mYyHrjqOWEcBjYr76t96zL2zlj5dUGZ3HSw240X1qgH3Mjf1yJWpQ==}
+ 
+   '@sinonjs/fake-timers@10.3.0':
+     resolution: {integrity: sha512-V4BG07kuYSUkTCSBHG8G8TNhM+F19jXFWnQtzj+we8DrkpSBCee9Z3Ms8yiGer/dlmhe35/Xdgyo3/0rQKg7YA==}
+ 
++  '@socket.io/component-emitter@3.1.2':
++    resolution: {integrity: sha512-9BCxFwvbGg/RsZK9tjXd8s4UcwR0MWeFQ1XEKIQVVvAGJyINdrqKMcTRyLoK8Rse1GjzLV9cwjWV1olXRWEXVA==}
++
+   '@standard-schema/spec@1.1.0':
+     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+ 
+   '@testcontainers/postgresql@12.0.4':
+     resolution: {integrity: sha512-a/pLU6j5lpKKAlUTPwqweqMGhOSjgTSb6HBX69TOrXn32ifU37nnQDmNFTj8ddOAw+BQL9oTRkeOxVbZkqhgZA==}
+ 
+   '@tokenizer/inflate@0.4.1':
+     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
+     engines: {node: '>=18'}
+ 
+@@ -879,20 +910,23 @@ packages:
+ 
+   '@types/babel__generator@7.27.0':
+     resolution: {integrity: sha512-ufFd2Xi92OAVPYsy+P4n7/U7e68fex0+Ee8gSG9KX7eo084CWiQ4sdxktvdl0bOPupXtVJPY19zk6EwWqUQ8lg==}
+ 
+   '@types/babel__template@7.4.4':
+     resolution: {integrity: sha512-h/NUaSyG5EyxBIp8YRxo4RMe2/qQgvyowRwVMzhYhBCONbW8PUsg4lkFMrhgZhUe5z3L3MiLDuvyJ/CaPa2A8A==}
+ 
+   '@types/babel__traverse@7.28.0':
+     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
+ 
++  '@types/cors@2.8.19':
++    resolution: {integrity: sha512-mFNylyeyqN93lfe/9CSxOGREz8cpzAhH+E93xJ4xWQf62V8sQ/24reV2nyzUWM6H6Xji+GGHpkbLe7pVoUEskg==}
++
+   '@types/docker-modem@3.0.6':
+     resolution: {integrity: sha512-yKpAGEuKRSS8wwx0joknWxsmLha78wNMe9R2S3UNsVOkZded8UqOrV8KoeDXoXsjndxwyF3eIhyClGbO1SEhEg==}
+ 
+   '@types/dockerode@4.0.1':
+     resolution: {integrity: sha512-cmUpB+dPN955PxBEuXE3f6lKO1hHiIGYJA46IVF3BJpNsZGvtBDcRnlrHYHtOH/B6vtDOyl2kZ2ShAu3mgc27Q==}
+ 
+   '@types/estree@1.0.9':
+     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+ 
+   '@types/graceful-fs@4.1.9':
+@@ -939,20 +973,23 @@ packages:
+ 
+   '@types/ssh2@0.5.52':
+     resolution: {integrity: sha512-lbLLlXxdCZOSJMCInKH2+9V/77ET2J6NPQHpFI0kda61Dd1KglJs+fPQBchizmzYSOJBgdTajhPqBO1xxLywvg==}
+ 
+   '@types/ssh2@1.15.5':
+     resolution: {integrity: sha512-N1ASjp/nXH3ovBHddRJpli4ozpk6UdDYIX4RJWFa9L1YKnzdhTlVmiGHm4DZnj/jLbqZpes4aeR30EFGQtvhQQ==}
+ 
+   '@types/stack-utils@2.0.3':
+     resolution: {integrity: sha512-9aEbYZ3TbYMznPdcdr3SmIrLXwC/AKZXQeCf9Pgao5CKb8CyHuEX5jzWPTkvregvhRJHcpRO6BFoGW9ycaOkYw==}
+ 
++  '@types/ws@8.18.1':
++    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
++
+   '@types/yargs-parser@21.0.3':
+     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
+ 
+   '@types/yargs@17.0.35':
+     resolution: {integrity: sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==}
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0':
+     resolution: {integrity: sha512-CGvQPBxN3wZLu6Rz2kFUpZeoCm78xUic92ck39KPePkO1NPOwjCqdQnm5Q87tpWw9vcBvW8XLrDXjH9PWYtJ3Q==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+     peerDependencies:
+@@ -1011,20 +1048,24 @@ packages:
+     resolution: {integrity: sha512-mrtuL8Nsn6gi2H4mo5KMTp823M+3Q19Ew/i+Zlikq20tIMm99C3Ez0dCmkWWnxut20esQvTg8aUSEhMcAOXhEw==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+ 
+   abort-controller@3.0.0:
+     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
+     engines: {node: '>=6.5'}
+ 
+   abstract-logging@2.0.1:
+     resolution: {integrity: sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==}
+ 
++  accepts@1.3.8:
++    resolution: {integrity: sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==}
++    engines: {node: '>= 0.6'}
++
+   acorn-jsx-walk@2.0.0:
+     resolution: {integrity: sha512-uuo6iJj4D4ygkdzd6jPtcxs8vZgDX9YFIkqczGImoypX2fQ4dVImmu3UzA4ynixCIMTrEOWW+95M2HuBaCEOVA==}
+ 
+   acorn-jsx@5.3.2:
+     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
+     peerDependencies:
+       acorn: ^6.0.0 || ^7.0.0 || ^8.0.0
+ 
+   acorn-loose@8.5.2:
+     resolution: {integrity: sha512-PPvV6g8UGMGgjrMu+n/f9E/tCSkNQ2Y97eFvuVdJfG11+xdIeDcLyNdC8SHcrHbRqkfwLASdplyR6B6sKM1U4A==}
+@@ -1188,20 +1229,24 @@ packages:
+         optional: true
+       bare-events:
+         optional: true
+ 
+   bare-url@2.4.5:
+     resolution: {integrity: sha512-K+y9xF1tN+CdPu4qWwr0QiK1Al07eFPGYK5M2pDXcmHdMdgC/tT/bpmMe1hrmRHaidKLkXrC+cRNYf3XVDUhSQ==}
+ 
+   base64-js@1.5.1:
+     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
+ 
++  base64id@2.0.0:
++    resolution: {integrity: sha512-lGe34o6EHj9y3Kts9R4ZYs/Gr+6N7MCaMlIFA3F1R2O5/m7K06AxfSeO5530PEERE6/WyEg3lsuyw4GHlPZHog==}
++    engines: {node: ^4.5.0 || >= 5.9}
++
+   baseline-browser-mapping@2.10.43:
+     resolution: {integrity: sha512-AjYpR78kDWAY3Efj+cDTFH9t9SCoL7OoTp1BOb0mQV7S+6CiLwnWM3FyxhJtdPufDFKzmCSFoUncKjWgJEZTCQ==}
+     engines: {node: '>=6.0.0'}
+     hasBin: true
+ 
+   bcrypt-pbkdf@1.0.2:
+     resolution: {integrity: sha512-qeFIXtP4MSoi6NLqO12WfqARWWuCKi2Rn/9hJLEmtB5yTNr9DqFWkJRCf2qShWzPeAMRnOgCrq0sg/KLv5ES9w==}
+ 
+   better-result@2.9.2:
+     resolution: {integrity: sha512-WIFoBPCdnTOdk9inkE1ZRvCZ4P0CpSkAiLlchC65N7n9DcjZ3NhqkBOlafzpOVnO8ixyi37kicmSJ3ENhPZl7Q==}
+@@ -1336,31 +1381,39 @@ packages:
+ 
+   concat-map@0.0.1:
+     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
+ 
+   confbox@0.2.4:
+     resolution: {integrity: sha512-ysOGlgTFbN2/Y6Cg3Iye8YKulHw+R2fNXHrgSmXISQdMnomY6eNDprVdW9R5xBguEqI954+S6709UyiO7B+6OQ==}
+ 
+   convert-source-map@2.0.0:
+     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
+ 
++  cookie@0.7.2:
++    resolution: {integrity: sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==}
++    engines: {node: '>= 0.6'}
++
+   cookie@1.1.1:
+     resolution: {integrity: sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==}
+     engines: {node: '>=18'}
+ 
+   cookie@2.0.1:
+     resolution: {integrity: sha512-yuToqVvRrj6pfDXREyQAAv8SkAEk/8GS3jQRTiUMm66TVtBYmqQeoEjL2Lmq8Rpo6271vH76InTChTitEAm65w==}
+     engines: {node: '>=22'}
+ 
+   core-util-is@1.0.3:
+     resolution: {integrity: sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==}
+ 
++  cors@2.8.6:
++    resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
++    engines: {node: '>= 0.10'}
++
+   cpu-features@0.0.10:
+     resolution: {integrity: sha512-9IkYqtX3YHPCzoVg1Py+o9057a3i0fp7S530UWokCSaFVTc7CwXPRiOjRjBQQ18ZCNafx78YfnG+HALxtVmOGA==}
+     engines: {node: '>=10.0.0'}
+ 
+   crc-32@1.2.2:
+     resolution: {integrity: sha512-ROmzCKrTnOwybPcJApAA6WBWij23HVfGVNKqqrZpuyZOHqK2CwHSvpGuyt/UNNvaIjEd8X5IFGp4Mh+Ie1IHJQ==}
+     engines: {node: '>=0.8'}
+     hasBin: true
+ 
+   crc32-stream@6.0.0:
+@@ -1476,20 +1529,28 @@ packages:
+   emoji-regex@9.2.2:
+     resolution: {integrity: sha512-L18DaJsXSUk2+42pv8mLs5jJT2hqFkFE4j21wOmgbUqsZ2hL72NsUU785g9RXgo3s0ZNgVl42TiHp3ZtOv/Vyg==}
+ 
+   empathic@2.0.0:
+     resolution: {integrity: sha512-i6UzDscO/XfAcNYD75CfICkmfLedpyPDdozrLMmQc5ORaQcdMoc21OnlEylMIqI7U8eniKrPMxxtj8k0vhmJhA==}
+     engines: {node: '>=14'}
+ 
+   end-of-stream@1.4.5:
+     resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
+ 
++  engine.io-parser@5.2.3:
++    resolution: {integrity: sha512-HqD3yTBfnBxIrbnM1DoD6Pcq8NECnh8d4As1Qgh0z5Gg3jRRIqijury0CL3ghu/edArpUYiYqQiDUQBIs4np3Q==}
++    engines: {node: '>=10.0.0'}
++
++  engine.io@6.6.9:
++    resolution: {integrity: sha512-clKkw4C7nJ22mGgoVcCg6V/W/TxdNyIOTr89k2ONZu81qqkddPFDF0LXcbAwhzPD8DjkiRCjzuiO6Y+fkpD4vg==}
++    engines: {node: '>=10.2.0'}
++
+   enhanced-resolve@5.24.2:
+     resolution: {integrity: sha512-rpsZEGT1jFuve6QlpyRp9ckQ+kN61hvF9BzCPyMdaKTm8UJce96KBn3sorXOFXlzjPrs3Vc4T1NsSroZ3PxlFw==}
+     engines: {node: '>=10.13.0'}
+ 
+   env-paths@3.0.0:
+     resolution: {integrity: sha512-dtJUTepzMW3Lm/NPxRf3wP4642UWhjL2sQxc+ym2YMj1m/H2zDNQOlezafzkHwn6sMstjHTwG6iQQsctDW/b1A==}
+     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+ 
+   error-ex@1.3.4:
+     resolution: {integrity: sha512-sqQamAnR14VgCr1A618A3sGrygcpK+HEbenA/HiEAkkUwcZIIB/tgWqHFxWgOyDh4nB4JCRimh79dR5Ywc9MDQ==}
+@@ -2190,20 +2251,28 @@ packages:
+     resolution: {integrity: sha512-DeC6b7QBrZsRs3Y02A6A7lQyzFbsQbqgjI6UW0GigGWV+u1s25TycMr0XHZE4cJce7rY/vyw2ctMQqfDkIhUEA==}
+     engines: {node: '>=18'}
+ 
+   merge-stream@2.0.0:
+     resolution: {integrity: sha512-abv/qOcuPfk3URPfDzmZU1LKmuw8kT+0nIHvKrKgFrwifol/doWcdA4ZqsWQ8ENrFKkd67Mfpo/LovbIUsbt3w==}
+ 
+   micromatch@4.0.8:
+     resolution: {integrity: sha512-PXwfBhYu0hBCPw8Dn0E+WDYb7af3dSLVWKi3HGv84IdF4TyFoC0ysxFd0Goxw7nSv4T/PzEJQxsYsEiFCKo2BA==}
+     engines: {node: '>=8.6'}
+ 
++  mime-db@1.52.0:
++    resolution: {integrity: sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==}
++    engines: {node: '>= 0.6'}
++
++  mime-types@2.1.35:
++    resolution: {integrity: sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==}
++    engines: {node: '>= 0.6'}
++
+   mimic-fn@2.1.0:
+     resolution: {integrity: sha512-OqbOk5oEQeAZ8WXWydlu9HJjz9WVdEIvamMCcXmuqUYjTknH/sqsWvhQ3vgwKFRR1HpjvNBKQ37nbJgYzGqGcg==}
+     engines: {node: '>=6'}
+ 
+   mimic-function@5.0.1:
+     resolution: {integrity: sha512-VP79XUPxV2CigYP3jWwAUFSku2aKqBH7uTAapFWCBqutsbmDo96KY5o8uh6U+/YSIn5OxJnXp73beVkpqMIGhA==}
+     engines: {node: '>=18'}
+ 
+   minimatch@10.2.5:
+     resolution: {integrity: sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg==}
+@@ -2245,38 +2314,50 @@ packages:
+   named-placeholders@1.1.6:
+     resolution: {integrity: sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==}
+     engines: {node: '>=8.0.0'}
+ 
+   nan@2.28.0:
+     resolution: {integrity: sha512-fTsDz99OTq2sVePhGdp4qQhggZFtKr64ZNVyVajRKtMOkJxYekplBh577PiJB12v/D3s2E5cGtOI45LWp6rnLQ==}
+ 
+   natural-compare@1.4.0:
+     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+ 
++  negotiator@0.6.3:
++    resolution: {integrity: sha512-+EUsqGPLsM+j/zdChZjsnX51g4XrHFOIXwfnCVPGlQk/k5giakcKsuxCObBRu6DSm9opw/O6slWbJdghQM4bBg==}
++    engines: {node: '>= 0.6'}
++
+   neo-async@2.6.2:
+     resolution: {integrity: sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==}
+ 
+   node-int64@0.4.0:
+     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
+ 
+   node-releases@2.0.51:
+     resolution: {integrity: sha512-wRNIrw4DmVLKQlbgOMdkMx27Wrpzes2hh5Jtbi2bjPd+4wJstWIqP5A+lscnqbm0xxmT5Bpg8Lec5ItEBwx6BQ==}
+     engines: {node: '>=18'}
+ 
+   normalize-path@3.0.0:
+     resolution: {integrity: sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==}
+     engines: {node: '>=0.10.0'}
+ 
+   npm-run-path@4.0.1:
+     resolution: {integrity: sha512-S48WzZW777zhNIrn7gxOlISNAqi9ZC/uQFnRdbeIHhZhCA6UqpkOT8T1G7BvfdgP4Er8gF4sUbaS0i7QvIfCWw==}
+     engines: {node: '>=8'}
+ 
++  object-assign@4.1.1:
++    resolution: {integrity: sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==}
++    engines: {node: '>=0.10.0'}
++
++  object-hash@3.0.0:
++    resolution: {integrity: sha512-RSn9F68PjH9HqtltsSnqYC1XXoWe9Bju5+213R98cNGttag9q9yAOTzdbsqvIa7aNm5WffBZFpWYr2aWrklWAw==}
++    engines: {node: '>= 6'}
++
+   ohash@2.0.11:
+     resolution: {integrity: sha512-RdR9FQrFwNBNXAr4GixM8YaRZRJ5PUWbKYbE5eOsrwAjJW0q2REGcf79oYPsLyskQCZG1PLN+S/K1V00joZAoQ==}
+ 
+   on-exit-leak-free@2.1.2:
+     resolution: {integrity: sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==}
+     engines: {node: '>=14.0.0'}
+ 
+   once@1.4.0:
+     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
+ 
+@@ -2656,20 +2737,31 @@ packages:
+     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
+     engines: {node: '>=14'}
+ 
+   sisteransi@1.0.5:
+     resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
+ 
+   slash@3.0.0:
+     resolution: {integrity: sha512-g9Q1haeby36OSStwb4ntCGGGaKsaVSjQ68fBxoQcutl5fS1vuY18H3wSt3jFyFtrkx+Kz0V1G85A4MyAdDMi2Q==}
+     engines: {node: '>=8'}
+ 
++  socket.io-adapter@2.5.8:
++    resolution: {integrity: sha512-6Oy52pbg+kvdCVvjcN+FnY7BvxZ7cIHNScbvztT/It5d0vbwoJoVZmF2gjJmnV0/4WlXRfG15zc45ySk9Ah8bw==}
++
++  socket.io-parser@4.2.7:
++    resolution: {integrity: sha512-IH/iSeO9T6gz1KkFleGDWkG9N3dl4jXVYUtMhIqH10Md0ttMer8nUNWiP1DKuNrybD2xBrixLJdCC9J6ECoYkg==}
++    engines: {node: '>=10.0.0'}
++
++  socket.io@4.8.3:
++    resolution: {integrity: sha512-2Dd78bqzzjE6KPkD5fHZmDAKRNe3J15q+YHDrIsy9WEkqttc7GY+kT9OBLSMaPbQaEd0x1BjcmtMtXkfpc+T5A==}
++    engines: {node: '>=10.2.0'}
++
+   sonic-boom@4.2.1:
+     resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
+ 
+   source-map-support@0.5.13:
+     resolution: {integrity: sha512-SHSKFHadjVA5oR4PPqhtAVdcBWwRYVd6g6cAXnIbRiIwc2EhPrTuKUBdSLvlEKyIP3GCf89fltvcZiP9MMFA1w==}
+ 
+   source-map@0.6.1:
+     resolution: {integrity: sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==}
+     engines: {node: '>=0.10.0'}
+ 
+@@ -2941,20 +3033,24 @@ packages:
+     engines: {node: '>=10.12.0'}
+ 
+   valibot@1.2.0:
+     resolution: {integrity: sha512-mm1rxUsmOxzrwnX5arGS+U4T25RdvpPjPN4yR0u9pUBov9+zGVtO84tif1eY4r6zWxVxu3KzIyknJy3rxfRZZg==}
+     peerDependencies:
+       typescript: '>=5'
+     peerDependenciesMeta:
+       typescript:
+         optional: true
+ 
++  vary@1.1.2:
++    resolution: {integrity: sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==}
++    engines: {node: '>= 0.8'}
++
+   walker@1.0.8:
+     resolution: {integrity: sha512-ts/8E8l5b7kY0vlWLewOkDXMmPdLcVV4GmOQLyxuSswIJsweeFZtAsMF7k1Nszz+TYBQrlYRmzOnr398y1JemQ==}
+ 
+   watskeburt@4.2.3:
+     resolution: {integrity: sha512-uG9qtQYoHqAsnT711nG5iZc/8M5inSmkGCOp7pFaytKG2aTfIca7p//CjiVzAE4P7hzaYuCozMjNNaLgmhbK5g==}
+     engines: {node: ^18||>=20}
+     hasBin: true
+ 
+   which@2.0.2:
+     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
+@@ -2976,20 +3072,32 @@ packages:
+     resolution: {integrity: sha512-si7QWI6zUMq56bESFvagtmzMdGOtoxfR+Sez11Mobfc7tm+VkUckk9bW2UeffTGVUbOksxmSw0AA2gs8g71NCQ==}
+     engines: {node: '>=12'}
+ 
+   wrappy@1.0.2:
+     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
+ 
+   write-file-atomic@4.0.2:
+     resolution: {integrity: sha512-7KxauUdBmSdWnmpaGFg+ppNjKF8uNLry8LyzjauQDOVONfFLNKrKvQOxZ/VuTIcS/gge/YNahf5RIIQWTSarlg==}
+     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
+ 
++  ws@8.21.2:
++    resolution: {integrity: sha512-54dMVAo4WIe6SKy3vBgN+9bJZqqQ8IMRevAkOLQALhi49qkkQDQfWdAZ8KQlXiEabw88ARXXdUrlvtbKQX+aKw==}
++    engines: {node: '>=10.0.0'}
++    peerDependencies:
++      bufferutil: ^4.0.1
++      utf-8-validate: '>=5.0.2'
++    peerDependenciesMeta:
++      bufferutil:
++        optional: true
++      utf-8-validate:
++        optional: true
++
+   xtend@4.0.2:
+     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
+     engines: {node: '>=0.4'}
+ 
+   y18n@5.0.8:
+     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
+     engines: {node: '>=10'}
+ 
+   yallist@3.1.1:
+     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
+@@ -3576,51 +3684,77 @@ snapshots:
+       file-type: 21.3.4
+       iterare: 1.2.1
+       load-esm: 1.0.3
+       reflect-metadata: 0.2.2
+       rxjs: 7.8.2
+       tslib: 2.8.1
+       uid: 2.0.2
+     transitivePeerDependencies:
+       - supports-color
+ 
+-  '@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)':
++  '@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       fast-safe-stringify: 2.1.1
+       iterare: 1.2.1
+       path-to-regexp: 8.4.2
+       reflect-metadata: 0.2.2
+       rxjs: 7.8.2
+       tslib: 2.8.1
+       uid: 2.0.2
++    optionalDependencies:
++      '@nestjs/websockets': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+ 
+-  '@nestjs/platform-fastify@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
++  '@nestjs/platform-fastify@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)':
+     dependencies:
+       '@fastify/cors': 11.2.0
+       '@fastify/formbody': 8.0.2
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+-      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       fast-querystring: 1.1.2
+       fastify: 5.10.0
+       fastify-plugin: 6.0.0
+       find-my-way: 9.6.0
+       light-my-request: 6.6.0
+       path-to-regexp: 8.4.2
+       reusify: 1.1.0
+       tslib: 2.8.1
+ 
+-  '@nestjs/testing@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
++  '@nestjs/platform-socket.io@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(rxjs@7.8.2)':
++    dependencies:
++      '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/websockets': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      rxjs: 7.8.2
++      socket.io: 4.8.3
++      tslib: 2.8.1
++    transitivePeerDependencies:
++      - bufferutil
++      - supports-color
++      - utf-8-validate
++
++  '@nestjs/testing@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)':
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+-      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      tslib: 2.8.1
++
++  '@nestjs/websockets@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
++    dependencies:
++      '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      iterare: 1.2.1
++      object-hash: 3.0.0
++      reflect-metadata: 0.2.2
++      rxjs: 7.8.2
+       tslib: 2.8.1
++    optionalDependencies:
++      '@nestjs/platform-socket.io': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(rxjs@7.8.2)
+ 
+   '@pinojs/redact@0.4.0': {}
+ 
+   '@pkgjs/parseargs@0.11.0':
+     optional: true
+ 
+   '@prisma/adapter-pg@7.8.0':
+     dependencies:
+       '@prisma/driver-adapter-utils': 7.8.0
+       '@types/pg': 8.20.0
+@@ -3796,20 +3930,22 @@ snapshots:
+   '@sinclair/typebox@0.27.10': {}
+ 
+   '@sinonjs/commons@3.0.1':
+     dependencies:
+       type-detect: 4.0.8
+ 
+   '@sinonjs/fake-timers@10.3.0':
+     dependencies:
+       '@sinonjs/commons': 3.0.1
+ 
++  '@socket.io/component-emitter@3.1.2': {}
++
+   '@standard-schema/spec@1.1.0': {}
+ 
+   '@testcontainers/postgresql@12.0.4':
+     dependencies:
+       testcontainers: 12.0.4
+     transitivePeerDependencies:
+       - bare-abort-controller
+       - bare-buffer
+       - react-native-b4a
+       - supports-color
+@@ -3855,20 +3991,24 @@ snapshots:
+ 
+   '@types/babel__template@7.4.4':
+     dependencies:
+       '@babel/parser': 7.29.7
+       '@babel/types': 7.29.7
+ 
+   '@types/babel__traverse@7.28.0':
+     dependencies:
+       '@babel/types': 7.29.7
+ 
++  '@types/cors@2.8.19':
++    dependencies:
++      '@types/node': 24.13.3
++
+   '@types/docker-modem@3.0.6':
+     dependencies:
+       '@types/node': 24.13.3
+       '@types/ssh2': 1.15.5
+ 
+   '@types/dockerode@4.0.1':
+     dependencies:
+       '@types/docker-modem': 3.0.6
+       '@types/node': 24.13.3
+       '@types/ssh2': 1.15.5
+@@ -3931,20 +4071,24 @@ snapshots:
+     dependencies:
+       '@types/node': 24.13.3
+       '@types/ssh2-streams': 0.1.13
+ 
+   '@types/ssh2@1.15.5':
+     dependencies:
+       '@types/node': 18.19.130
+ 
+   '@types/stack-utils@2.0.3': {}
+ 
++  '@types/ws@8.18.1':
++    dependencies:
++      '@types/node': 24.13.3
++
+   '@types/yargs-parser@21.0.3': {}
+ 
+   '@types/yargs@17.0.35':
+     dependencies:
+       '@types/yargs-parser': 21.0.3
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0(@typescript-eslint/parser@8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
+     dependencies:
+       '@eslint-community/regexpp': 4.12.2
+       '@typescript-eslint/parser': 8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
+@@ -4034,20 +4178,25 @@ snapshots:
+     dependencies:
+       '@typescript-eslint/types': 8.64.0
+       eslint-visitor-keys: 5.0.1
+ 
+   abort-controller@3.0.0:
+     dependencies:
+       event-target-shim: 5.0.1
+ 
+   abstract-logging@2.0.1: {}
+ 
++  accepts@1.3.8:
++    dependencies:
++      mime-types: 2.1.35
++      negotiator: 0.6.3
++
+   acorn-jsx-walk@2.0.0: {}
+ 
+   acorn-jsx@5.3.2(acorn@8.17.0):
+     dependencies:
+       acorn: 8.17.0
+ 
+   acorn-loose@8.5.2:
+     dependencies:
+       acorn: 8.17.0
+ 
+@@ -4228,20 +4377,22 @@ snapshots:
+       bare-events: 2.9.1
+     transitivePeerDependencies:
+       - react-native-b4a
+ 
+   bare-url@2.4.5:
+     dependencies:
+       bare-path: 3.1.1
+ 
+   base64-js@1.5.1: {}
+ 
++  base64id@2.0.0: {}
++
+   baseline-browser-mapping@2.10.43: {}
+ 
+   bcrypt-pbkdf@1.0.2:
+     dependencies:
+       tweetnacl: 0.14.5
+ 
+   better-result@2.9.2: {}
+ 
+   bl@4.1.0:
+     dependencies:
+@@ -4372,26 +4523,33 @@ snapshots:
+       is-stream: 2.0.1
+       normalize-path: 3.0.0
+       readable-stream: 4.7.0
+ 
+   concat-map@0.0.1: {}
+ 
+   confbox@0.2.4: {}
+ 
+   convert-source-map@2.0.0: {}
+ 
++  cookie@0.7.2: {}
++
+   cookie@1.1.1: {}
+ 
+   cookie@2.0.1: {}
+ 
+   core-util-is@1.0.3: {}
+ 
++  cors@2.8.6:
++    dependencies:
++      object-assign: 4.1.1
++      vary: 1.1.2
++
+   cpu-features@0.0.10:
+     dependencies:
+       buildcheck: 0.0.7
+       nan: 2.28.0
+     optional: true
+ 
+   crc-32@1.2.2: {}
+ 
+   crc32-stream@6.0.0:
+     dependencies:
+@@ -4516,20 +4674,39 @@ snapshots:
+   emoji-regex@8.0.0: {}
+ 
+   emoji-regex@9.2.2: {}
+ 
+   empathic@2.0.0: {}
+ 
+   end-of-stream@1.4.5:
+     dependencies:
+       once: 1.4.0
+ 
++  engine.io-parser@5.2.3: {}
++
++  engine.io@6.6.9:
++    dependencies:
++      '@types/cors': 2.8.19
++      '@types/node': 24.13.3
++      '@types/ws': 8.18.1
++      accepts: 1.3.8
++      base64id: 2.0.0
++      cookie: 0.7.2
++      cors: 2.8.6
++      debug: 4.4.3
++      engine.io-parser: 5.2.3
++      ws: 8.21.2
++    transitivePeerDependencies:
++      - bufferutil
++      - supports-color
++      - utf-8-validate
++
+   enhanced-resolve@5.24.2:
+     dependencies:
+       graceful-fs: 4.2.11
+       tapable: 2.3.3
+ 
+   env-paths@3.0.0: {}
+ 
+   error-ex@1.3.4:
+     dependencies:
+       is-arrayish: 0.2.1
+@@ -5407,20 +5584,26 @@ snapshots:
+     dependencies:
+       mimic-function: 5.0.1
+ 
+   merge-stream@2.0.0: {}
+ 
+   micromatch@4.0.8:
+     dependencies:
+       braces: 3.0.3
+       picomatch: 2.3.2
+ 
++  mime-db@1.52.0: {}
++
++  mime-types@2.1.35:
++    dependencies:
++      mime-db: 1.52.0
++
+   mimic-fn@2.1.0: {}
+ 
+   mimic-function@5.0.1: {}
+ 
+   minimatch@10.2.5:
+     dependencies:
+       brace-expansion: 5.0.7
+ 
+   minimatch@3.1.5:
+     dependencies:
+@@ -5458,32 +5641,38 @@ snapshots:
+ 
+   named-placeholders@1.1.6:
+     dependencies:
+       lru.min: 1.1.4
+ 
+   nan@2.28.0:
+     optional: true
+ 
+   natural-compare@1.4.0: {}
+ 
++  negotiator@0.6.3: {}
++
+   neo-async@2.6.2: {}
+ 
+   node-int64@0.4.0: {}
+ 
+   node-releases@2.0.51: {}
+ 
+   normalize-path@3.0.0: {}
+ 
+   npm-run-path@4.0.1:
+     dependencies:
+       path-key: 3.1.1
+ 
++  object-assign@4.1.1: {}
++
++  object-hash@3.0.0: {}
++
+   ohash@2.0.11: {}
+ 
+   on-exit-leak-free@2.1.2: {}
+ 
+   once@1.4.0:
+     dependencies:
+       wrappy: 1.0.2
+ 
+   onetime@5.1.2:
+     dependencies:
+@@ -5837,20 +6026,50 @@ snapshots:
+   shebang-regex@3.0.0: {}
+ 
+   signal-exit@3.0.7: {}
+ 
+   signal-exit@4.1.0: {}
+ 
+   sisteransi@1.0.5: {}
+ 
+   slash@3.0.0: {}
+ 
++  socket.io-adapter@2.5.8:
++    dependencies:
++      debug: 4.4.3
++      ws: 8.21.2
++    transitivePeerDependencies:
++      - bufferutil
++      - supports-color
++      - utf-8-validate
++
++  socket.io-parser@4.2.7:
++    dependencies:
++      '@socket.io/component-emitter': 3.1.2
++      debug: 4.4.3
++    transitivePeerDependencies:
++      - supports-color
++
++  socket.io@4.8.3:
++    dependencies:
++      accepts: 1.3.8
++      base64id: 2.0.0
++      cors: 2.8.6
++      debug: 4.4.3
++      engine.io: 6.6.9
++      socket.io-adapter: 2.5.8
++      socket.io-parser: 4.2.7
++    transitivePeerDependencies:
++      - bufferutil
++      - supports-color
++      - utf-8-validate
++
+   sonic-boom@4.2.1:
+     dependencies:
+       atomic-sleep: 1.0.0
+ 
+   source-map-support@0.5.13:
+     dependencies:
+       buffer-from: 1.1.2
+       source-map: 0.6.1
+ 
+   source-map@0.6.1: {}
+@@ -6158,20 +6377,22 @@ snapshots:
+   v8-to-istanbul@9.3.0:
+     dependencies:
+       '@jridgewell/trace-mapping': 0.3.31
+       '@types/istanbul-lib-coverage': 2.0.6
+       convert-source-map: 2.0.0
+ 
+   valibot@1.2.0(typescript@5.9.3):
+     optionalDependencies:
+       typescript: 5.9.3
+ 
++  vary@1.1.2: {}
++
+   walker@1.0.8:
+     dependencies:
+       makeerror: 1.0.12
+ 
+   watskeburt@4.2.3: {}
+ 
+   which@2.0.2:
+     dependencies:
+       isexe: 2.0.0
+ 
+@@ -6191,20 +6412,22 @@ snapshots:
+       string-width: 5.1.2
+       strip-ansi: 7.2.0
+ 
+   wrappy@1.0.2: {}
+ 
+   write-file-atomic@4.0.2:
+     dependencies:
+       imurmurhash: 0.1.4
+       signal-exit: 3.0.7
+ 
++  ws@8.21.2: {}
++
+   xtend@4.0.2: {}
+ 
+   y18n@5.0.8: {}
+ 
+   yallist@3.1.1: {}
+ 
+   yaml@2.9.0: {}
+ 
+   yargs-parser@21.1.1: {}
+ 

@@ -1,0 +1,202 @@
+# Review package: ef2f5cb..b5dee43
+
+## Commits
+b5dee43 feat(core): realtime.LogEvent table + EventVisibility enum migration (REQ-RT-001)
+
+## Files changed
+ .../migration.sql                                  | 25 +++++++++
+ packages/core/prisma/schema.prisma                 | 33 ++++++++++-
+ .../core/src/realtime/log-event-schema.int-spec.ts | 64 ++++++++++++++++++++++
+ 3 files changed, 121 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql b/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql
+new file mode 100644
+index 0000000..f4fe89e
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722180147_realtime_log_event/migration.sql
+@@ -0,0 +1,25 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "realtime";
++
++-- CreateEnum
++CREATE TYPE "realtime"."EventVisibility" AS ENUM ('public', 'organizer', 'module-private');
++
++-- CreateTable
++CREATE TABLE "realtime"."LogEvent" (
++    "roomId" UUID NOT NULL,
++    "seq" INTEGER NOT NULL,
++    "type" TEXT NOT NULL,
++    "payload" JSONB NOT NULL,
++    "actorId" UUID,
++    "visibility" "realtime"."EventVisibility" NOT NULL,
++    "schemaVersion" INTEGER NOT NULL,
++    "recordedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "LogEvent_pkey" PRIMARY KEY ("roomId","seq")
++);
++
++-- AddForeignKey
++ALTER TABLE "realtime"."LogEvent" ADD CONSTRAINT "LogEvent_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "realtime"."LogEvent" ADD CONSTRAINT "LogEvent_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index f61ee23..337b895 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,17 +1,17 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["identity", "room"]
++  schemas  = ["identity", "realtime", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+@@ -22,20 +22,21 @@ enum RoomStatus {
+ // INSERT in RoomService.create, not by the FK itself.
+ // appSettings/pin/freeze (REQ-RT-004) deferred to a later plan.
+ model Room {
+   id          String     @id @default(uuid()) @db.Uuid
+   organizer   Identity   @relation(fields: [organizerId], references: [id])
+   organizerId String     @db.Uuid
+   status      RoomStatus @default(DRAFT)
+   deletedAt   DateTime?
+   createdAt   DateTime   @default(now())
+   updatedAt   DateTime   @updatedAt
++  logEvents   LogEvent[]
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+   REGISTERED
+   GUEST
+ 
+   @@schema("identity")
+ }
+@@ -46,13 +47,43 @@ enum IdentityKind {
+ // REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+ // NOT a Prisma preview feature.
+ model Identity {
+   id        String       @id @default(uuid()) @db.Uuid
+   kind      IdentityKind
+   email     String?
+   deletedAt DateTime?
+   createdAt DateTime     @default(now())
+   updatedAt DateTime     @updatedAt
+   rooms     Room[]
++  logEvents LogEvent[]
+ 
+   @@schema("identity")
+ }
++
++enum EventVisibility {
++  PUBLIC         @map("public")
++  ORGANIZER      @map("organizer")
++  MODULE_PRIVATE @map("module-private")
++
++  @@schema("realtime")
++}
++
++// Append-only лог событий комнаты (REQ-RT-001, ADR-005). Составной PK = unique(roomId, seq).
++// seq назначает сервер в критической секции (advisory lock, REQ-RT-007).
++// recordedAt — storage-only колонка (отладка/ретеншн); в контракт (logEventSchema) не
++// входит и наружу не проецируется (design §2). onDelete: Restrict у actorId указан явно:
++// дефолт Prisma для optional-релейшна — SetNull, а норма — Restrict (REQ-CORE-003).
++model LogEvent {
++  roomId        String          @db.Uuid
++  seq           Int
++  type          String
++  payload       Json
++  actorId       String?         @db.Uuid
++  visibility    EventVisibility
++  schemaVersion Int
++  recordedAt    DateTime        @default(now())
++  room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  actor         Identity?       @relation(fields: [actorId], references: [id], onDelete: Restrict)
++
++  @@id([roomId, seq])
++  @@schema("realtime")
++}
+diff --git a/packages/core/src/realtime/log-event-schema.int-spec.ts b/packages/core/src/realtime/log-event-schema.int-spec.ts
+new file mode 100644
+index 0000000..70dc636
+--- /dev/null
++++ b/packages/core/src/realtime/log-event-schema.int-spec.ts
+@@ -0,0 +1,64 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++// REQ-RT-001: таблица append-only лога существует в мигрированной БД с контрактной
++// формой — составной PK (roomId, seq) [= unique(roomId, seq)], Restrict FK на
++// core-таблицы без каскадов (REQ-CORE-003), контрактные строки visibility.
++describe('Realtime LogEvent table (migration presence)', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('exists in schema realtime', async () => {
++    const rows = await db.prisma.$queryRaw<{ tablename: string }[]>`
++      SELECT tablename FROM pg_tables
++      WHERE schemaname = 'realtime' AND tablename = 'LogEvent'
++    `;
++    expect(rows).toHaveLength(1);
++  });
++
++  it('has composite PK (roomId, seq) — unique(roomId, seq) of REQ-RT-001', async () => {
++    const rows = await db.prisma.$queryRaw<{ constraintdef: string }[]>`
++      SELECT pg_get_constraintdef(oid) AS constraintdef
++      FROM pg_constraint
++      WHERE conrelid = 'realtime."LogEvent"'::regclass AND contype = 'p'
++    `;
++    expect(rows).toHaveLength(1);
++    // pg_get_constraintdef канонизирует идентификаторы: "roomId" квотится
++    // (mixed-case), seq — нет (валидный lowercase-идентификатор).
++    expect(rows[0].constraintdef).toBe('PRIMARY KEY ("roomId", seq)');
++  });
++
++  it('has exactly two Restrict FKs to the core tables (REQ-CORE-003, no cascades)', async () => {
++    const rows = await db.prisma.$queryRaw<{ conname: string; constraintdef: string }[]>`
++      SELECT conname, pg_get_constraintdef(oid) AS constraintdef
++      FROM pg_constraint
++      WHERE conrelid = 'realtime."LogEvent"'::regclass AND contype = 'f'
++      ORDER BY conname
++    `;
++    expect(rows.map((r) => r.conname)).toEqual([
++      'LogEvent_actorId_fkey',
++      'LogEvent_roomId_fkey',
++    ]);
++    for (const row of rows) {
++      expect(row.constraintdef).toContain('ON DELETE RESTRICT');
++    }
++  });
++
++  it('stores contract-string visibility values (module-private with a hyphen)', async () => {
++    const rows = await db.prisma.$queryRaw<{ enumlabel: string }[]>`
++      SELECT e.enumlabel
++      FROM pg_type t
++      JOIN pg_enum e ON e.enumtypid = t.oid
++      JOIN pg_namespace n ON n.oid = t.typnamespace
++      WHERE n.nspname = 'realtime' AND t.typname = 'EventVisibility'
++      ORDER BY e.enumsortorder
++    `;
++    expect(rows.map((r) => r.enumlabel)).toEqual(['public', 'organizer', 'module-private']);
++  });
++});

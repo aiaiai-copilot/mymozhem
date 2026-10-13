@@ -1,0 +1,310 @@
+# Review package: 5743300ef07665910f3baf47e605a3861fe15391..HEAD
+
+## Commits
+9565e97 fix(sdk,core): каскад эпохи контракта 2.0.0 — contractRange-фикстуры '^1.0.0' → '^2.0.0', флип исключающего диапазона в app-registry.spec, stale-комментарий OAuth-среза
+
+## Files changed
+ apps/server/test/realtime.e2e-spec.ts                       | 2 +-
+ packages/core/src/app-registry/app-registry.service.spec.ts | 2 +-
+ packages/core/src/app-registry/app-registry.spec.ts         | 2 +-
+ packages/core/src/app-runtime/app-runtime.int-spec.ts       | 2 +-
+ packages/core/src/realtime/db-down.int-spec.ts              | 2 +-
+ packages/core/src/realtime/event-commit.int-spec.ts         | 2 +-
+ packages/core/src/realtime/event-outbox.int-spec.ts         | 2 +-
+ packages/core/src/realtime/projection.service.spec.ts       | 2 +-
+ packages/sdk/src/errors/error-codes.ts                      | 2 +-
+ packages/sdk/src/manifest/manifest.fixtures.ts              | 6 ++++--
+ 10 files changed, 13 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index cdd7e48..1fa6a80 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -35,21 +35,21 @@ jest.setTimeout(180_000);
+ // RFC 9562-валидный v4 UUID: z.uuid() (zod v4) отклоняет версию 0, поэтому
+ // «нулевой» литерал из brief заменён — иначе проекция core.room.activated
+ // (actorId = ORG) падает на parse и subscribe отвечает INTERNAL_ERROR.
+ const ORG = '00000000-0000-4000-8000-000000000001';
+ 
+ // Манифест с типами всех трёх уровней (design §7): answer — public, round — organizer,
+ // secret — module-private.
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: {
+       label: { type: 'string', 'x-visibility': 'public' },
+       orgNote: { type: 'string', 'x-visibility': 'organizer' },
+       answers: { type: 'object' }, // без аннотации → module-private (fail-safe)
+     },
+   },
+   events: {
+diff --git a/packages/core/src/app-registry/app-registry.service.spec.ts b/packages/core/src/app-registry/app-registry.service.spec.ts
+index 10d6cf8..d23c1b8 100644
+--- a/packages/core/src/app-registry/app-registry.service.spec.ts
++++ b/packages/core/src/app-registry/app-registry.service.spec.ts
+@@ -70,21 +70,21 @@ describe('AppRegistryService.validateSettings (REQ-CORE-007)', () => {
+     } finally {
+       spy.mockRestore();
+     }
+   });
+ 
+   // Зарегистрированный артефакт в форме io:'input' (решение владельца C-9.1,
+   // REQ-RWD-014): defaulted ключ не входит в required, default задокументирован.
+   const fixtureManifestWithDefaultedSettings: AppManifest = {
+     appId: 'fixture-defaults',
+     manifestVersion: 1,
+-    contractRange: '^1.0.0',
++    contractRange: '^2.0.0',
+     appSettings: {
+       $schema: 'https://json-schema.org/draft/2020-12/schema',
+       type: 'object',
+       properties: {
+         mode: { type: 'string', default: 'relaxed', 'x-visibility': 'public' },
+       },
+       additionalProperties: false,
+     },
+     events: {},
+   };
+diff --git a/packages/core/src/app-registry/app-registry.spec.ts b/packages/core/src/app-registry/app-registry.spec.ts
+index de5e34a..26702fd 100644
+--- a/packages/core/src/app-registry/app-registry.spec.ts
++++ b/packages/core/src/app-registry/app-registry.spec.ts
+@@ -29,21 +29,21 @@ describe('registerManifest', () => {
+       expect(catchCode(() => registerManifest(value))).toBe('MANIFEST_INVALID');
+     },
+   );
+ 
+   it('rejects an unbounded-above contract range as MANIFEST_INVALID', () => {
+     const manifest = { ...validManifests[0], contractRange: '>=1.0.0' };
+     expect(catchCode(() => registerManifest(manifest))).toBe('MANIFEST_INVALID');
+   });
+ 
+   it('rejects a range excluding the running version as CONTRACT_VERSION_INCOMPATIBLE', () => {
+-    const manifest = { ...validManifests[0], contractRange: '^2.0.0' };
++    const manifest = { ...validManifests[0], contractRange: '^1.0.0' };
+     expect(catchCode(() => registerManifest(manifest))).toBe('CONTRACT_VERSION_INCOMPATIBLE');
+   });
+ 
+   it('accepts a bounded range that includes the running version', () => {
+     const manifest = { ...validManifests[0], contractRange: `^${CONTRACT_VERSION}` };
+     expect(registerManifest(manifest).contractRange).toBe(`^${CONTRACT_VERSION}`);
+   });
+ });
+ 
+ describe('buildAppRegistry', () => {
+diff --git a/packages/core/src/app-runtime/app-runtime.int-spec.ts b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+index 0bfc7bd..27980ce 100644
+--- a/packages/core/src/app-runtime/app-runtime.int-spec.ts
++++ b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+@@ -31,21 +31,21 @@ const SPEC = '00000000-0000-0000-0000-0000000000d4';
+ // 20 акторов для теста плотности (двойной ответ одного актора отклоняется модулем —
+ // каждому dispatch нужен свой актор).
+ const racerId = (i: number) => `00000000-0000-0000-0000-00000000ac${i.toString(16).padStart(2, '0')}`;
+ 
+ // Фикстурный манифест (design §7): note.posted и secret.recorded — клиентские
+ // команды (clientInitiated: true); note.echoed — производный тип (public,
+ // clientInitiated: false), клиенту закрыт гейтом диспетчера.
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: { label: { type: 'string' } },
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' }, blob: { type: 'string' } },
+diff --git a/packages/core/src/realtime/db-down.int-spec.ts b/packages/core/src/realtime/db-down.int-spec.ts
+index 14613e6..c861408 100644
+--- a/packages/core/src/realtime/db-down.int-spec.ts
++++ b/packages/core/src/realtime/db-down.int-spec.ts
+@@ -15,21 +15,21 @@ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
+ import { MetricsService } from '../observability/metrics.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-0000000000a1';
+ 
+ // Тот же фикстурный манифест, что в event-commit.int-spec (design §7).
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: { label: { type: 'string' } },
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' } },
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+index f517d59..f976f79 100644
+--- a/packages/core/src/realtime/event-commit.int-spec.ts
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -25,21 +25,21 @@ import {
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-0000000000a1';
+ const P2 = '00000000-0000-0000-0000-0000000000b2';
+ 
+ // Фикстурный манифест (design §7): открытая схема note.posted — нужна для
+ // payload-нейтральности (Task 7); secret.recorded — потолок module-private.
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: { label: { type: 'string' } },
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' }, blob: { type: 'string' } },
+diff --git a/packages/core/src/realtime/event-outbox.int-spec.ts b/packages/core/src/realtime/event-outbox.int-spec.ts
+index 7436b2f..5866e15 100644
+--- a/packages/core/src/realtime/event-outbox.int-spec.ts
++++ b/packages/core/src/realtime/event-outbox.int-spec.ts
+@@ -19,21 +19,21 @@ import {
+   EventOutboxMissingContextError,
+   EventOutboxNestedRunError,
+ } from './event-outbox';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-0000000000a1';
+ 
+ const TEST_APP: AppManifest = {
+   appId: 'test-app',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: { label: { type: 'string' } },
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' } },
+diff --git a/packages/core/src/realtime/projection.service.spec.ts b/packages/core/src/realtime/projection.service.spec.ts
+index 3d2f016..0a4c43a 100644
+--- a/packages/core/src/realtime/projection.service.spec.ts
++++ b/packages/core/src/realtime/projection.service.spec.ts
+@@ -13,21 +13,21 @@ const events = [
+   { ...ROW, seq: 1, type: 'core.room.activated', payload: { appId: 'quiz', manifestVersion: 1 }, actorId: null, visibility: 'PUBLIC' },
+   { ...ROW, seq: 2, type: 'quiz.round.opened', payload: { round: 1 }, actorId: null, visibility: 'ORGANIZER' },
+   { ...ROW, seq: 3, type: 'quiz.answer.recorded', payload: { ok: true }, actorId: '22222222-2222-4222-8222-222222222222', visibility: 'MODULE_PRIVATE' },
+ ] as unknown as LogEvent[];
+ 
+ // Манифест с аннотациями x-visibility (REQ-CORE-008): rounds — public,
+ // seed — organizer, answers — без аннотации (fail-safe module-private).
+ const MANIFEST: AppManifest = {
+   appId: 'quiz',
+   manifestVersion: 1,
+-  contractRange: '^1.0.0',
++  contractRange: '^2.0.0',
+   appSettings: {
+     $schema: 'https://json-schema.org/draft/2020-12/schema',
+     type: 'object',
+     properties: {
+       rounds: { type: 'number', 'x-visibility': 'public' },
+       seed: { type: 'string', 'x-visibility': 'organizer' },
+       answers: { type: 'object' },
+     },
+   },
+   events: {},
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index e2b3fe1..65be563 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -6,21 +6,21 @@ export const CONTRACT_ERROR_CODES = [
+   'MANIFEST_INVALID',
+   'CONTRACT_VERSION_INCOMPATIBLE',
+   'SCHEMA_NOT_REPRESENTABLE',
+   'EVENT_UNKNOWN_TYPE',
+   'EVENT_PAYLOAD_INVALID',
+   'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+   'EVENT_PAYLOAD_TOO_LARGE',
+   'EVENT_RATE_LIMITED',
+   'ROOM_LOG_SEALED',
+   'ROOM_SETTINGS_FROZEN',
+-  // OAuth-срез (REQ-ID-015): POST /rooms от REGISTERED-комнат без регистрации.
++  // Организатор комнаты — только REGISTERED (REQ-ID-005; ADR-012: контур больше не OAuth).
+   'ROOM_ORGANIZER_NOT_REGISTERED',
+   'ACTOR_NOT_MEMBER',
+   // ADR-012 (срез zero-PII): bootstrap организатора и призовой режим.
+   'ORGANIZER_SETUP_INVALID',
+   'PRIZES_DISABLED',
+   // Membership exclusion (срез исключения, REQ-ID-006): отказы endpoint'а exclude.
+   'ACTOR_NOT_ORGANIZER',
+   'TARGET_NOT_MEMBER',
+   'TARGET_NOT_EXCLUDABLE',
+   // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
+diff --git a/packages/sdk/src/manifest/manifest.fixtures.ts b/packages/sdk/src/manifest/manifest.fixtures.ts
+index 7a3d7e8..6e646a6 100644
+--- a/packages/sdk/src/manifest/manifest.fixtures.ts
++++ b/packages/sdk/src/manifest/manifest.fixtures.ts
+@@ -1,17 +1,19 @@
+ import type { AppManifest } from './manifest.schema';
++import { CONTRACT_VERSION } from '../contract-version';
+ 
+ export const validManifests: AppManifest[] = [
+   {
+     appId: 'quiz',
+     manifestVersion: 1,
+-    contractRange: '^1.0.0',
++    // Эпоха контракта выводится из CONTRACT_VERSION, чтобы бамп мажора не краснил фикстуры.
++    contractRange: `^${CONTRACT_VERSION}`,
+     appSettings: {
+       $schema: 'https://json-schema.org/draft/2020-12/schema',
+       type: 'object',
+       properties: {
+         title: { type: 'string', 'x-visibility': 'public' },
+         correctAnswers: { type: 'array', items: { type: 'number' } },
+       },
+       required: ['title', 'correctAnswers'],
+       additionalProperties: false,
+     },
+@@ -32,21 +34,21 @@ export const validManifests: AppManifest[] = [
+         visibility: 'public',
+         clientInitiated: false,
+       },
+     },
+   },
+   // Capability фазы 3 (design 2026-09-10): манифест с делегированием rewards
+   // (REQ-RWD-001/005) — валиден.
+   {
+     appId: 'lottery',
+     manifestVersion: 1,
+-    contractRange: '^1.0.0',
++    contractRange: `^${CONTRACT_VERSION}`,
+     capabilities: ['rewards'],
+     appSettings: {
+       $schema: 'https://json-schema.org/draft/2020-12/schema',
+       type: 'object',
+       properties: {
+         fundLimit: { type: 'number', 'x-visibility': 'public' },
+       },
+       required: ['fundLimit'],
+       additionalProperties: false,
+     },

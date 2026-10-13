@@ -1,0 +1,157 @@
+# Review package: 0fddb16..HEAD
+
+## Commits
+420517a feat(core): ajv-formats на commit-гейте — enforcement format: uuid
+
+## Files changed
+ packages/core/package.json                          |  1 +
+ .../src/app-registry/app-registry.service.spec.ts   | 21 +++++++++++++++++++++
+ .../core/src/app-registry/app-registry.service.ts   |  8 +++++++-
+ pnpm-lock.yaml                                      |  3 +++
+ 4 files changed, 32 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index eed129b..ede96f1 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -14,20 +14,21 @@
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-socket.io": "^11.1.28",
+     "@nestjs/websockets": "^11.1.28",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "ajv": "^8.20.0",
++    "ajv-formats": "^3.0.1",
+     "jsonwebtoken": "^9.0.3",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "socket.io": "^4.8.3",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+diff --git a/packages/core/src/app-registry/app-registry.service.spec.ts b/packages/core/src/app-registry/app-registry.service.spec.ts
+index 2f2170f..778fc6e 100644
+--- a/packages/core/src/app-registry/app-registry.service.spec.ts
++++ b/packages/core/src/app-registry/app-registry.service.spec.ts
+@@ -97,20 +97,41 @@ describe('event-commit read-path (REQ-CTR-008/009)', () => {
+   it('describeEventErrors renders ajv errors after a failed validation', () => {
+     const svc = new AppRegistryService([validManifests[0]]);
+     const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
+     if (!def) throw new Error('fixture must define answer.submitted');
+     const v = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
+     expect(v({})).toBe(false);
+     expect(svc.describeEventErrors(v)).toMatch(/roundId|required/);
+   });
+ });
+ 
++// Фаза 3, Task 1 (решение владельца 2026-09-10): ajv-formats на commit-гейте.
++// zod v4 эмитит format: "uuid" для z.uuid(); stock Ajv 8 без ajv-formats его
++// игнорировал (warning "unknown format") — невалидный uuid проходил гейт.
++describe('eventValidatorFor — string formats', () => {
++  const service = new AppRegistryService([]);
++  const validate = service.eventValidatorFor('testapp', 1, 'draw.run', {
++    type: 'object',
++    properties: { drawId: { type: 'string', format: 'uuid' } },
++    required: ['drawId'],
++    additionalProperties: false,
++  });
++
++  it('rejects a non-uuid drawId', () => {
++    expect(validate({ drawId: 'not-a-uuid' })).toBe(false);
++  });
++
++  it('accepts an RFC 9562 uuid', () => {
++    expect(validate({ drawId: '3f6b2b6e-9c5a-4f1e-8b2d-7a9c1e0f2a3b' })).toBe(true);
++  });
++});
++
+ describe('AppRegistryModule', () => {
+   it('provides AppRegistryService with an empty registry when composition root registers none', async () => {
+     const moduleRef = await Test.createTestingModule({
+       imports: [AppRegistryModule.register([])],
+     }).compile();
+     const svc = moduleRef.get(AppRegistryService);
+     const { appId, manifestVersion } = validManifests[0];
+     expect(svc.getManifest(appId, manifestVersion)).toBeUndefined();
+   });
+ });
+diff --git a/packages/core/src/app-registry/app-registry.service.ts b/packages/core/src/app-registry/app-registry.service.ts
+index 8a3635e..2a61014 100644
+--- a/packages/core/src/app-registry/app-registry.service.ts
++++ b/packages/core/src/app-registry/app-registry.service.ts
+@@ -1,32 +1,38 @@
+ import { Inject, Injectable } from '@nestjs/common';
+ import Ajv2020 from 'ajv/dist/2020';
++import addFormats from 'ajv-formats';
+ import type { ValidateFunction } from 'ajv';
+ import type { AppManifest, JsonSchemaObject } from '@mymozhem/sdk';
+ import { buildAppRegistry, type AppRegistry } from './app-registry';
+ import { APP_MANIFESTS } from './app-registry.tokens';
+ import { AppManifestUnknownError, AppSettingsInvalidError } from './app-registry.errors';
+ 
+ @Injectable()
+ export class AppRegistryService {
+   private readonly registry: AppRegistry;
+   // REQ-CORE-007: скомпилированные валидаторы кэшируются по (appId, manifestVersion).
+   // Лениво — компиляция при первом обращении; далее запись неизменяема (дух
+   // REQ-CORE-004, как сам boot-time реестр). Eager-прогрев всех манифестов на буте
+   // отклонён: платили бы за неиспользуемое (design §3).
+   private readonly validators = new Map<string, ValidateFunction>();
+   // Ajv2020: манифестные схемы несут $schema draft 2020-12 — дефолтный Ajv (draft-07)
+   // на них падает. strict: false — схемы несут аннотацию x-visibility (ADR-008),
+   // неизвестный ajv keyword, который strict-режим отклонил бы.
+-  private readonly ajv = new Ajv2020({ allErrors: true, strict: false });
++  private readonly ajv: Ajv2020;
+ 
+   constructor(@Inject(APP_MANIFESTS) manifests: readonly unknown[]) {
++    // ajv-formats (фаза 3, Task 1): zod v4 эмитит format: "uuid" для z.uuid();
++    // без подключённых форматов Ajv 8 их игнорирует — uuid-поля клиентских команд
++    // (drawId/prizeId лотереи) не принуждались бы на commit-гейте.
++    this.ajv = new Ajv2020({ allErrors: true, strict: false });
++    addFormats(this.ajv);
+     // Built once at construction (boot); immutable thereafter (REQ-CORE-004). A bad
+     // manifest throws here and fails startup — fail-closed.
+     this.registry = buildAppRegistry(manifests);
+   }
+ 
+   getManifest(appId: string, manifestVersion: number): AppManifest | undefined {
+     return this.registry.getManifest(appId, manifestVersion);
+   }
+ 
+   // REQ-CORE-007: валидация настроек по JSON Schema манифеста — при каждой записи
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 9a0308d..2775c79 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -144,20 +144,23 @@ importers:
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(@nestjs/platform-socket.io@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@prisma/adapter-pg':
+         specifier: ^7.6.0
+         version: 7.8.0
+       '@prisma/client':
+         specifier: ^7.6.0
+         version: 7.8.0(prisma@7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3))(typescript@5.9.3)
+       ajv:
+         specifier: ^8.20.0
+         version: 8.20.0
++      ajv-formats:
++        specifier: ^3.0.1
++        version: 3.0.1(ajv@8.20.0)
+       jsonwebtoken:
+         specifier: ^9.0.3
+         version: 9.0.3
+       pg:
+         specifier: ^8.13.0
+         version: 8.22.0
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:

@@ -1,0 +1,442 @@
+# Review package: a0002fa..HEAD
+
+## Commits
+5cf1df7 feat(app-quiz): пакет квиза — манифест, appSettings (correctAnswers module-private), схемы 7 типов событий
+
+## Files changed
+ packages/app-quiz/jest.config.js                   |   6 +
+ packages/app-quiz/package.json                     |  25 +++
+ packages/app-quiz/src/index.ts                     |   3 +
+ packages/app-quiz/src/quiz-events.ts               |  27 +++
+ .../app-quiz/src/quiz-manifest.contract.spec.ts    | 189 +++++++++++++++++++++
+ packages/app-quiz/src/quiz-manifest.ts             |  30 ++++
+ packages/app-quiz/src/quiz-settings.ts             |  16 ++
+ packages/app-quiz/tsconfig.json                    |   5 +
+ pnpm-lock.yaml                                     |  29 ++++
+ 9 files changed, 330 insertions(+)
+
+## Diff
+diff --git a/packages/app-quiz/jest.config.js b/packages/app-quiz/jest.config.js
+new file mode 100644
+index 0000000..c860267
+--- /dev/null
++++ b/packages/app-quiz/jest.config.js
+@@ -0,0 +1,6 @@
++module.exports = {
++  preset: 'ts-jest',
++  testEnvironment: 'node',
++  roots: ['<rootDir>/src'],
++  testMatch: ['**/*.spec.ts'],
++};
+diff --git a/packages/app-quiz/package.json b/packages/app-quiz/package.json
+new file mode 100644
+index 0000000..c1a5fc6
+--- /dev/null
++++ b/packages/app-quiz/package.json
+@@ -0,0 +1,25 @@
++{
++  "name": "@mymozhem/app-quiz",
++  "version": "0.0.0",
++  "private": true,
++  "main": "dist/index.js",
++  "types": "dist/index.d.ts",
++  "scripts": {
++    "build": "tsc -p tsconfig.json",
++    "typecheck": "tsc -p tsconfig.json --noEmit",
++    "lint": "eslint src",
++    "test": "jest"
++  },
++  "dependencies": {
++    "@mymozhem/sdk": "workspace:*",
++    "zod": "^4.0.0"
++  },
++  "devDependencies": {
++    "@types/jest": "^29.5.14",
++    "@types/node": "^24.0.0",
++    "ajv": "^8.20.0",
++    "jest": "^29.7.0",
++    "ts-jest": "^29.2.5",
++    "typescript": "^5.7.0"
++  }
++}
+diff --git a/packages/app-quiz/src/index.ts b/packages/app-quiz/src/index.ts
+new file mode 100644
+index 0000000..b975a76
+--- /dev/null
++++ b/packages/app-quiz/src/index.ts
+@@ -0,0 +1,3 @@
++export * from './quiz-settings';
++export * from './quiz-events';
++export * from './quiz-manifest';
+diff --git a/packages/app-quiz/src/quiz-events.ts b/packages/app-quiz/src/quiz-events.ts
+new file mode 100644
+index 0000000..be307e4
+--- /dev/null
++++ b/packages/app-quiz/src/quiz-events.ts
+@@ -0,0 +1,27 @@
++import { z } from 'zod';
++
++// Payload-схемы (источник типов для handler'ов и манифеста).
++export const questionOpenedPayload = z.strictObject({ questionIndex: z.number().int().min(0) });
++export const answerSubmittedPayload = z.strictObject({
++  questionIndex: z.number().int().min(0),
++  optionIndex: z.number().int().min(0),
++});
++export const questionClosedPayload = z.strictObject({ questionIndex: z.number().int().min(0) });
++export const finishGamePayload = z.strictObject({});
++export const answerAcceptedPayload = z.strictObject({
++  questionIndex: z.number().int().min(0),
++  actorId: z.uuid(),
++});
++export const scoreEntryPayload = z.strictObject({ actorId: z.uuid(), total: z.number().int() });
++export const questionRevealedPayload = z.strictObject({
++  questionIndex: z.number().int().min(0),
++  // Опционально: отсутствует, когда у вопроса не сконфигурирован правильный ответ
++  // (correctAnswers[questionIndex] === undefined) — «нет правильного» не выражается
++  // sentinel-значением, поле просто опущено.
++  correctIndex: z.number().int().min(0).optional(),
++  awarded: z.array(z.strictObject({ actorId: z.uuid(), points: z.number().int().min(0) })),
++  totals: z.array(scoreEntryPayload),
++});
++export const gameFinishedPayload = z.strictObject({
++  standings: z.array(scoreEntryPayload.extend({ place: z.number().int().min(1) })),
++});
+diff --git a/packages/app-quiz/src/quiz-manifest.contract.spec.ts b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+new file mode 100644
+index 0000000..a18bd7a
+--- /dev/null
++++ b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+@@ -0,0 +1,189 @@
++import Ajv2020 from 'ajv/dist/2020';
++import {
++  appManifestSchema,
++  readPropertyVisibility,
++  type Visibility,
++} from '@mymozhem/sdk';
++import { buildQuizManifest, QUIZ_APP_ID, QUIZ_MANIFEST_VERSION } from './quiz-manifest';
++
++// REQ-CTR-005: the quiz manifest is validated against the contract it will live
++// under — appManifestSchema for the form, Ajv over the REGISTERED JSON Schemas for
++// what the core will actually enforce (REQ-CORE-007). The zod sources are the
++// authoring surface; the registered snapshots are the artifact.
++const manifest = buildQuizManifest();
++
++const ajv = new Ajv2020({ allErrors: true, strict: false });
++
++const ACTOR = '0f8fad5b-d9cb-469f-a165-70867728950e';
++const ACTOR_2 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
++
++const EXPECTED_EVENTS: ReadonlyArray<readonly [string, Visibility, boolean]> = [
++  ['question.opened', 'public', true],
++  ['answer.submitted', 'module-private', true],
++  ['question.closed', 'public', true],
++  ['game.finish', 'public', true],
++  ['answer.accepted', 'public', false],
++  ['question.revealed', 'public', false],
++  ['game.finished', 'public', false],
++];
++
++describe('quiz manifest', () => {
++  it('satisfies the manifest contract (appManifestSchema)', () => {
++    expect(appManifestSchema.safeParse(manifest).success).toBe(true);
++  });
++
++  it('carries the quiz identity', () => {
++    expect(manifest.appId).toBe(QUIZ_APP_ID);
++    expect(manifest.manifestVersion).toBe(QUIZ_MANIFEST_VERSION);
++  });
++
++  it('registers exactly the 7 quiz event types', () => {
++    expect(Object.keys(manifest.events).sort()).toEqual(
++      EXPECTED_EVENTS.map(([name]) => name).sort(),
++    );
++  });
++
++  it.each(EXPECTED_EVENTS)(
++    'event %s declares visibility=%s and clientInitiated=%s',
++    (name, visibility, clientInitiated) => {
++      const event = manifest.events[name];
++      expect(event?.visibility).toBe(visibility);
++      expect(event?.clientInitiated).toBe(clientInitiated);
++    },
++  );
++});
++
++describe('registered appSettings JSON Schema', () => {
++  const validate = ajv.compile(manifest.appSettings);
++
++  const validSettings = {
++    questions: [
++      { text: 'Столица Франции?', options: ['Париж', 'Лион'] },
++      { text: '2+2?', options: ['3', '4', '5'] },
++    ],
++    correctAnswers: [0, 1],
++    minAnswerIntervalMs: 1000,
++    scoring: { base: 100, step: 10 },
++  };
++
++  it('accepts a valid settings snapshot', () => {
++    expect(validate(validSettings)).toBe(true);
++  });
++
++  it('accepts correctAnswers shorter than questions (a question without a configured correct answer)', () => {
++    expect(validate({ ...validSettings, correctAnswers: [0] })).toBe(true);
++  });
++
++  const invalidSettings: ReadonlyArray<readonly [string, unknown]> = [
++    ['empty questions', { ...validSettings, questions: [] }],
++    ['minAnswerIntervalMs below zero', { ...validSettings, minAnswerIntervalMs: -1 }],
++    ['an unknown extra key', { ...validSettings, bogus: 1 }],
++    [
++      'a question with a single option',
++      { ...validSettings, questions: [{ text: 'Q?', options: ['only'] }] },
++    ],
++    ['a question with an empty text', { ...validSettings, questions: [{ text: '', options: ['a', 'b'] }] }],
++  ];
++
++  it.each(invalidSettings)('rejects %s', (_description, settings) => {
++    expect(validate(settings)).toBe(false);
++  });
++});
++
++describe('registered event JSON Schemas', () => {
++  const validatorFor = (name: string) => {
++    const entry = manifest.events[name];
++    if (!entry) {
++      throw new Error(`no such event in the quiz manifest: ${name}`);
++    }
++    return ajv.compile(entry.schema);
++  };
++
++  const PAYLOAD_CASES: ReadonlyArray<readonly [string, string, unknown, boolean]> = [
++    ['question.opened accepts a valid payload', 'question.opened', { questionIndex: 0 }, true],
++    ['question.opened rejects a string questionIndex', 'question.opened', { questionIndex: '0' }, false],
++    ['question.opened rejects an extra key', 'question.opened', { questionIndex: 0, extra: 1 }, false],
++    ['answer.submitted accepts a valid payload', 'answer.submitted', { questionIndex: 0, optionIndex: 1 }, true],
++    ['answer.submitted rejects a missing optionIndex', 'answer.submitted', { questionIndex: 0 }, false],
++    ['answer.submitted rejects a string questionIndex', 'answer.submitted', { questionIndex: '0', optionIndex: 1 }, false],
++    ['question.closed accepts a valid payload', 'question.closed', { questionIndex: 2 }, true],
++    ['question.closed rejects a missing questionIndex', 'question.closed', {}, false],
++    ['game.finish accepts an empty payload', 'game.finish', {}, true],
++    ['game.finish rejects an extra key', 'game.finish', { force: true }, false],
++    ['answer.accepted accepts a valid payload', 'answer.accepted', { questionIndex: 0, actorId: ACTOR }, true],
++    ['answer.accepted rejects a non-string actorId', 'answer.accepted', { questionIndex: 0, actorId: 42 }, false],
++    ['answer.accepted rejects a missing questionIndex', 'answer.accepted', { actorId: ACTOR }, false],
++    [
++      'question.revealed accepts a payload with correctIndex',
++      'question.revealed',
++      {
++        questionIndex: 0,
++        correctIndex: 1,
++        awarded: [{ actorId: ACTOR, points: 110 }],
++        totals: [{ actorId: ACTOR, total: 110 }],
++      },
++      true,
++    ],
++    [
++      'question.revealed accepts a payload without correctIndex (no correct answer configured)',
++      'question.revealed',
++      { questionIndex: 1, awarded: [], totals: [] },
++      true,
++    ],
++    [
++      'question.revealed rejects negative points',
++      'question.revealed',
++      { questionIndex: 0, awarded: [{ actorId: ACTOR, points: -5 }], totals: [] },
++      false,
++    ],
++    [
++      'question.revealed rejects missing totals',
++      'question.revealed',
++      { questionIndex: 0, awarded: [] },
++      false,
++    ],
++    [
++      'game.finished accepts a valid standings payload',
++      'game.finished',
++      {
++        standings: [
++          { actorId: ACTOR, total: 320, place: 1 },
++          { actorId: ACTOR_2, total: 210, place: 2 },
++        ],
++      },
++      true,
++    ],
++    [
++      'game.finished rejects place 0',
++      'game.finished',
++      { standings: [{ actorId: ACTOR, total: 0, place: 0 }] },
++      false,
++    ],
++    [
++      'game.finished rejects an entry missing place',
++      'game.finished',
++      { standings: [{ actorId: ACTOR, total: 10 }] },
++      false,
++    ],
++  ];
++
++  it.each(PAYLOAD_CASES)('%s', (_description, eventName, payload, expectedValid) => {
++    expect(validatorFor(eventName)(payload)).toBe(expectedValid);
++  });
++});
++
++describe('appSettings visibility annotations', () => {
++  // REQ-CORE-008: outcome-deciding data must never leave the module. correctAnswers
++  // is deliberately left UNANNOTATED in the schema, so the fail-safe default
++  // (module-private) is what the core projects by — this test pins that.
++  it('keeps correctAnswers module-private via the fail-safe default', () => {
++    expect(readPropertyVisibility(manifest.appSettings, 'correctAnswers')).toBe('module-private');
++  });
++
++  it.each([['questions'], ['minAnswerIntervalMs'], ['scoring']] as const)(
++    'exposes %s as public',
++    (property) => {
++      expect(readPropertyVisibility(manifest.appSettings, property)).toBe('public');
++    },
++  );
++});
+diff --git a/packages/app-quiz/src/quiz-manifest.ts b/packages/app-quiz/src/quiz-manifest.ts
+new file mode 100644
+index 0000000..10bc755
+--- /dev/null
++++ b/packages/app-quiz/src/quiz-manifest.ts
+@@ -0,0 +1,30 @@
++import { defineApp, type AppManifest } from '@mymozhem/sdk';
++import { quizSettingsSchema } from './quiz-settings';
++import {
++  answerAcceptedPayload,
++  answerSubmittedPayload,
++  finishGamePayload,
++  gameFinishedPayload,
++  questionClosedPayload,
++  questionOpenedPayload,
++  questionRevealedPayload,
++} from './quiz-events';
++
++export const QUIZ_APP_ID = 'quiz';
++export const QUIZ_MANIFEST_VERSION = 1;
++export function buildQuizManifest(): AppManifest {
++  return defineApp({
++    appId: QUIZ_APP_ID,
++    manifestVersion: QUIZ_MANIFEST_VERSION,
++    appSettings: quizSettingsSchema,
++    events: {
++      'question.opened': { schema: questionOpenedPayload, visibility: 'public', clientInitiated: true },
++      'answer.submitted': { schema: answerSubmittedPayload, visibility: 'module-private', clientInitiated: true },
++      'question.closed': { schema: questionClosedPayload, visibility: 'public', clientInitiated: true },
++      'game.finish': { schema: finishGamePayload, visibility: 'public', clientInitiated: true },
++      'answer.accepted': { schema: answerAcceptedPayload, visibility: 'public', clientInitiated: false },
++      'question.revealed': { schema: questionRevealedPayload, visibility: 'public', clientInitiated: false },
++      'game.finished': { schema: gameFinishedPayload, visibility: 'public', clientInitiated: false },
++    },
++  });
++}
+diff --git a/packages/app-quiz/src/quiz-settings.ts b/packages/app-quiz/src/quiz-settings.ts
+new file mode 100644
+index 0000000..c92fc84
+--- /dev/null
++++ b/packages/app-quiz/src/quiz-settings.ts
+@@ -0,0 +1,16 @@
++import { z } from 'zod';
++
++// appSettings (design §3 с правкой плана: видимость top-level,
++// correctAnswers без аннотации → fail-safe module-private, REQ-CORE-008).
++export const quizSettingsSchema = z.strictObject({
++  questions: z
++    .array(z.strictObject({ text: z.string().min(1), options: z.array(z.string().min(1)).min(2) }))
++    .min(1)
++    .meta({ 'x-visibility': 'public' }),
++  correctAnswers: z.array(z.number().int().min(0)),
++  minAnswerIntervalMs: z.number().int().min(0).meta({ 'x-visibility': 'public' }),
++  scoring: z
++    .strictObject({ base: z.number().int().positive(), step: z.number().int().min(0) })
++    .meta({ 'x-visibility': 'public' }),
++});
++export type QuizSettings = z.infer<typeof quizSettingsSchema>;
+diff --git a/packages/app-quiz/tsconfig.json b/packages/app-quiz/tsconfig.json
+new file mode 100644
+index 0000000..6fcd57f
+--- /dev/null
++++ b/packages/app-quiz/tsconfig.json
+@@ -0,0 +1,5 @@
++{
++  "extends": "../../tsconfig.base.json",
++  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
++  "include": ["src"]
++}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index f6d3c69..b3fc3e1 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -87,20 +87,48 @@ importers:
+       testcontainers:
+         specifier: ^12.0.4
+         version: 12.0.4
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
++  packages/app-quiz:
++    dependencies:
++      '@mymozhem/sdk':
++        specifier: workspace:*
++        version: link:../sdk
++      zod:
++        specifier: ^4.0.0
++        version: 4.4.3
++    devDependencies:
++      '@types/jest':
++        specifier: ^29.5.14
++        version: 29.5.14
++      '@types/node':
++        specifier: ^24.0.0
++        version: 24.13.3
++      ajv:
++        specifier: ^8.20.0
++        version: 8.20.0
++      jest:
++        specifier: ^29.7.0
++        version: 29.7.0(@types/node@24.13.3)
++      ts-jest:
++        specifier: ^29.2.5
++        version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
++      typescript:
++        specifier: ^5.7.0
++        version: 5.9.3
++
+   packages/core:
+     dependencies:
+       '@mymozhem/sdk':
+         specifier: workspace:*
+         version: link:../sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+@@ -1589,20 +1617,21 @@ packages:
+     resolution: {integrity: sha512-Uhdk5sfqcee/9H/rCOJikYz67o0a2Tw2hGRPOG2Y1R2dg7brRe1uG0yaNQDHu+TO/uQPF/5eCapvYSmHUjt7JQ==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+ 
+   eslint-visitor-keys@5.0.1:
+     resolution: {integrity: sha512-tD40eHxA35h0PEIZNeIjkHoDR4YjjJp34biM0mDvplBe//mB+IHCqHDGV7pxF+7MklTvighcCPPZC7ynWyjdTA==}
+     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
+ 
+   eslint@9.39.5:
+     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
++    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
+     hasBin: true
+     peerDependencies:
+       jiti: '*'
+     peerDependenciesMeta:
+       jiti:
+         optional: true
+ 
+   espree@10.4.0:
+     resolution: {integrity: sha512-j6PAQ2uUr79PZhBjP5C5fhl8e39FmRnOjsD5lGnWrFU8i2G776tBK7+nP8KuQUTTyAZUwfQqXAgrVH5MbH9CYQ==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}

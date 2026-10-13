@@ -1,0 +1,634 @@
+# Review package: 910d2ed..8086a54
+
+## Commits
+8086a54 feat(core): enforce REGISTERED organizer via atomic guarded INSERT (REQ-ID-005)
+3595d54 feat(core): FK room.organizerId to identity.id + test seeding (REQ-ID-005)
+a74f057 feat(core): Identity model + partial unique index migration (REQ-ID-001, REQ-DEV-006)
+508e958 feat(sdk): identityKind + memberRole contract vocabulary (REQ-ID-001, REQ-ID-011)
+
+## Files changed
+ .../20260722151900_identity_seam/migration.sql     | 26 +++++++++
+ .../20260722153952_room_organizer_fk/migration.sql |  2 +
+ packages/core/prisma/schema.prisma                 | 34 +++++++++--
+ .../core/src/identity/identity-schema.int-spec.ts  | 65 ++++++++++++++++++++++
+ packages/core/src/room/room.errors.ts              | 10 ++++
+ packages/core/src/room/room.service.int-spec.ts    | 48 +++++++++++++++-
+ packages/core/src/room/room.service.ts             | 31 +++++++++--
+ packages/core/src/testing/harness.int-spec.ts      |  2 +
+ packages/core/src/testing/seed-identity.ts         | 24 ++++++++
+ .../src/identity/identity-kind.contract.spec.ts    | 16 ++++++
+ .../sdk/src/identity/identity-kind.fixtures.ts     |  6 ++
+ packages/sdk/src/identity/identity-kind.ts         |  8 +++
+ packages/sdk/src/index.ts                          |  4 ++
+ .../src/membership/member-role.contract.spec.ts    | 16 ++++++
+ .../sdk/src/membership/member-role.fixtures.ts     |  6 ++
+ packages/sdk/src/membership/member-role.ts         |  8 +++
+ 16 files changed, 297 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql b/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql
+new file mode 100644
+index 0000000..e6e18f8
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql
+@@ -0,0 +1,26 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "identity";
++
++-- CreateEnum
++CREATE TYPE "identity"."IdentityKind" AS ENUM ('REGISTERED', 'GUEST');
++
++-- CreateTable
++CREATE TABLE "identity"."Identity" (
++    "id" UUID NOT NULL,
++    "kind" "identity"."IdentityKind" NOT NULL,
++    "email" TEXT,
++    "deletedAt" TIMESTAMP(3),
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "Identity_pkey" PRIMARY KEY ("id")
++);
++
++-- REQ-ID-001 + REQ-DEV-006: registered-email uniqueness is a partial unique index,
++-- hand-written (Prisma preview partialIndexes forbidden). lower() because email is
++-- case-insensitive; deletedAt IS NULL frees the email after anonymization
++-- (REQ-ID-014). The predicate "REGISTERED and not anonymized" also lives in the
++-- guarded INSERT of RoomService.create (design §7) — change both or neither.
++CREATE UNIQUE INDEX "Identity_registered_email_key"
++  ON "identity"."Identity" (lower("email"))
++  WHERE "kind" = 'REGISTERED' AND "deletedAt" IS NULL;
+diff --git a/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql b/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql
+new file mode 100644
+index 0000000..b9e4913
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql
+@@ -0,0 +1,2 @@
++-- AddForeignKey
++ALTER TABLE "room"."Room" ADD CONSTRAINT "Room_organizerId_fkey" FOREIGN KEY ("organizerId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index d14053a..f61ee23 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,32 +1,58 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["room"]
++  schemas  = ["identity", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+ 
+ // Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
+-// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
+-// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
+-// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
++// in room-state-machine.ts (REQ-RT-005). organizerId is a declarative FK to
++// identity.id; the REGISTERED invariant (REQ-ID-005) is enforced by the guarded
++// INSERT in RoomService.create, not by the FK itself.
++// appSettings/pin/freeze (REQ-RT-004) deferred to a later plan.
+ model Room {
+   id          String     @id @default(uuid()) @db.Uuid
++  organizer   Identity   @relation(fields: [organizerId], references: [id])
+   organizerId String     @db.Uuid
+   status      RoomStatus @default(DRAFT)
+   deletedAt   DateTime?
+   createdAt   DateTime   @default(now())
+   updatedAt   DateTime   @updatedAt
+ 
+   @@schema("room")
+ }
++
++enum IdentityKind {
++  REGISTERED
++  GUEST
++
++  @@schema("identity")
++}
++
++// Identity — core CRUD entity (ADR-004: single table, kind REGISTERED | GUEST).
++// deletedAt marks anonymization (REQ-ID-014: PII zeroed, id kept — never physical
++// delete while FKs reference it). email is nullable; uniqueness among live
++// REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
++// NOT a Prisma preview feature.
++model Identity {
++  id        String       @id @default(uuid()) @db.Uuid
++  kind      IdentityKind
++  email     String?
++  deletedAt DateTime?
++  createdAt DateTime     @default(now())
++  updatedAt DateTime     @updatedAt
++  rooms     Room[]
++
++  @@schema("identity")
++}
+diff --git a/packages/core/src/identity/identity-schema.int-spec.ts b/packages/core/src/identity/identity-schema.int-spec.ts
+new file mode 100644
+index 0000000..845ccc9
+--- /dev/null
++++ b/packages/core/src/identity/identity-schema.int-spec.ts
+@@ -0,0 +1,65 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++// REQ-ID-001 + REQ-DEV-006: the registered-email partial unique index exists and
++// behaves exactly as specified — unique among live REGISTERED rows, case-insensitive,
++// ignoring GUEST rows and anonymized (deletedAt) rows.
++describe('Identity registered-email partial unique index', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity" CASCADE');
++  });
++
++  it('exists in the migrated database (REQ-DEV-006 автотест наличия)', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'identity' AND indexname = 'Identity_registered_email_key'
++    `;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/lower/i);
++    expect(rows[0].indexdef).toContain('REGISTERED');
++    expect(rows[0].indexdef).toMatch(/deletedAt" IS NULL/i);
++  });
++
++  it('rejects a second live REGISTERED row with the same email', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    await expect(
++      db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('is case-insensitive (lower() in the index)', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    await expect(
++      db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'A@B.C' } }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('allows the same email for two GUEST rows', async () => {
++    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
++    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++
++  it('allows re-registering an email whose previous REGISTERED row is anonymized', async () => {
++    await db.prisma.identity.create({
++      data: { kind: 'REGISTERED', email: 'a@b.c', deletedAt: new Date() },
++    });
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++
++  it('allows many rows with NULL email', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++});
+diff --git a/packages/core/src/room/room.errors.ts b/packages/core/src/room/room.errors.ts
+index 01ad41a..31654cb 100644
+--- a/packages/core/src/room/room.errors.ts
++++ b/packages/core/src/room/room.errors.ts
+@@ -1,17 +1,18 @@
+ // Core-internal typed domain errors for the Room lifecycle. NOT part of the SDK
+ // contract (these do not cross the app↔core boundary in this slice). When an HTTP
+ // surface for the organizer lands, these map to typed API responses without
+ // stack traces (REQ-SEC-006).
+ export const ROOM_ERROR_CODES = {
+   ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
+   ROOM_CONFLICT: 'ROOM_CONFLICT',
++  ROOM_ORGANIZER_NOT_REGISTERED: 'ROOM_ORGANIZER_NOT_REGISTERED',
+ } as const;
+ 
+ export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
+ 
+ export class RoomError extends Error {
+   constructor(
+     readonly code: RoomErrorCode,
+     message: string,
+   ) {
+     super(message);
+@@ -26,10 +27,19 @@ export class RoomTransitionError extends RoomError {
+   }
+ }
+ 
+ // Atomic conditional UPDATE affected zero rows: not-found, concurrent change,
+ // already terminal, or already deleted.
+ export class RoomConflictError extends RoomError {
+   constructor(message: string) {
+     super(ROOM_ERROR_CODES.ROOM_CONFLICT, message);
+   }
+ }
++
++// Organizer identity missing, GUEST, or anonymized — collapsed into one code on
++// purpose (design §3): to the caller it is a single refusal, and the predicate is
++// identity's invariant, not a place for reconnaissance.
++export class RoomOrganizerNotRegisteredError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_ORGANIZER_NOT_REGISTERED, message);
++  }
++}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 04dd1be..4f8a1ae 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,40 +1,60 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
+ import { RoomService } from './room.service';
+-import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
++import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+   it('create() yields a DRAFT room', async () => {
+     const room = await service.create(ORG);
+     expect(room.status).toBe('DRAFT');
+     expect(room.deletedAt).toBeNull();
+     expect(room.organizerId).toBe(ORG);
+   });
+ 
++  it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const err = await service.create(guest.id).catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomOrganizerNotRegisteredError);
++    expect((err as RoomOrganizerNotRegisteredError).code).toBe('ROOM_ORGANIZER_NOT_REGISTERED');
++  });
++
++  it('rejects a nonexistent organizer with the same collapsed code', async () => {
++    await expect(
++      service.create('00000000-0000-0000-0000-0000000000aa'),
++    ).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
++  });
++
++  it('rejects an anonymized (deletedAt) REGISTERED organizer', async () => {
++    const ghost = await seedIdentity(db.prisma, { kind: 'REGISTERED', deletedAt: new Date() });
++    await expect(service.create(ghost.id)).rejects.toBeInstanceOf(RoomOrganizerNotRegisteredError);
++  });
++
+   it('persists each legal transition', async () => {
+     const a = await service.create(ORG);
+     expect((await service.activate(a.id)).status).toBe('ACTIVE');
+     expect((await service.complete(a.id)).status).toBe('COMPLETED');
+ 
+     const b = await service.create(ORG);
+     expect((await service.cancel(b.id)).status).toBe('CANCELLED');
+ 
+     const c = await service.create(ORG);
+     await service.activate(c.id);
+@@ -84,20 +104,21 @@ describe('RoomService lifecycle', () => {
+     await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
+   });
+ });
+ 
+ describe('RoomService transition atomicity', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
+   // serialize instead of interleave, the second one reads ACTIVE, and
+   // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
+@@ -130,20 +151,21 @@ describe('RoomService transition atomicity', () => {
+     expect(finalStatus).toBe('CANCELLED');
+   });
+ });
+ 
+ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+@@ -170,10 +192,34 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
+   it('rejects an INSERT of a row that is both ACTIVE and soft-deleted, at the database level', async () => {
+     await expect(
+       db.prisma.$executeRawUnsafe(
+         `INSERT INTO room."Room" (id, "organizerId", status, "deletedAt", "updatedAt")
+          VALUES (gen_random_uuid(), $1, 'ACTIVE', now(), now())`,
+         ORG,
+       ),
+     ).rejects.toThrow(/Room_softdelete_not_active/);
+   });
+ });
++
++describe('Room organizerId FK', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  // Raw SQL around the service: the database itself must refuse an organizer that
++  // does not exist in identity."Identity" (declarative FK, REQ-ID-005).
++  it('rejects a room whose organizerId is not an identity, at the database level', async () => {
++    await expect(
++      db.prisma.$executeRawUnsafe(
++        `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
++         VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
++        '00000000-0000-0000-0000-0000000000ee',
++      ),
++    ).rejects.toThrow(/Room_organizerId_fkey/);
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index bee3212..acc8a1d 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,39 +1,62 @@
+ import { Injectable } from '@nestjs/common';
+ import type { Room, $Enums } from '@prisma/client';
+ import { PrismaService } from '../prisma/prisma.service';
+ import {
+   assertTransition,
+   assertDeletable,
+   DELETABLE_STATUSES,
+   type RoomStatus,
+ } from './room-state-machine';
+-import { RoomConflictError } from './room.errors';
++import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
+ 
+ // Compile-time parity assertion between the Prisma-generated enum and the domain union.
+ // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
+ // if a member is ever added to one side and not the other, this line fails to compile
+ // instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
+ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
+   ? [$Enums.RoomStatus] extends [RoomStatus]
+     ? true
+     : never
+   : never;
+ void (true satisfies RoomStatusParity);
+ 
+ @Injectable()
+ export class RoomService {
+   constructor(private readonly prisma: PrismaService) {}
+ 
+-  create(organizerId: string): Promise<Room> {
+-    // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
+-    return this.prisma.room.create({ data: { organizerId } });
++  async create(organizerId: string): Promise<Room> {
++    // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
++    // INSERT — the WHERE EXISTS predicate is the single source of truth, no
++    // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
++    // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
++    // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
++    // The same predicate lives in the "Identity_registered_email_key" index
++    // condition (design §7) — change both or neither.
++    // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
++    const rows = await this.prisma.$queryRaw<Room[]>`
++      INSERT INTO room."Room" ("id", "organizerId", "status", "createdAt", "updatedAt")
++      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', now(), now()
++      WHERE EXISTS (
++        SELECT 1 FROM identity."Identity"
++        WHERE "id" = ${organizerId}::uuid
++          AND "kind" = 'REGISTERED'
++          AND "deletedAt" IS NULL
++      )
++      RETURNING *
++    `;
++    if (rows.length === 0) {
++      throw new RoomOrganizerNotRegisteredError(
++        `Organizer ${organizerId} is not a live REGISTERED identity`,
++      );
++    }
++    return rows[0];
+   }
+ 
+   async transition(roomId: string, to: RoomStatus): Promise<Room> {
+     const current = await this.prisma.room.findUnique({ where: { id: roomId } });
+     if (!current || current.deletedAt !== null) {
+       throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+     }
+     // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+     assertTransition(current.status as RoomStatus, to);
+     // Atomic guarded update: correctness of the race rests on this WHERE, not on the
+diff --git a/packages/core/src/testing/harness.int-spec.ts b/packages/core/src/testing/harness.int-spec.ts
+index 6248166..27f3dcb 100644
+--- a/packages/core/src/testing/harness.int-spec.ts
++++ b/packages/core/src/testing/harness.int-spec.ts
+@@ -1,17 +1,19 @@
+ import { startTestDb, type TestDb } from './postgres.testcontainer';
++import { seedIdentity } from './seed-identity';
+ 
+ describe('integration harness', () => {
+   let db: TestDb;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: '00000000-0000-0000-0000-000000000001' });
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   it('applies the migration and can round-trip a Room row', async () => {
+     const created = await db.prisma.room.create({
+       data: { organizerId: '00000000-0000-0000-0000-000000000001' },
+     });
+diff --git a/packages/core/src/testing/seed-identity.ts b/packages/core/src/testing/seed-identity.ts
+new file mode 100644
+index 0000000..67bb305
+--- /dev/null
++++ b/packages/core/src/testing/seed-identity.ts
+@@ -0,0 +1,24 @@
++import type { $Enums } from '@prisma/client';
++import type { PrismaService } from '../prisma/prisma.service';
++
++// Test-side seeding of identity rows. No IdentityService exists in core by design
++// (design §6: the first real flow — guest join or OAuth — will own it); until then
++// tests are the only writers, via the Prisma client directly.
++export function seedIdentity(
++  prisma: PrismaService,
++  data: {
++    id?: string;
++    kind?: $Enums.IdentityKind;
++    email?: string | null;
++    deletedAt?: Date | null;
++  } = {},
++) {
++  return prisma.identity.create({
++    data: {
++      id: data.id,
++      kind: data.kind ?? 'REGISTERED',
++      email: data.email ?? null,
++      deletedAt: data.deletedAt ?? null,
++    },
++  });
++}
+diff --git a/packages/sdk/src/identity/identity-kind.contract.spec.ts b/packages/sdk/src/identity/identity-kind.contract.spec.ts
+new file mode 100644
+index 0000000..4fd5004
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { IDENTITY_KINDS, identityKindSchema } from './identity-kind';
++import { validKinds, invalidKinds } from './identity-kind.fixtures';
++
++describe('identityKind contract (REQ-ID-001)', () => {
++  it('declares exactly the two kinds of REQ-ID-001', () => {
++    expect([...IDENTITY_KINDS]).toEqual(['REGISTERED', 'GUEST']);
++  });
++
++  it.each(validKinds)('accepts %s', (kind) => {
++    expect(identityKindSchema.safeParse(kind).success).toBe(true);
++  });
++
++  it.each(invalidKinds.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(identityKindSchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/identity/identity-kind.fixtures.ts b/packages/sdk/src/identity/identity-kind.fixtures.ts
+new file mode 100644
+index 0000000..6954710
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { IdentityKind } from './identity-kind';
++
++export const validKinds: IdentityKind[] = ['REGISTERED', 'GUEST'];
++
++// Unknown roles, wrong case, empty, non-strings — all rejected.
++export const invalidKinds: unknown[] = ['ADMIN', 'guest', 'registered', '', null, 42];
+diff --git a/packages/sdk/src/identity/identity-kind.ts b/packages/sdk/src/identity/identity-kind.ts
+new file mode 100644
+index 0000000..00d3218
+--- /dev/null
++++ b/packages/sdk/src/identity/identity-kind.ts
+@@ -0,0 +1,8 @@
++import { z } from 'zod';
++
++// REQ-ID-001: single identity table, kind REGISTERED | GUEST. Contract vocabulary,
++// fixed here so membership, JWT claims and draw_eligibility don't fork literals
++// before their slices land.
++export const IDENTITY_KINDS = ['REGISTERED', 'GUEST'] as const;
++export const identityKindSchema = z.enum(IDENTITY_KINDS);
++export type IdentityKind = z.infer<typeof identityKindSchema>;
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index ce665fe..ac2ac9f 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -6,10 +6,14 @@ export * from './events/event-type';
+ export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
+ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+ export * from './manifest/manifest.schema';
+ export * from './manifest/manifest.fixtures';
+ export * from './manifest/app-settings-visibility';
+ export * from './manifest/define-app';
+ export * from './manifest/define-app.fixtures';
++export * from './identity/identity-kind';
++export * from './identity/identity-kind.fixtures';
++export * from './membership/member-role';
++export * from './membership/member-role.fixtures';
+diff --git a/packages/sdk/src/membership/member-role.contract.spec.ts b/packages/sdk/src/membership/member-role.contract.spec.ts
+new file mode 100644
+index 0000000..a38dff3
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { MEMBER_ROLES, memberRoleSchema } from './member-role';
++import { validRoles, invalidRoles } from './member-role.fixtures';
++
++describe('memberRole contract (REQ-ID-011)', () => {
++  it('declares exactly the four roles of REQ-ID-011', () => {
++    expect([...MEMBER_ROLES]).toEqual(['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR']);
++  });
++
++  it.each(validRoles)('accepts %s', (role) => {
++    expect(memberRoleSchema.safeParse(role).success).toBe(true);
++  });
++
++  it.each(invalidRoles.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(memberRoleSchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/membership/member-role.fixtures.ts b/packages/sdk/src/membership/member-role.fixtures.ts
+new file mode 100644
+index 0000000..a6e0378
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { MemberRole } from './member-role';
++
++export const validRoles: MemberRole[] = ['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR'];
++
++// Unknown roles, wrong case, empty, non-strings — all rejected.
++export const invalidRoles: unknown[] = ['ADMIN', 'organizer', 'owner', '', null, 42];
+diff --git a/packages/sdk/src/membership/member-role.ts b/packages/sdk/src/membership/member-role.ts
+new file mode 100644
+index 0000000..85476bc
+--- /dev/null
++++ b/packages/sdk/src/membership/member-role.ts
+@@ -0,0 +1,8 @@
++import { z } from 'zod';
++
++// REQ-ID-011: membership role model. MODERATOR holds no privileges beyond
++// PARTICIPANT until phase 4 (amendment v1.3) but stays in the enumeration;
++// the access matrix lands with the membership entity.
++export const MEMBER_ROLES = ['ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR'] as const;
++export const memberRoleSchema = z.enum(MEMBER_ROLES);
++export type MemberRole = z.infer<typeof memberRoleSchema>;

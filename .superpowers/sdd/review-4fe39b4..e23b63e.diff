@@ -1,0 +1,478 @@
+# Review package: 4fe39b4..e23b63e
+
+## Commits
+e23b63e feat(core): RoomService.configure write path (REQ-RT-004)
+
+## Files changed
+ packages/core/src/realtime/event-log.int-spec.ts |   9 +-
+ packages/core/src/room/room.errors.ts            |  21 ++++
+ packages/core/src/room/room.module.ts            |   3 +-
+ packages/core/src/room/room.service.int-spec.ts  | 118 +++++++++++++++++++++--
+ packages/core/src/room/room.service.ts           |  41 +++++++-
+ 5 files changed, 181 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index 0393c6d..adfc2c2 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -1,28 +1,33 @@
+-import { ContractError } from '@mymozhem/sdk';
++import { ContractError, validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
++import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('EventLogService.commitCoreEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    rooms = new RoomService(db.prisma, new EventLogService());
++    rooms = new RoomService(
++      db.prisma,
++      new EventLogService(),
++      new AppRegistryService([validManifests[0]]),
++    );
+     eventLog = new EventLogService();
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     // CASCADE чистит и realtime."LogEvent" (FK-ссылка), и room."Room".
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+diff --git a/packages/core/src/room/room.errors.ts b/packages/core/src/room/room.errors.ts
+index 31654cb..9d18043 100644
+--- a/packages/core/src/room/room.errors.ts
++++ b/packages/core/src/room/room.errors.ts
+@@ -1,18 +1,22 @@
+ // Core-internal typed domain errors for the Room lifecycle. NOT part of the SDK
+ // contract (these do not cross the app↔core boundary in this slice). When an HTTP
+ // surface for the organizer lands, these map to typed API responses without
+ // stack traces (REQ-SEC-006).
+ export const ROOM_ERROR_CODES = {
+   ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
+   ROOM_CONFLICT: 'ROOM_CONFLICT',
+   ROOM_ORGANIZER_NOT_REGISTERED: 'ROOM_ORGANIZER_NOT_REGISTERED',
++  ROOM_NOT_CONFIGURED: 'ROOM_NOT_CONFIGURED',
++  // Строковый паритет с зарезервированным кодом SDK-контракта (CONTRACT_ERROR_CODES,
++  // design §6): будущий транспорт отобразит code→code 1:1. SDK не меняется.
++  ROOM_SETTINGS_FROZEN: 'ROOM_SETTINGS_FROZEN',
+ } as const;
+ 
+ export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
+ 
+ export class RoomError extends Error {
+   constructor(
+     readonly code: RoomErrorCode,
+     message: string,
+   ) {
+     super(message);
+@@ -36,10 +40,27 @@ export class RoomConflictError extends RoomError {
+ }
+ 
+ // Organizer identity missing, GUEST, or anonymized — collapsed into one code on
+ // purpose (design §3): to the caller it is a single refusal, and the predicate is
+ // identity's invariant, not a place for reconnaissance.
+ export class RoomOrganizerNotRegisteredError extends RoomError {
+   constructor(message: string) {
+     super(ROOM_ERROR_CODES.ROOM_ORGANIZER_NOT_REGISTERED, message);
+   }
+ }
++
++// Активация требует сконфигурированной комнаты (REQ-RT-004): payload room.activated —
++// пин (appId, manifestVersion), у неконфигурированной комнаты ему неоткуда взяться.
++export class RoomNotConfiguredError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_NOT_CONFIGURED, message);
++  }
++}
++
++// Запись конфигурации закрыта: комната не DRAFT (заморозка REQ-RT-004), удалена или
++// отсутствует. Причины свёрнуты в один код намеренно (design §6) — вызывающему единый
++// отказ; точность — в server-side message.
++export class RoomSettingsFrozenError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_SETTINGS_FROZEN, message);
++  }
++}
+diff --git a/packages/core/src/room/room.module.ts b/packages/core/src/room/room.module.ts
+index 787a339..2de2267 100644
+--- a/packages/core/src/room/room.module.ts
++++ b/packages/core/src/room/room.module.ts
+@@ -1,11 +1,12 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
++import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { RoomService } from './room.service';
+ 
+ @Module({
+-  imports: [PrismaModule, RealtimeModule],
++  imports: [PrismaModule, RealtimeModule, AppRegistryModule],
+   providers: [RoomService],
+   exports: [RoomService],
+ })
+ export class RoomModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 8d00b20..881d716 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,27 +1,45 @@
++import { validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { EventLogService } from '../realtime/event-log.service';
++import { AppRegistryService } from '../app-registry/app-registry.service';
++import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
+ import { RoomService } from './room.service';
+-import { RoomError, RoomTransitionError, RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
++import {
++  RoomError,
++  RoomTransitionError,
++  RoomConflictError,
++  RoomOrganizerNotRegisteredError,
++  RoomSettingsFrozenError,
++} from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
++// quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
++const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
++
++const makeService = (db: TestDb) =>
++  new RoomService(db.prisma, new EventLogService(), new AppRegistryService([validManifests[0]]));
++
++const configureQuiz = (service: RoomService, roomId: string) =>
++  service.configure(roomId, { appId: 'quiz', manifestVersion: 1, settings: QUIZ_SETTINGS });
++
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma, new EventLogService());
++    service = makeService(db);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -107,21 +125,21 @@ describe('RoomService lifecycle', () => {
+   });
+ });
+ 
+ describe('RoomService transition atomicity', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma, new EventLogService());
++    service = makeService(db);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
+   // serialize instead of interleave, the second one reads ACTIVE, and
+   // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
+   // fail with no defect present. That pairing is schedule-dependent and cannot
+@@ -154,21 +172,21 @@ describe('RoomService transition atomicity', () => {
+   });
+ });
+ 
+ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma, new EventLogService());
++    service = makeService(db);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -226,21 +244,21 @@ describe('Room organizerId FK', () => {
+   });
+ });
+ 
+ describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma, new EventLogService());
++    service = makeService(db);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -306,21 +324,21 @@ describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
+   });
+ });
+ 
+ describe('Room config triple CHECK constraint (REQ-RT-004)', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    service = new RoomService(db.prisma, new EventLogService());
++    service = makeService(db);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+@@ -344,10 +362,98 @@ describe('Room config triple CHECK constraint (REQ-RT-004)', () => {
+     { set: `"appId" = 'quiz'`, label: 'appId without the rest' },
+     { set: `"appId" = 'quiz', "manifestVersion" = 1`, label: 'pin without appSettings' },
+     { set: `"appSettings" = '{}'::jsonb`, label: 'appSettings without the pin' },
+   ])('rejects a partial triple at the database level ($label)', async ({ set }) => {
+     const room = await service.create(ORG);
+     await expect(
+       db.prisma.$executeRawUnsafe(`UPDATE room."Room" SET ${set} WHERE id = $1`, room.id),
+     ).rejects.toThrow(/Room_config_triple/);
+   });
+ });
++
++describe('RoomService.configure (REQ-RT-004)', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    service = makeService(db);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('persists the full config triple on a DRAFT room', async () => {
++    const room = await service.create(ORG);
++    const configured = await configureQuiz(service, room.id);
++    expect(configured.appId).toBe('quiz');
++    expect(configured.manifestVersion).toBe(1);
++    expect(configured.appSettings).toEqual(QUIZ_SETTINGS);
++  });
++
++  it('replaces the whole triple on re-configure', async () => {
++    const room = await service.create(ORG);
++    await configureQuiz(service, room.id);
++    const next = { title: 'Other quiz', correctAnswers: [1] };
++    const reconfigured = await service.configure(room.id, {
++      appId: 'quiz',
++      manifestVersion: 1,
++      settings: next,
++    });
++    expect(reconfigured.appSettings).toEqual(next);
++  });
++
++  it('rejects invalid settings with APP_SETTINGS_INVALID and leaves the row unchanged', async () => {
++    const room = await service.create(ORG);
++    const err = await service
++      .configure(room.id, { appId: 'quiz', manifestVersion: 1, settings: { title: 'x' } })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(AppSettingsInvalidError);
++    expect((err as AppSettingsInvalidError).code).toBe('APP_SETTINGS_INVALID');
++    const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
++    expect(reread.appId).toBeNull();
++    expect(reread.appSettings).toBeNull();
++  });
++
++  it('rejects an unknown manifest with APP_MANIFEST_UNKNOWN', async () => {
++    const room = await service.create(ORG);
++    const err = await service
++      .configure(room.id, { appId: 'quiz', manifestVersion: 99, settings: QUIZ_SETTINGS })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(AppManifestUnknownError);
++    expect((err as AppManifestUnknownError).code).toBe('APP_MANIFEST_UNKNOWN');
++  });
++
++  it.each([
++    {
++      name: 'ACTIVE',
++      setup: async (s: RoomService, id: string) => {
++        await configureQuiz(s, id);
++        await s.activate(id);
++      },
++    },
++    { name: 'CANCELLED', setup: async (s: RoomService, id: string) => { await s.cancel(id); } },
++    { name: 'soft-deleted', setup: async (s: RoomService, id: string) => { await s.softDelete(id); } },
++  ])('rejects configure on a $name room with ROOM_SETTINGS_FROZEN', async ({ setup }) => {
++    const room = await service.create(ORG);
++    await setup(service, room.id);
++    const err = await configureQuiz(service, room.id).catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomSettingsFrozenError);
++    expect((err as RoomSettingsFrozenError).code).toBe('ROOM_SETTINGS_FROZEN');
++  });
++
++  it('rejects configure of a missing room with the same collapsed code', async () => {
++    await expect(
++      service.configure('00000000-0000-0000-0000-0000000000ff', {
++        appId: 'quiz',
++        manifestVersion: 1,
++        settings: QUIZ_SETTINGS,
++      }),
++    ).rejects.toBeInstanceOf(RoomSettingsFrozenError);
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index af6a478..9f93817 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,22 +1,27 @@
+ import { Injectable } from '@nestjs/common';
+-import type { Room, $Enums } from '@prisma/client';
++import type { Room, $Enums, Prisma } from '@prisma/client';
+ import type { CoreEventName } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { EventLogService } from '../realtime/event-log.service';
++import { AppRegistryService } from '../app-registry/app-registry.service';
+ import {
+   assertTransition,
+   assertDeletable,
+   DELETABLE_STATUSES,
+   type RoomStatus,
+ } from './room-state-machine';
+-import { RoomConflictError, RoomOrganizerNotRegisteredError } from './room.errors';
++import {
++  RoomConflictError,
++  RoomOrganizerNotRegisteredError,
++  RoomSettingsFrozenError,
++} from './room.errors';
+ 
+ // Compile-time parity assertion between the Prisma-generated enum and the domain union.
+ // `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
+ // if a member is ever added to one side and not the other, this line fails to compile
+ // instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
+ type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
+   ? [$Enums.RoomStatus] extends [RoomStatus]
+     ? true
+     : never
+   : never;
+@@ -28,20 +33,21 @@ void (true satisfies RoomStatusParity);
+ const LIFECYCLE_EVENTS: Partial<Record<RoomStatus, CoreEventName>> = {
+   COMPLETED: 'room.completed',
+   CANCELLED: 'room.cancelled',
+ };
+ 
+ @Injectable()
+ export class RoomService {
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly eventLog: EventLogService,
++    private readonly appRegistry: AppRegistryService,
+   ) {}
+ 
+   async create(organizerId: string): Promise<Room> {
+     // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
+     // INSERT — the WHERE EXISTS predicate is the single source of truth, no
+     // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
+     // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
+     // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
+     // The same predicate lives in the "Identity_registered_email_key" index
+     // condition (design §7) — change both or neither.
+@@ -58,20 +64,51 @@ export class RoomService {
+       RETURNING *
+     `;
+     if (rows.length === 0) {
+       throw new RoomOrganizerNotRegisteredError(
+         `Organizer ${organizerId} is not a live REGISTERED identity`,
+       );
+     }
+     return rows[0];
+   }
+ 
++  // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,
++  // appSettings) — промежуточного состояния не существует (design §4). Валидация ДО
++  // обращения к БД (REQ-CORE-007); запись — guarded UPDATE: только DRAFT и не
++  // удалённая. Заморозка активной комнаты — этот предикат, не флаг.
++  async configure(
++    roomId: string,
++    config: { appId: string; manifestVersion: number; settings: unknown },
++  ): Promise<Room> {
++    this.appRegistry.validateSettings(config.appId, config.manifestVersion, config.settings);
++    const res = await this.prisma.room.updateMany({
++      where: { id: roomId, status: 'DRAFT', deletedAt: null },
++      data: {
++        appId: config.appId,
++        manifestVersion: config.manifestVersion,
++        // JSON Schema-валидированное значение — JSON; unknown → InputJsonValue безопасно.
++        appSettings: config.settings as Prisma.InputJsonValue,
++      },
++    });
++    if (res.count === 0) {
++      // Re-read только для точности server-side message; код один (design §6).
++      const existing = await this.prisma.room.findUnique({ where: { id: roomId } });
++      const reason = !existing
++        ? 'not found'
++        : existing.deletedAt !== null
++          ? 'deleted'
++          : `status ${existing.status}`;
++      throw new RoomSettingsFrozenError(`Room ${roomId} is not configurable: ${reason}`);
++    }
++    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
++  }
++
+   async transition(roomId: string, to: RoomStatus): Promise<Room> {
+     return this.prisma.$transaction(async (tx) => {
+       const current = await tx.room.findUnique({ where: { id: roomId } });
+       if (!current || current.deletedAt !== null) {
+         throw new RoomConflictError(`Room ${roomId} not found or deleted`);
+       }
+       // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
+       assertTransition(current.status as RoomStatus, to);
+       // Atomic guarded update: correctness of the race rests on this WHERE, not on the
+       // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).

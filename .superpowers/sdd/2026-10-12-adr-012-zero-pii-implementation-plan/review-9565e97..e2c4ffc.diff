@@ -1,0 +1,2591 @@
+# Review package: 9565e97..e2c4ffc
+
+## Commits
+e2c4ffc feat(core)!: удаление OAuth-контура (ADR-012) — модуль/контроллер/лимитеры/фильтр/e2e; миграция drop IdentityProvider + индекс единственности организатора
+
+## Files changed
+ apps/server/jest.config.js                         |   1 +
+ apps/server/test/jest-env-setup.ts                 |   5 +
+ apps/server/test/lottery.e2e-spec.ts               |   6 +-
+ apps/server/test/oauth.e2e-spec.ts                 | 498 ---------------------
+ apps/server/test/transport.e2e-spec.ts             |  16 +-
+ .../migration.sql                                  |  10 +
+ packages/core/prisma/schema.prisma                 |  20 -
+ packages/core/src/auth/token.service.int-spec.ts   |   6 +-
+ packages/core/src/identity/guest-sweep.int-spec.ts |   5 +-
+ .../identity/identity-provider-schema.int-spec.ts  |  30 --
+ .../src/identity/identity-provisioning.int-spec.ts | 146 ------
+ .../core/src/identity/identity-schema.int-spec.ts  |  10 +-
+ packages/core/src/identity/identity.errors.ts      |  17 -
+ packages/core/src/identity/identity.service.ts     |  70 +--
+ .../core/src/identity/organizer-schema.int-spec.ts |  26 ++
+ packages/core/src/index.ts                         |   5 -
+ .../src/membership/membership.service.int-spec.ts  |  23 +-
+ .../core/src/oauth/google-oauth.client.spec.ts     |  80 ----
+ packages/core/src/oauth/google-oauth.client.ts     |  50 ---
+ packages/core/src/oauth/oauth-provider.client.ts   |  14 -
+ packages/core/src/oauth/oauth.constants.ts         |   6 -
+ packages/core/src/oauth/oauth.errors.ts            |  22 -
+ packages/core/src/oauth/oauth.module.ts            |  19 -
+ packages/core/src/oauth/oauth.service.spec.ts      | 255 -----------
+ packages/core/src/oauth/oauth.service.ts           | 137 ------
+ .../core/src/observability/pino-logger.module.ts   |  14 +-
+ .../core/src/observability/pino-options.spec.ts    |  24 +-
+ packages/core/src/realtime/event-log.int-spec.ts   |   4 +-
+ .../core/src/rewards/rewards-schema.int-spec.ts    |  10 +-
+ packages/core/src/rewards/rewards.int-spec.ts      |   6 +-
+ packages/core/src/transport/auth.tokens.ts         |   5 -
+ .../src/transport/http-exception.filter.spec.ts    |  22 -
+ .../core/src/transport/http-exception.filter.ts    |  17 +-
+ packages/core/src/transport/http.types.ts          |   4 +-
+ packages/core/src/transport/oauth.controller.ts    |  81 ----
+ packages/core/src/transport/transport.module.ts    |  19 +-
+ 36 files changed, 121 insertions(+), 1562 deletions(-)
+
+## Diff
+diff --git a/apps/server/jest.config.js b/apps/server/jest.config.js
+index bdb79bf..b37e783 100644
+--- a/apps/server/jest.config.js
++++ b/apps/server/jest.config.js
+@@ -1,6 +1,7 @@
+ module.exports = {
+   preset: 'ts-jest',
+   testEnvironment: 'node',
+   roots: ['<rootDir>/src', '<rootDir>/test'],
+   testMatch: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
++  setupFiles: ['<rootDir>/test/jest-env-setup.ts'],
+ };
+diff --git a/apps/server/test/jest-env-setup.ts b/apps/server/test/jest-env-setup.ts
+new file mode 100644
+index 0000000..0e6d594
+--- /dev/null
++++ b/apps/server/test/jest-env-setup.ts
+@@ -0,0 +1,5 @@
++// ADR-012 (конфиг T3): ORGANIZER_SETUP_TOKEN обязателен — e2e boot'ят настоящий
++// ConfigModule из process.env (а bootstrap-smoke отдаёт process.env потомку
++// dist/main.js). Тестовый дефолт (>= 32 символов); спекам с собственным значением —
++// переопределять в beforeAll явно.
++process.env.ORGANIZER_SETUP_TOKEN ??= 'server-e2e-organizer-setup-token!!';
+diff --git a/apps/server/test/lottery.e2e-spec.ts b/apps/server/test/lottery.e2e-spec.ts
+index a09467f..9da0c6c 100644
+--- a/apps/server/test/lottery.e2e-spec.ts
++++ b/apps/server/test/lottery.e2e-spec.ts
+@@ -332,21 +332,25 @@ describe('Lottery (e2e, приёмка фазы 3)', () => {
+     // откатывается целиком (коммит draw.run второго розыгрыша тоже не ложится).
+     const oks = acks.filter((a): a is { ok: true } => 'ok' in a);
+     const rejects = acks.filter((a): a is { code: string } => 'code' in a);
+     expect(oks).toHaveLength(1);
+     expect(rejects).toEqual([{ code: 'PRIZE_FUND_EXHAUSTED' }]);
+     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(0);
+     expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(1);
+     for (const s of [g1.socket, g2.socket, g3.socket, orgSocket]) s.close();
+   });
+ 
+-  it('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
++  // ADR-012 / амендмент v1.5: verified-ветка REQ-RWD-014 приостановлена, а второй
++  // живой REGISTERED непредставим ("Identity_single_registered_key" — один REGISTERED
++  // на инстанс, и это организатор). Сценарий засыпает до задачи манифеста lottery v2
++  // (draw_eligibility снимается из манифеста); реактивация — с возвратом аккаунтов.
++  it.skip('4. eligibility verified: победитель всегда REGISTERED (REQ-RWD-014); гость при дефолте guests_allowed может выиграть (контроль — сценарий 1)', async () => {
+     // Рулинг D-pre.2 (поправка к brief): sketch «10 розыгрышей с quantity 10 → все
+     // winnerId === registered.id» противоречил реализованному исключению прежних
+     // победителей ЭТОГО приза из пула (lottery-handlers.ts: после первого розыгрыша
+     // единственный eligible REGISTERED исключён → DRAW_POOL_EMPTY на повторах).
+     // Вместо этого — ОДИН розыгрыш (quantity 1): пул verified = {registered}
+     // детерминированно, гости отфильтрованы.
+     // HTTP-входа для REGISTERED нет (JoinController создаёт только гостей) —
+     // членство REGISTERED-партисипанта сеем на уровне БД; пул розыгрыша читается
+     // из membership (listActiveParticipantPool), так что это честная посадка.
+     const room = await activeLotteryRoom({ drawEligibility: 'verified' });
+diff --git a/apps/server/test/oauth.e2e-spec.ts b/apps/server/test/oauth.e2e-spec.ts
+deleted file mode 100644
+index e7815a7..0000000
+--- a/apps/server/test/oauth.e2e-spec.ts
++++ /dev/null
+@@ -1,498 +0,0 @@
+-import { Test } from '@nestjs/testing';
+-import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+-import fastifyCookie from '@fastify/cookie';
+-import fastifyCors from '@fastify/cors';
+-import fastifyHelmet from '@fastify/helmet';
+-import { createRoomResponseSchema, tokenResponseSchema } from '@mymozhem/sdk';
+-import {
+-  OAUTH_PKCE_COOKIE,
+-  OAUTH_PROVIDER_CLIENT,
+-  OAUTH_REDIRECT_COOKIE,
+-  OAUTH_STATE_COOKIE,
+-  REFRESH_COOKIE,
+-  TEST_CONFIG,
+-  TokenService,
+-  loadConfig,
+-  seedIdentity,
+-  startTestDb,
+-  type OAuthProviderClient,
+-  type ProviderProfile,
+-  type TestDb,
+-} from '@mymozhem/core';
+-import { AppModule } from '../src/app.module';
+-
+-jest.setTimeout(120_000);
+-
+-// Организатор комнаты для guest-join кейса — z.uuid() v4-nibble совместимый.
+-const ORG = '00000000-0000-4000-8000-000000000001';
+-
+-const GOOGLE_ENV = {
+-  GOOGLE_CLIENT_ID: 'e2e-client-id',
+-  GOOGLE_CLIENT_SECRET: 'e2e-client-secret',
+-  OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+-  OAUTH_REDIRECT_ALLOWLIST: 'http://localhost:3000/app,http://localhost:3000/other',
+-};
+-
+-const PROFILE: ProviderProfile = {
+-  subject: 'google-sub-1',
+-  email: 'org@example.test',
+-  emailVerified: true,
+-  displayName: 'Org',
+-};
+-
+-const OAUTH_COOKIES = [OAUTH_STATE_COOKIE, OAUTH_PKCE_COOKIE, OAUTH_REDIRECT_COOKIE] as const;
+-
+-// Тип ответа inject — через публичную сигнатуру app (fastify не является прямой
+-// зависимостью apps/server, pnpm его не резолвит из этого пакета).
+-type InjectResponse = Awaited<ReturnType<NestFastifyApplication['inject']>>;
+-
+-// Фейк провайдера — override DI-токена (design §9): весь флоу на проводе, сети нет.
+-// exchangeCode записывает аргументы для ассертов PKCE.
+-function createFakeProvider(profile: ProviderProfile = PROFILE) {
+-  return { exchangeCode: jest.fn(async (_code: string, _verifier: string) => profile) };
+-}
+-
+-function restoreEnv(key: string, value: string | undefined): void {
+-  if (value === undefined) {
+-    delete process.env[key];
+-  } else {
+-    process.env[key] = value;
+-  }
+-}
+-
+-// Boot зеркалит main.ts (cookie/helmet/CORS) по паттерну transport.e2e-spec, с двумя
+-// отличиями: override OAUTH_PROVIDER_CLIENT фейком и env-override со значением
+-// undefined = удалить ключ (кейс «не сконфигурировано»). Env действует только на
+-// момент boot: ConfigModule читает process.env один раз, лимитеры запечатывают свои
+-// значения в фабриках — после boot env восстанавливается.
+-async function createApp(
+-  envOverrides: Record<string, string | undefined> = {},
+-  provider: OAuthProviderClient = createFakeProvider(),
+-): Promise<NestFastifyApplication> {
+-  const saved: Record<string, string | undefined> = {};
+-  for (const [key, value] of Object.entries(envOverrides)) {
+-    saved[key] = process.env[key];
+-    if (value === undefined) {
+-      delete process.env[key];
+-    } else {
+-      process.env[key] = value;
+-    }
+-  }
+-  try {
+-    const corsOrigins = loadConfig(process.env).CORS_ORIGINS;
+-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+-      .overrideProvider(OAUTH_PROVIDER_CLIENT)
+-      .useValue(provider)
+-      .compile();
+-    const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+-    await app.register(fastifyCookie);
+-    await app.register(fastifyHelmet);
+-    await app.register(fastifyCors, { origin: corsOrigins });
+-    await app.init();
+-    await app.getHttpAdapter().getInstance().ready();
+-    return app;
+-  } finally {
+-    for (const key of Object.keys(envOverrides)) restoreEnv(key, saved[key]);
+-  }
+-}
+-
+-// Сырые set-cookie заголовки одной куки (для ассертов атрибутов).
+-function setCookiesOf(res: InjectResponse, name: string): string[] {
+-  const raw = res.headers['set-cookie'];
+-  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+-  return list.filter((h) => h.startsWith(`${name}=`));
+-}
+-
+-// Значение куки из ответа (res.cookies — распарсенные set-cookie).
+-function cookieValueOf(res: InjectResponse, name: string): string {
+-  const cookie = res.cookies.find((c) => c.name === name);
+-  expect(cookie).toBeDefined();
+-  return (cookie as { value: string }).value;
+-}
+-
+-// Cookie-заголовок из трёх oauth-кук ответа start — ручная передача между запросами.
+-function oauthCookieHeader(startRes: InjectResponse): string {
+-  return OAUTH_COOKIES.map((n) => `${n}=${cookieValueOf(startRes, n)}`).join('; ');
+-}
+-
+-// Одноразовость state: куки гасятся при любом исходе callback (design §3) —
+-// set-cookie с пустым значением и Expires в прошлом.
+-function expectOAuthCookiesCleared(res: InjectResponse): void {
+-  for (const name of OAUTH_COOKIES) {
+-    const headers = setCookiesOf(res, name);
+-    expect(headers.length).toBeGreaterThan(0);
+-    expect(headers[0]).toMatch(new RegExp(`^${name}=;`));
+-    expect(headers[0]).toContain('Expires=Thu, 01 Jan 1970');
+-  }
+-}
+-
+-// start → callback до 302 (без ассертов тела — их делают кейсы). Возвращает оба
+-// ответа и state для последующих шагов.
+-async function runFlow(
+-  app: NestFastifyApplication,
+-  redirect = 'http://localhost:3000/app',
+-): Promise<{ startRes: InjectResponse; cbRes: InjectResponse; state: string }> {
+-  const startRes = await app.inject({
+-    method: 'GET',
+-    url: `/auth/google?redirect=${encodeURIComponent(redirect)}`,
+-  });
+-  expect(startRes.statusCode).toBe(302);
+-  const location = startRes.headers.location as string;
+-  const state = new URL(location).searchParams.get('state');
+-  expect(state).toBeTruthy();
+-  const cbRes = await app.inject({
+-    method: 'GET',
+-    url: `/auth/google/callback?code=fake-code&state=${state as string}`,
+-    headers: { cookie: oauthCookieHeader(startRes) },
+-  });
+-  return { startRes, cbRes, state: state as string };
+-}
+-
+-// refresh по mm_refresh из callback-ответа → access claims через TokenService
+-// приложения (jsonwebtoken в apps/server не импортируется).
+-async function refreshAndDecode(app: NestFastifyApplication, cbRes: InjectResponse) {
+-  const refRes = await app.inject({
+-    method: 'POST',
+-    url: '/auth/refresh',
+-    headers: { cookie: `${REFRESH_COOKIE}=${cookieValueOf(cbRes, REFRESH_COOKIE)}` },
+-  });
+-  expect(refRes.statusCode).toBe(200);
+-  const body = tokenResponseSchema.parse(refRes.json());
+-  const claims = app.get(TokenService).verifyAccessToken(body.accessToken);
+-  return { body, claims };
+-}
+-
+-describe('oauth e2e (на проводе)', () => {
+-  let db: TestDb;
+-  let savedDatabaseUrl: string | undefined;
+-  let savedJwtSecret: string | undefined;
+-
+-  beforeAll(async () => {
+-    savedDatabaseUrl = process.env.DATABASE_URL;
+-    savedJwtSecret = process.env.JWT_SECRET;
+-    db = await startTestDb(); // выставляет DATABASE_URL — её подхватят app'ы ниже
+-    // JWT_SECRET обязателен конфигом (REQ-SEC-002); access верифицируется тем же
+-    // секретом, которым подписывают boot'нутые app'ы.
+-    process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+-  });
+-
+-  afterAll(async () => {
+-    await db.stop();
+-    restoreEnv('DATABASE_URL', savedDatabaseUrl);
+-    restoreEnv('JWT_SECRET', savedJwtSecret);
+-  });
+-
+-  afterEach(async () => {
+-    // Полная очистка между кейсами: Identity CASCADE тянет Session/IdentityProvider/
+-    // Membership/Room — ни один кейс не зависит от посева другого.
+-    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity", room."Room" CASCADE');
+-  });
+-
+-  describe('полный флоу и негативные (Google сконфигурирован)', () => {
+-    let app: NestFastifyApplication;
+-    const exchangeCode = jest.fn(
+-      async (_code: string, _verifier: string): Promise<ProviderProfile> => PROFILE,
+-    );
+-
+-    beforeAll(async () => {
+-      // OAUTH_RATE_LIMIT поднят до 50 осознанно: лимитер — per-IP и накапливает
+-      // все start/callback кейсов describe'а (их > 10, дефолт §4). Само поведение
+-      // rate-limit проверяется отдельным describe с лимитом 2 (REQ-SEC-007).
+-      app = await createApp({ ...GOOGLE_ENV, OAUTH_RATE_LIMIT: '50' }, { exchangeCode });
+-    });
+-
+-    afterAll(async () => {
+-      await app.close();
+-    });
+-
+-    beforeEach(() => {
+-      exchangeCode.mockReset();
+-      exchangeCode.mockResolvedValue(PROFILE);
+-    });
+-
+-    it('полный флоу: start → callback → refresh → POST /rooms (критерий среза, REQ-ID-015/005)', async () => {
+-      const { startRes, cbRes } = await runFlow(app);
+-
+-      // --- start: 302 на Google с PKCE S256 + три httpOnly-куки ---
+-      const location = startRes.headers.location as string;
+-      expect(location.startsWith('https://accounts.google.com/o/oauth2/v2/auth?')).toBe(true);
+-      expect(location).toContain('client_id=e2e-client-id');
+-      expect(location).toContain('code_challenge_method=S256');
+-      for (const name of OAUTH_COOKIES) {
+-        const headers = setCookiesOf(startRes, name);
+-        expect(headers).toHaveLength(1);
+-        expect(headers[0]).toContain('HttpOnly');
+-        expect(headers[0]).toContain('Path=/auth');
+-        expect(headers[0]).toContain('SameSite=Lax'); // Lax: возврат с Google — top-level GET
+-        expect(headers[0]).not.toContain('Secure'); // e2e не в production
+-      }
+-
+-      // --- callback: 302 на allowlisted redirect + refresh-кука без guest-cap ---
+-      expect(cbRes.statusCode).toBe(302);
+-      expect(cbRes.headers.location).toBe('http://localhost:3000/app');
+-      const refreshHeaders = setCookiesOf(cbRes, REFRESH_COOKIE);
+-      expect(refreshHeaders).toHaveLength(1);
+-      expect(refreshHeaders[0]).toContain('HttpOnly');
+-      expect(refreshHeaders[0]).toContain('SameSite=Strict');
+-      expect(refreshHeaders[0]).toContain('Path=/auth');
+-      expect(refreshHeaders[0]).not.toContain('Secure');
+-      const maxAge = Number(/Max-Age=(\d+)/.exec(refreshHeaders[0])?.[1]);
+-      // REGISTERED — без guest-cap: maxAge ≈ REFRESH_TOKEN_TTL (30 сут), допуск ±5 с.
+-      expect(maxAge).toBeGreaterThanOrEqual(2_592_000 - 5);
+-      expect(maxAge).toBeLessThanOrEqual(2_592_000 + 5);
+-      // Одноразовость state: oauth-куки очищены.
+-      expectOAuthCookiesCleared(cbRes);
+-
+-      // --- PKCE: провайдер получил verifier ровно из mm_oauth_pkce ---
+-      expect(exchangeCode).toHaveBeenCalledTimes(1);
+-      expect(exchangeCode).toHaveBeenCalledWith('fake-code', cookieValueOf(startRes, OAUTH_PKCE_COOKIE));
+-
+-      // --- refresh → access: kind REGISTERED, без roomId ---
+-      const { body: tokenBody, claims } = await refreshAndDecode(app, cbRes);
+-      expect(claims.kind).toBe('REGISTERED');
+-      expect(claims.roomId).toBeUndefined();
+-
+-      // Провижининг на проводе: identity создана по provider-профилю.
+-      const identity = await db.prisma.identity.findUnique({
+-        where: { id: claims.sub },
+-        include: { providers: true },
+-      });
+-      expect(identity?.kind).toBe('REGISTERED');
+-      expect(identity?.email).toBe('org@example.test');
+-      expect(identity?.providers).toHaveLength(1);
+-      expect(identity?.providers[0]).toMatchObject({ provider: 'google', subject: 'google-sub-1' });
+-
+-      // --- POST /rooms: 201, SDK-валидное тело, владелец — identity из access-sub ---
+-      const roomsRes = await app.inject({
+-        method: 'POST',
+-        url: '/rooms',
+-        headers: { authorization: `Bearer ${tokenBody.accessToken}` },
+-        payload: {},
+-      });
+-      expect(roomsRes.statusCode).toBe(201); // Nest default для POST — пин осознанный
+-      const roomBody = createRoomResponseSchema.parse(roomsRes.json());
+-      expect(roomBody.joinPolicy).toBe('guests'); // дефолт REQ-ID-002
+-      expect(roomBody.status).toBe('DRAFT');
+-      expect(roomBody.code.length).toBeGreaterThanOrEqual(8);
+-      const room = await db.prisma.room.findUnique({ where: { id: roomBody.roomId } });
+-      expect(room?.organizerId).toBe(claims.sub);
+-    });
+-
+-    it('повторный логин — та же identity (find-or-create по provider+subject)', async () => {
+-      const first = await runFlow(app);
+-      expect(first.cbRes.statusCode).toBe(302);
+-      const second = await runFlow(app);
+-      expect(second.cbRes.statusCode).toBe(302);
+-      const { claims: claims1 } = await refreshAndDecode(app, first.cbRes);
+-      const { claims: claims2 } = await refreshAndDecode(app, second.cbRes);
+-      expect(claims2.sub).toBe(claims1.sub);
+-      expect(claims2.kind).toBe('REGISTERED');
+-    });
+-
+-    it('redirect вне allowlist → 400 ровно {code: OAUTH_REDIRECT_INVALID}', async () => {
+-      const res = await app.inject({
+-        method: 'GET',
+-        url: `/auth/google?redirect=${encodeURIComponent('http://evil.test')}`,
+-      });
+-      expect(res.statusCode).toBe(400);
+-      expect(res.json()).toEqual({ code: 'OAUTH_REDIRECT_INVALID' });
+-    });
+-
+-    it('state mismatch → 401 OAUTH_STATE_INVALID; oauth-куки очищены (одноразовость)', async () => {
+-      const startRes = await app.inject({
+-        method: 'GET',
+-        url: `/auth/google?redirect=${encodeURIComponent('http://localhost:3000/app')}`,
+-      });
+-      expect(startRes.statusCode).toBe(302);
+-      const res = await app.inject({
+-        method: 'GET',
+-        url: '/auth/google/callback?code=fake-code&state=forged-state',
+-        headers: { cookie: oauthCookieHeader(startRes) },
+-      });
+-      expect(res.statusCode).toBe(401);
+-      expect(res.json()).toEqual({ code: 'OAUTH_STATE_INVALID' });
+-      expectOAuthCookiesCleared(res);
+-    });
+-
+-    it('нет state-куки → 401 OAUTH_STATE_INVALID', async () => {
+-      const res = await app.inject({
+-        method: 'GET',
+-        url: '/auth/google/callback?code=fake-code&state=whatever',
+-      });
+-      expect(res.statusCode).toBe(401);
+-      expect(res.json()).toEqual({ code: 'OAUTH_STATE_INVALID' });
+-    });
+-
+-    it('error=access_denied → 403 OAUTH_ACCESS_DENIED', async () => {
+-      const res = await app.inject({ method: 'GET', url: '/auth/google/callback?error=access_denied' });
+-      expect(res.statusCode).toBe(403);
+-      expect(res.json()).toEqual({ code: 'OAUTH_ACCESS_DENIED' });
+-    });
+-
+-    it('exchange бросает → 502 OAUTH_EXCHANGE_FAILED; oauth-куки очищены', async () => {
+-      exchangeCode.mockRejectedValueOnce(new Error('provider down'));
+-      const startRes = await app.inject({
+-        method: 'GET',
+-        url: `/auth/google?redirect=${encodeURIComponent('http://localhost:3000/app')}`,
+-      });
+-      const state = new URL(startRes.headers.location as string).searchParams.get('state');
+-      const res = await app.inject({
+-        method: 'GET',
+-        url: `/auth/google/callback?code=fake-code&state=${state as string}`,
+-        headers: { cookie: oauthCookieHeader(startRes) },
+-      });
+-      expect(res.statusCode).toBe(502);
+-      expect(res.json()).toEqual({ code: 'OAUTH_EXCHANGE_FAILED' });
+-      expectOAuthCookiesCleared(res);
+-    });
+-
+-    it('emailVerified: false → 403 OAUTH_EMAIL_UNVERIFIED', async () => {
+-      exchangeCode.mockResolvedValueOnce({ ...PROFILE, emailVerified: false });
+-      const { cbRes } = await runFlow(app);
+-      expect(cbRes.statusCode).toBe(403);
+-      expect(cbRes.json()).toEqual({ code: 'OAUTH_EMAIL_UNVERIFIED' });
+-    });
+-
+-    it('email занят другой REGISTERED-identity → 409 OAUTH_EMAIL_CONFLICT', async () => {
+-      await seedIdentity(db.prisma, { kind: 'REGISTERED', email: 'org@example.test' });
+-      // Другой subject (первый логин этого Google-аккаунта), тот же email — конфликт.
+-      exchangeCode.mockResolvedValueOnce({ ...PROFILE, subject: 'google-sub-conflict' });
+-      const { cbRes } = await runFlow(app);
+-      expect(cbRes.statusCode).toBe(409);
+-      expect(cbRes.json()).toEqual({ code: 'OAUTH_EMAIL_CONFLICT' });
+-      // Конфликт не создал identity: в БД ровно одна — посеянная.
+-      expect(await db.prisma.identity.count()).toBe(1);
+-    });
+-
+-    it('POST /rooms с GUEST-токеном → 403 ровно {code: ROOM_ORGANIZER_NOT_REGISTERED}', async () => {
+-      await seedIdentity(db.prisma, { id: ORG });
+-      const room = await db.prisma.room.create({ data: { organizerId: ORG, code: 'E2ECASE11' } });
+-      const joinRes = await app.inject({
+-        method: 'POST',
+-        url: '/rooms/join',
+-        payload: { code: room.code, displayName: 'Гость' },
+-      });
+-      expect(joinRes.statusCode).toBe(201);
+-      const { accessToken } = tokenResponseSchema.parse(joinRes.json());
+-      const res = await app.inject({
+-        method: 'POST',
+-        url: '/rooms',
+-        headers: { authorization: `Bearer ${accessToken}` },
+-        payload: {},
+-      });
+-      expect(res.statusCode).toBe(403);
+-      expect(res.json()).toEqual({ code: 'ROOM_ORGANIZER_NOT_REGISTERED' });
+-    });
+-
+-    it('POST /rooms без токена → 401 ровно {code: SESSION_INVALID}', async () => {
+-      const res = await app.inject({ method: 'POST', url: '/rooms', payload: {} });
+-      expect(res.statusCode).toBe(401);
+-      expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
+-    });
+-
+-    it("POST /rooms с joinPolicy 'invite_only' → 201; лишний ключ → 400 REQUEST_INVALID", async () => {
+-      const { cbRes } = await runFlow(app);
+-      expect(cbRes.statusCode).toBe(302);
+-      const { body: tokenBody } = await refreshAndDecode(app, cbRes);
+-      const auth = { authorization: `Bearer ${tokenBody.accessToken}` };
+-
+-      const created = await app.inject({
+-        method: 'POST',
+-        url: '/rooms',
+-        headers: auth,
+-        payload: { joinPolicy: 'invite_only' },
+-      });
+-      expect(created.statusCode).toBe(201);
+-      const body = createRoomResponseSchema.parse(created.json());
+-      expect(body.joinPolicy).toBe('invite_only');
+-      expect(body.status).toBe('DRAFT');
+-
+-      const extra = await app.inject({
+-        method: 'POST',
+-        url: '/rooms',
+-        headers: auth,
+-        payload: { joinPolicy: 'guests', extra: true },
+-      });
+-      expect(extra.statusCode).toBe(400);
+-      expect(extra.json()).toEqual({ code: 'REQUEST_INVALID' });
+-    });
+-
+-    it('негативные ответы несут ровно {code} — без message/stack (REQ-SEC-006 на проводе)', async () => {
+-      const responses: InjectResponse[] = [
+-        await app.inject({ method: 'GET', url: '/auth/google/callback?code=x&state=y' }), // 401
+-        await app.inject({
+-          method: 'GET',
+-          url: `/auth/google?redirect=${encodeURIComponent('http://evil.test')}`,
+-        }), // 400
+-        await app.inject({ method: 'GET', url: '/auth/google/callback?error=access_denied' }), // 403
+-        await app.inject({ method: 'POST', url: '/rooms', payload: {} }), // 401
+-        await app.inject({
+-          method: 'POST',
+-          url: '/rooms/join',
+-          payload: { code: 'zzzzzzzz', displayName: 'A' },
+-        }), // 403
+-      ];
+-      for (const res of responses) {
+-        expect(res.statusCode).toBeGreaterThanOrEqual(400);
+-        expect(Object.keys(res.json() as object)).toEqual(['code']);
+-        expect(res.body).not.toContain('message');
+-        expect(res.body).not.toContain('stack');
+-      }
+-    });
+-  });
+-
+-  describe('rate-limit callback (OAUTH_RATE_LIMIT=2, REQ-SEC-007)', () => {
+-    let app: NestFastifyApplication;
+-
+-    beforeAll(async () => {
+-      app = await createApp({ ...GOOGLE_ENV, OAUTH_RATE_LIMIT: '2' });
+-    });
+-
+-    afterAll(async () => {
+-      await app.close();
+-    });
+-
+-    it('третий callback с одного IP → 429 ровно {code: RATE_LIMITED}', async () => {
+-      const cb = () =>
+-        app.inject({ method: 'GET', url: '/auth/google/callback?code=x&state=y' });
+-      // Лимитер стоит ДО схемы/сервиса: первые два доходят до домена (401 по state)…
+-      expect((await cb()).statusCode).toBe(401);
+-      expect((await cb()).statusCode).toBe(401);
+-      // …третий отброшен по IP.
+-      const third = await cb();
+-      expect(third.statusCode).toBe(429);
+-      expect(third.json()).toEqual({ code: 'RATE_LIMITED' });
+-    });
+-  });
+-
+-  describe('Google не сконфигурирован', () => {
+-    let app: NestFastifyApplication;
+-
+-    beforeAll(async () => {
+-      // undefined = удалить ключ из env на момент boot — hermetic даже если в
+-      // окружении разработчика выставлены реальные GOOGLE_*.
+-      app = await createApp({
+-        GOOGLE_CLIENT_ID: undefined,
+-        GOOGLE_CLIENT_SECRET: undefined,
+-        OAUTH_REDIRECT_URI: undefined,
+-        OAUTH_REDIRECT_ALLOWLIST: undefined,
+-      });
+-    });
+-
+-    afterAll(async () => {
+-      await app.close();
+-    });
+-
+-    it('GET /auth/google → 503 ровно {code: OAUTH_NOT_CONFIGURED}', async () => {
+-      const res = await app.inject({ method: 'GET', url: '/auth/google' });
+-      expect(res.statusCode).toBe(503);
+-      expect(res.json()).toEqual({ code: 'OAUTH_NOT_CONFIGURED' });
+-    });
+-
+-    it('GET /auth/google/callback → 503 OAUTH_NOT_CONFIGURED', async () => {
+-      const res = await app.inject({ method: 'GET', url: '/auth/google/callback?code=x&state=y' });
+-      expect(res.statusCode).toBe(503);
+-      expect(res.json()).toEqual({ code: 'OAUTH_NOT_CONFIGURED' });
+-    });
+-  });
+-});
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index 44dee75..c893f82 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -20,25 +20,25 @@ import {
+   fakeLogger,
+   loadConfig,
+   seedIdentity,
+   startTestDb,
+   type TestDb,
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ 
+ jest.setTimeout(120_000);
+ 
+-const ORG = '00000000-0000-0000-0000-000000000001';
+-// Второй организатор с z.uuid()-совместимым id (v4-nibble): ORG как path-param
+-// не прошёл бы контроллерный z.uuid().parse — кейс «цель — ORGANIZER» требует
+-// валидного uuid в path (срез исключения).
+-const ORG2 = '00000000-0000-4000-8000-000000000002';
++// ADR-012: второй организатор невозможен ("Identity_single_registered_key" — один
++// живой REGISTERED на инстанс), поэтому ORG сам несёт z.uuid()-совместимый id
++// (v4-nibble): как path-param exclude-кейсов он обязан проходить контроллерный
++// z.uuid().parse.
++const ORG = '00000000-0000-4000-8000-000000000001';
+ // Не-член с валидным v4-uuid (target path-param кейсов exclude).
+ const STRANGER = '00000000-0000-4000-8000-000000000099';
+ 
+ // Тип ответа inject — через публичную сигнатуру app (fastify не является прямой
+ // зависимостью apps/server, pnpm его не резолвит из этого пакета).
+ type InjectResponse = Awaited<ReturnType<NestFastifyApplication['inject']>>;
+ 
+ function restoreEnv(key: string, value: string | undefined): void {
+   if (value === undefined) {
+     delete process.env[key];
+@@ -109,21 +109,20 @@ describe('Transport HTTP (e2e)', () => {
+   let savedDatabaseUrl: string | undefined;
+   let savedJwtSecret: string | undefined;
+ 
+   beforeAll(async () => {
+     savedDatabaseUrl = process.env.DATABASE_URL;
+     savedJwtSecret = process.env.JWT_SECRET;
+     db = await startTestDb(); // выставляет DATABASE_URL — её подхватят app'ы ниже
+     // Access-токены верифицируем тем же секретом, которым подписывают boot'нутые app'ы.
+     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    await seedIdentity(db.prisma, { id: ORG2, email: 'org2@example.test' });
+     // Посев комнат — через core-сервисы, сконструированные вручную (как в int-спеках).
+     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+@@ -411,23 +410,22 @@ describe('Transport HTTP (e2e)', () => {
+     });
+ 
+     it('цель никогда не была членом → 404 TARGET_NOT_MEMBER', async () => {
+       const room = await roomService.create(ORG);
+       const res = await exclude(app, room.id, STRANGER, await organizerToken(room.id));
+       expect(res.statusCode).toBe(404);
+       expect(res.json()).toEqual({ code: 'TARGET_NOT_MEMBER' });
+     });
+ 
+     it('цель — ORGANIZER → 409 TARGET_NOT_EXCLUDABLE', async () => {
+-      // ORG2 — v4-совместимый uuid: path-param проходит z.uuid().parse контроллера.
+-      const room = await roomService.create(ORG2);
+-      const res = await exclude(app, room.id, ORG2, await organizerToken(room.id, ORG2));
++      const room = await roomService.create(ORG);
++      const res = await exclude(app, room.id, ORG, await organizerToken(room.id));
+       expect(res.statusCode).toBe(409);
+       expect(res.json()).toEqual({ code: 'TARGET_NOT_EXCLUDABLE' });
+     });
+ 
+     it('happy path → 200 { excluded: true }; повтор → 200 { excluded: false }', async () => {
+       const { room, guestId } = await roomWithGuest();
+       const orgToken = await organizerToken(room.id);
+       const first = await exclude(app, room.id, guestId, orgToken, { reason: 'флуд' });
+       expect(first.statusCode).toBe(200);
+       expect(first.json()).toEqual({ excluded: true });
+diff --git a/packages/core/prisma/migrations/20261012202423_drop_identity_provider/migration.sql b/packages/core/prisma/migrations/20261012202423_drop_identity_provider/migration.sql
+new file mode 100644
+index 0000000..fcbcb41
+--- /dev/null
++++ b/packages/core/prisma/migrations/20261012202423_drop_identity_provider/migration.sql
+@@ -0,0 +1,10 @@
++-- ADR-012 §2: OAuth-контур удалён, provider-данные больше не существуют.
++DROP TABLE identity."IdentityProvider";
++
++-- ADR-012 §2: ровно один живой REGISTERED на инстанс. Прежний частичный индекс
++-- "Identity_registered_email_key" построен по lower(email) и при email = NULL
++-- единственность НЕ гарантирует (NULL не конфликтует) — bootstrap полагается
++-- на этот индекс (гонка двух bootstrap'ов → P2002 → re-read победителя).
++CREATE UNIQUE INDEX "Identity_single_registered_key"
++  ON identity."Identity"(kind)
++  WHERE kind = 'REGISTERED' AND "deletedAt" IS NULL;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index a1f9307..ab2482a 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -74,21 +74,20 @@ model Identity {
+   kind        IdentityKind
+   email       String?
+   displayName String?
+   deletedAt   DateTime?
+   createdAt   DateTime     @default(now())
+   updatedAt   DateTime     @updatedAt
+   rooms       Room[]
+   logEvents   LogEvent[]
+   memberships Membership[]
+   sessions    Session[]
+-  providers   IdentityProvider[]
+   exclusions  Exclusion[]  @relation("ExclusionTarget")
+   exclusionsMade Exclusion[] @relation("ExclusionActor")
+   awardsWon   Award[]
+   pointsGrants PointsGrant[]
+ 
+   @@schema("identity")
+ }
+ 
+ // Session — семейство refresh-токенов (REQ-ID-007: хранится только хэш токена,
+ // ротация связывает replacedById, отзыв — revokedAt; REQ-ID-016: expiresAt).
+@@ -99,39 +98,20 @@ model Session {
+   refreshTokenHash String    @unique
+   familyId         String    @db.Uuid
+   replacedById     String?   @db.Uuid
+   revokedAt        DateTime?
+   expiresAt        DateTime
+   createdAt        DateTime  @default(now())
+ 
+   @@schema("identity")
+ }
+ 
+-// IdentityProvider — provider-данные REGISTERED (REQ-ID-015): отдельная таблица,
+-// PII (REQ-SEC-004). 'google' — единственный провайдер MVP; enum не вводится —
+-// второй провайдер = данные, не миграция. onDelete: Restrict — удаления нет,
+-// есть анонимизация (REQ-ID-014); чистка при анонимизации REGISTERED — шов (design §10).
+-model IdentityProvider {
+-  id         String   @id @default(uuid()) @db.Uuid
+-  identityId String   @db.Uuid
+-  provider   String
+-  subject    String
+-  email      String?
+-  createdAt  DateTime @default(now())
+-  updatedAt  DateTime @updatedAt
+-  identity   Identity @relation(fields: [identityId], references: [id], onDelete: Restrict)
+-
+-  @@unique([provider, subject])
+-  @@index([identityId])
+-  @@schema("identity")
+-}
+-
+ enum EventVisibility {
+   PUBLIC         @map("public")
+   ORGANIZER      @map("organizer")
+   MODULE_PRIVATE @map("module-private")
+ 
+   @@schema("realtime")
+ }
+ 
+ // Append-only лог событий комнаты (REQ-RT-001, ADR-005). Составной PK = unique(roomId, seq).
+ // seq назначает сервер в критической секции (advisory lock, REQ-RT-007).
+diff --git a/packages/core/src/auth/token.service.int-spec.ts b/packages/core/src/auth/token.service.int-spec.ts
+index 36517e9..718d087 100644
+--- a/packages/core/src/auth/token.service.int-spec.ts
++++ b/packages/core/src/auth/token.service.int-spec.ts
+@@ -143,24 +143,26 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
+     const ok = results.filter((r) => r.status === 'fulfilled');
+     expect(ok).toHaveLength(1);
+     // Ротированная сессия помечается replacedById, НЕ revokedAt (design §4: revokedAt —
+     // только отзыв). «Живая» = ни ротирована, ни отозвана.
+     const alive = await db.prisma.session.count({ where: { revokedAt: null, replacedById: null } });
+     expect(alive).toBe(1); // семейство живо, победитель может продолжать
+     const winner = (ok[0] as PromiseFulfilledResult<{ refreshToken: string }>).value;
+     await expect(tokens.rotate(winner.refreshToken)).resolves.toBeDefined();
+   });
+ 
+-  // REGISTERED-ветка (OAuth-срез, REQ-ID-015/016): ротация без комнаты и без guest-cap;
++  // REGISTERED-ветка (REQ-ID-016): ротация без комнаты и без guest-cap;
+   // reuse-detection (REQ-ID-007) работает и для зарегистрированных сессий.
+   it('rotates a REGISTERED session: no guest cap, no roomId; reuse revokes family (REQ-ID-007/016)', async () => {
+-    const identity = await seedIdentity(db.prisma, { kind: 'REGISTERED' });
++    // ADR-012: второй живой REGISTERED невозможен ("Identity_single_registered_key")
++    // — используем уже посеянного ORG.
++    const identity = { id: ORG };
+     const first = await tokens.issueRegisteredTokens(identity.id);
+     expect(first.kind).toBe('REGISTERED');
+ 
+     const second = await tokens.rotate(first.refreshToken);
+     expect(second.kind).toBe('REGISTERED');
+     const claims = tokens.verifyAccessToken(second.accessToken);
+     expect(claims.kind).toBe('REGISTERED');
+     expect(claims.roomId).toBeUndefined();
+ 
+     // Гостевой cap не наследуется: expiresAt > now + GUEST_TTL.
+diff --git a/packages/core/src/identity/guest-sweep.int-spec.ts b/packages/core/src/identity/guest-sweep.int-spec.ts
+index c83e88a..8ecd2c4 100644
+--- a/packages/core/src/identity/guest-sweep.int-spec.ts
++++ b/packages/core/src/identity/guest-sweep.int-spec.ts
+@@ -41,22 +41,25 @@ import { IdentityModule } from './identity.module';
+     {
+       provide: ANONYMIZATION_GUARDS,
+       useFactory: (guard: RewardsAnonymizationGuard): AnonymizationGuard[] => [guard],
+       inject: [RewardsAnonymizationGuard],
+     },
+   ],
+   exports: [ANONYMIZATION_GUARDS],
+ })
+ class TestAnonymizationWiringModule {}
+ 
++// ADR-012: identity."Identity" тоже транкейтится — иначе REGISTERED-сиды тестов
++// накапливались бы и упирались в "Identity_single_registered_key" (один живой
++// REGISTERED на инстанс). Каждый тест сеет свои identity-строки сам.
+ const TRUNCATE =
+-  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE';
++  'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE';
+ 
+ describe('GuestSweepService (int, REQ-ID-003/014)', () => {
+   let db: TestDb;
+   let sweep: GuestSweepService;
+   let tokens: TokenService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     const moduleRef = await Test.createTestingModule({
+       // RewardsModule сознательно НЕ подключён: гардов нет, приостанавливать некому
+diff --git a/packages/core/src/identity/identity-provider-schema.int-spec.ts b/packages/core/src/identity/identity-provider-schema.int-spec.ts
+deleted file mode 100644
+index 950e931..0000000
+--- a/packages/core/src/identity/identity-provider-schema.int-spec.ts
++++ /dev/null
+@@ -1,30 +0,0 @@
+-import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+-
+-describe('identity."IdentityProvider" schema (REQ-ID-015, REQ-DEV-006 автотест наличия)', () => {
+-  let db: TestDb;
+-  beforeAll(async () => { db = await startTestDb(); }, 120000);
+-  afterAll(async () => { await db.stop(); });
+-
+-  it('exists with unique(provider, subject), index(identityId), FK Restrict', async () => {
+-    const tables = await db.prisma.$queryRaw<{ tablename: string }[]>`
+-      SELECT tablename FROM pg_tables WHERE schemaname = 'identity' AND tablename = 'IdentityProvider'
+-    `;
+-    expect(tables).toHaveLength(1);
+-
+-    const indexes = await db.prisma.$queryRaw<{ indexname: string; indexdef: string }[]>`
+-      SELECT indexname, indexdef FROM pg_indexes
+-      WHERE schemaname = 'identity' AND tablename = 'IdentityProvider'
+-    `;
+-    const unique = indexes.find((i) => i.indexname === 'IdentityProvider_provider_subject_key');
+-    expect(unique?.indexdef).toMatch(/^CREATE UNIQUE INDEX/);
+-    expect(indexes.some((i) => i.indexname === 'IdentityProvider_identityId_idx')).toBe(true);
+-
+-    const fks = await db.prisma.$queryRaw<{ pg_get_constraintdef: string }[]>`
+-      SELECT pg_get_constraintdef(oid) FROM pg_constraint
+-      WHERE conrelid = 'identity."IdentityProvider"'::regclass AND contype = 'f'
+-    `;
+-    expect(fks).toHaveLength(1);
+-    expect(fks[0].pg_get_constraintdef).toContain('REFERENCES identity."Identity"(id)');
+-    expect(fks[0].pg_get_constraintdef).toContain('ON DELETE RESTRICT');
+-  });
+-});
+diff --git a/packages/core/src/identity/identity-provisioning.int-spec.ts b/packages/core/src/identity/identity-provisioning.int-spec.ts
+deleted file mode 100644
+index 585d24d..0000000
+--- a/packages/core/src/identity/identity-provisioning.int-spec.ts
++++ /dev/null
+@@ -1,146 +0,0 @@
+-import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+-import { seedIdentity } from '../testing/seed-identity';
+-import { IDENTITY_ERROR_CODES, IdentityError } from './identity.errors';
+-import { IdentityService } from './identity.service';
+-
+-// REQ-ID-015: provisioning REGISTERED-identity по (provider, subject) — вход OAuth-логина.
+-// Email-политика (решение владельца, design §0.3): email пишется один раз при создании,
+-// автолинка по email НЕТ, конфликт с живым REGISTERED → EMAIL_CONFLICT.
+-describe('IdentityService.findOrCreateByProvider (REQ-ID-015)', () => {
+-  let db: TestDb;
+-  let service: IdentityService;
+-
+-  beforeAll(async () => {
+-    db = await startTestDb();
+-    service = new IdentityService(db.prisma);
+-  }, 120000);
+-
+-  afterAll(async () => {
+-    await db.stop();
+-  });
+-
+-  afterEach(async () => {
+-    // CASCADE снимает и identity."IdentityProvider" (FK на Identity).
+-    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity" CASCADE');
+-  });
+-
+-  it('creates a REGISTERED identity and its provider row', async () => {
+-    const identity = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-1',
+-      email: 'a@b.c',
+-      displayName: 'Alex',
+-    });
+-
+-    expect(identity.kind).toBe('REGISTERED');
+-    expect(identity.email).toBe('a@b.c');
+-    expect(identity.displayName).toBe('Alex');
+-    expect(identity.deletedAt).toBeNull();
+-
+-    const providerRow = await db.prisma.identityProvider.findUnique({
+-      where: { provider_subject: { provider: 'google', subject: 'sub-1' } },
+-    });
+-    expect(providerRow).not.toBeNull();
+-    expect(providerRow?.email).toBe('a@b.c');
+-    expect(providerRow?.identityId).toBe(identity.id);
+-  });
+-
+-  it('returns the same identity on repeat login and does NOT overwrite email', async () => {
+-    const first = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-2',
+-      email: 'old@b.c',
+-      displayName: 'Alex',
+-    });
+-    const second = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-2',
+-      email: 'new@b.c',
+-      displayName: 'Other',
+-    });
+-
+-    expect(second.id).toBe(first.id);
+-    expect(second.email).toBe('old@b.c');
+-    const inDb = await db.prisma.identity.findUnique({ where: { id: first.id } });
+-    expect(inDb?.email).toBe('old@b.c');
+-  });
+-
+-  it('rejects EMAIL_CONFLICT when a live REGISTERED identity owns the email (case-insensitive)', async () => {
+-    await seedIdentity(db.prisma, { kind: 'REGISTERED', email: 'Taken@b.c' });
+-
+-    const err = await service
+-      .findOrCreateByProvider({ provider: 'google', subject: 'sub-3', email: 'taken@b.c' })
+-      .then(
+-        () => {
+-          throw new Error('expected EMAIL_CONFLICT');
+-        },
+-        (e: unknown) => e,
+-      );
+-    expect(err).toBeInstanceOf(IdentityError);
+-    expect((err as IdentityError).code).toBe(IDENTITY_ERROR_CODES.EMAIL_CONFLICT);
+-  });
+-
+-  it('allows a REGISTERED signup with an email held by a GUEST identity', async () => {
+-    await seedIdentity(db.prisma, { kind: 'GUEST', email: 'g@b.c' });
+-
+-    const identity = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-4',
+-      email: 'g@b.c',
+-    });
+-    expect(identity.kind).toBe('REGISTERED');
+-    expect(identity.email).toBe('g@b.c');
+-  });
+-
+-  it('resolves a race of two first logins to one identity and one provider row', async () => {
+-    const input = { provider: 'google', subject: 'sub-5', email: 'race@b.c' };
+-    const results = await Promise.allSettled([
+-      service.findOrCreateByProvider(input),
+-      service.findOrCreateByProvider(input),
+-    ]);
+-
+-    expect(results[0].status).toBe('fulfilled');
+-    expect(results[1].status).toBe('fulfilled');
+-    const [a, b] = results as PromiseFulfilledResult<{ id: string }>[];
+-    expect(a.value.id).toBe(b.value.id);
+-
+-    const identities = await db.prisma.identity.findMany();
+-    expect(identities).toHaveLength(1);
+-    const providerRows = await db.prisma.identityProvider.findMany();
+-    expect(providerRows).toHaveLength(1);
+-    expect(providerRows[0].identityId).toBe(a.value.id);
+-  });
+-
+-  it('falls back to displayName null when the name violates the SDK schema', async () => {
+-    const identity = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-6',
+-      email: 'name@b.c',
+-      displayName: 'x'.repeat(41),
+-    });
+-    expect(identity.displayName).toBeNull();
+-  });
+-
+-  it('fails closed with PROVIDER_IDENTITY_GONE when the linked identity is soft-deleted', async () => {
+-    const created = await service.findOrCreateByProvider({
+-      provider: 'google',
+-      subject: 'sub-7',
+-      email: 'gone@b.c',
+-    });
+-    await db.prisma.identity.update({
+-      where: { id: created.id },
+-      data: { deletedAt: new Date() },
+-    });
+-
+-    const err = await service
+-      .findOrCreateByProvider({ provider: 'google', subject: 'sub-7', email: 'gone@b.c' })
+-      .then(
+-        () => {
+-          throw new Error('expected PROVIDER_IDENTITY_GONE');
+-        },
+-        (e: unknown) => e,
+-      );
+-    expect(err).toBeInstanceOf(IdentityError);
+-    expect((err as IdentityError).code).toBe(IDENTITY_ERROR_CODES.PROVIDER_IDENTITY_GONE);
+-  });
+-});
+diff --git a/packages/core/src/identity/identity-schema.int-spec.ts b/packages/core/src/identity/identity-schema.int-spec.ts
+index b3212ff..245a360 100644
+--- a/packages/core/src/identity/identity-schema.int-spec.ts
++++ b/packages/core/src/identity/identity-schema.int-spec.ts
+@@ -60,16 +60,20 @@ describe('Identity registered-email partial unique index', () => {
+   });
+ 
+   it('allows re-registering an email whose previous REGISTERED row is anonymized', async () => {
+     await db.prisma.identity.create({
+       data: { kind: 'REGISTERED', email: 'a@b.c', deletedAt: new Date() },
+     });
+     await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
+     expect(await db.prisma.identity.count()).toBe(2);
+   });
+ 
+-  it('allows many rows with NULL email', async () => {
++  it('rejects a second live REGISTERED row even with NULL email (ADR-012)', async () => {
++    // ADR-012: partial index "Identity_single_registered_key" — ровно один живой
++    // REGISTERED на инстанс; email-индекс больше не единственный страж (NULL не
++    // спасает: предикат kind-only).
+     await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
+-    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
+-    expect(await db.prisma.identity.count()).toBe(2);
++    await expect(
++      db.prisma.identity.create({ data: { kind: 'REGISTERED' } }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
+   });
+ });
+diff --git a/packages/core/src/identity/identity.errors.ts b/packages/core/src/identity/identity.errors.ts
+deleted file mode 100644
+index e222f34..0000000
+--- a/packages/core/src/identity/identity.errors.ts
++++ /dev/null
+@@ -1,17 +0,0 @@
+-// Core-internal ошибки identity-потоков (REQ-ID-015 provisioning). Wire-маппинг —
+-// через вызывающий сервис (OAuthService, design §4/§7), а не напрямую в фильтр.
+-export const IDENTITY_ERROR_CODES = {
+-  EMAIL_CONFLICT: 'EMAIL_CONFLICT',
+-  PROVIDER_IDENTITY_GONE: 'PROVIDER_IDENTITY_GONE',
+-} as const;
+-export type IdentityErrorCode = (typeof IDENTITY_ERROR_CODES)[keyof typeof IDENTITY_ERROR_CODES];
+-
+-export class IdentityError extends Error {
+-  constructor(
+-    readonly code: IdentityErrorCode,
+-    message: string,
+-  ) {
+-    super(message);
+-    this.name = new.target.name;
+-  }
+-}
+diff --git a/packages/core/src/identity/identity.service.ts b/packages/core/src/identity/identity.service.ts
+index 0ebe1f1..0b3f100 100644
+--- a/packages/core/src/identity/identity.service.ts
++++ b/packages/core/src/identity/identity.service.ts
+@@ -1,90 +1,26 @@
+ import { Injectable } from '@nestjs/common';
+ import { Prisma, type Identity } from '@prisma/client';
+ import { displayNameSchema } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+-import { IDENTITY_ERROR_CODES, IdentityError } from './identity.errors';
+ 
++// Инвариант «change both or neither» (двух мест): предикат
++// kind='REGISTERED' AND deletedAt IS NULL — partial index "Identity_single_registered_key"
++// и guarded create в findOrCreateOrganizer (T5). Менять только вместе.
+ @Injectable()
+ export class IdentityService {
+   constructor(private readonly prisma: PrismaService) {}
+ 
+   // REQ-ID-003: a guest is created by room code + name. This is the first
+   // identity-writing flow — the identity seam deferred this service to exactly here
+   // (design §6 of the identity slice). displayName is validated by the SDK contract
+   // schema; a ZodError propagates untyped — mapping it is the first transport's job
+   // (REQ-SEC-006). `tx` lets callers join their transaction (guest join is atomic,
+   // membership design §3).
+   async createGuest(
+     displayName: string,
+     tx: Prisma.TransactionClient = this.prisma,
+   ): Promise<Identity> {
+     const name = displayNameSchema.parse(displayName);
+     return tx.identity.create({ data: { kind: 'GUEST', displayName: name } });
+   }
+-
+-  // REQ-ID-015: логин/регистрация по (provider, subject). Self-contained транзакция:
+-  // retry при гонке несовместим с чужой (поэтому без tx-параметра, в отличие от createGuest).
+-  // Email-политика (решение владельца, design §0.3): email пишется один раз при создании,
+-  // автолинка по email НЕТ — конфликт с живым REGISTERED → EMAIL_CONFLICT.
+-  //
+-  // Инвариант «change both or neither» (теперь трёх мест): предикат
+-  // kind='REGISTERED' AND deletedAt IS NULL — partial index "Identity_registered_email_key",
+-  // guarded INSERT RoomService.create и проверка конфликта ниже. Менять только вместе.
+-  async findOrCreateByProvider(input: {
+-    provider: string;
+-    subject: string;
+-    email: string;
+-    displayName?: string | undefined;
+-  }): Promise<Identity> {
+-    const where = { provider_subject: { provider: input.provider, subject: input.subject } };
+-    const existing = await this.prisma.identityProvider.findUnique({
+-      where,
+-      include: { identity: true },
+-    });
+-    if (existing) {
+-      if (existing.identity.deletedAt !== null) {
+-        throw new IdentityError(
+-          IDENTITY_ERROR_CODES.PROVIDER_IDENTITY_GONE,
+-          `identity ${existing.identityId} deleted`,
+-        );
+-      }
+-      return existing.identity;
+-    }
+-    const conflict = await this.prisma.identity.findFirst({
+-      where: { kind: 'REGISTERED', deletedAt: null, email: { equals: input.email, mode: 'insensitive' } },
+-    });
+-    if (conflict) {
+-      // Гонка первого логина, вторая форма: близнец закоммитился между нашим первым
+-      // findUnique и этой проверкой — тогда конфликтующая identity наша собственная,
+-      // и это повторный логин, а не чужой email (design §4). Read committed гарантирует:
+-      // раз identity победителя видна, его provider-строка тоже закоммичена.
+-      const twin = await this.prisma.identityProvider.findUnique({ where, include: { identity: true } });
+-      if (twin && twin.identity.deletedAt === null) return twin.identity;
+-      throw new IdentityError(
+-        IDENTITY_ERROR_CODES.EMAIL_CONFLICT,
+-        `email taken by identity ${conflict.id}`,
+-      );
+-    }
+-    const parsedName = input.displayName === undefined ? null : displayNameSchema.safeParse(input.displayName);
+-    const displayName = parsedName === null ? null : parsedName.success ? parsedName.data : null;
+-    try {
+-      return await this.prisma.$transaction(async (tx) => {
+-        const identity = await tx.identity.create({
+-          data: { kind: 'REGISTERED', email: input.email, displayName },
+-        });
+-        await tx.identityProvider.create({
+-          data: { provider: input.provider, subject: input.subject, email: input.email, identityId: identity.id },
+-        });
+-        return identity;
+-      });
+-    } catch (err) {
+-      // Гонка двух первых логинов одного аккаунта: проигравший ловит P2002 по
+-      // (provider, subject) и превращается в повторный логин (design §4).
+-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+-        const winner = await this.prisma.identityProvider.findUnique({ where, include: { identity: true } });
+-        if (winner) return winner.identity;
+-      }
+-      throw err;
+-    }
+-  }
+ }
+diff --git a/packages/core/src/identity/organizer-schema.int-spec.ts b/packages/core/src/identity/organizer-schema.int-spec.ts
+new file mode 100644
+index 0000000..c6d650b
+--- /dev/null
++++ b/packages/core/src/identity/organizer-schema.int-spec.ts
+@@ -0,0 +1,26 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++// ADR-012: таблица IdentityProvider удалена; единственность организатора —
++// частичный индекс Identity_single_registered_key (REQ-DEV-006: автотест наличия).
++describe('identity schema after drop_identity_provider (ADR-012)', () => {
++  let db: TestDb;
++  beforeAll(async () => { db = await startTestDb(); }, 120000);
++  afterAll(async () => { await db.stop(); });
++
++  it('drops identity."IdentityProvider"', async () => {
++    const rows = await db.prisma.$queryRaw<{ name: string }[]>`
++      SELECT table_name AS name FROM information_schema.tables
++      WHERE table_schema = 'identity' AND table_name = 'IdentityProvider'`;
++    expect(rows).toEqual([]);
++  });
++
++  it('has Identity_single_registered_key partial unique index', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'identity' AND tablename = 'Identity' AND indexname = 'Identity_single_registered_key'`;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toContain('UNIQUE');
++    expect(rows[0].indexdef).toContain('REGISTERED');
++    expect(rows[0].indexdef).toContain('deletedAt');
++  });
++});
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 8acccc7..41278a2 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -47,25 +47,20 @@ export * from './realtime/error-mapping';
+ export * from './realtime/io-adapter';
+ export * from './realtime/realtime.gateway';
+ export * from './rewards/rewards.errors';
+ export * from './rewards/rewards.service';
+ export * from './rewards/rewards-anonymization.guard';
+ export * from './rewards/rewards.module';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
+-export * from './oauth/oauth.constants';
+-export * from './oauth/oauth.errors';
+-export { OAUTH_PROVIDER_CLIENT } from './oauth/oauth-provider.client';
+-export type { OAuthProviderClient, ProviderProfile } from './oauth/oauth-provider.client';
+-export * from './oauth/oauth.module';
+ export * from './transport/transport.module';
+ export * from './transport/http-exception.filter';
+ export * from './transport/auth.tokens';
+ export * from './observability/metrics.module';
+ export * from './observability/metrics.service';
+ export * from './observability/observability.module';
+ // Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+ // строятся на том же testcontainer-посеве, что и core int-спеки.
+ export * from './testing/postgres.testcontainer';
+ export * from './testing/seed-identity';
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index af1695f..4b87621 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -36,21 +36,23 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+       fakeLogger,
+     );
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+-    await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
++    // ADR-012: второй живой REGISTERED в одной БД запрещён ("Identity_single_registered_key")
++    // — участник P1 посеян гостем; тесты ниже kind-агностичны (raw membership + lookup).
++    await seedIdentity(db.prisma, { id: P1, kind: 'GUEST', email: 'p1@example.test' });
+     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+@@ -420,35 +422,24 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
+     expect(membership?.deletedAt).not.toBeNull();
+     const exclusion = await db2.prisma.exclusion.findUnique({
+       where: { roomId_identityId: { roomId: room.id, identityId: guest.identity.id } },
+     });
+     expect(exclusion).toMatchObject({ ip: IP, excludedBy: ORG, reason: 'флуд' });
+     const sessions = await db2.prisma.session.findMany({ where: { identityId: guest.identity.id } });
+     expect(sessions).toHaveLength(1);
+     expect(sessions[0].revokedAt).not.toBeNull();
+   });
+ 
+-  it('REGISTERED-цель сохраняет сессии (дизайн §0.2)', async () => {
+-    const room = await roomService2.create(ORG);
+-    const registered = await seedIdentity(db2.prisma, { kind: 'REGISTERED', email: 'reg@example.test' });
+-    await db2.prisma.membership.create({
+-      data: { roomId: room.id, identityId: registered.id, role: 'PARTICIPANT', joinIp: IP },
+-    });
+-    const tokens = new TokenService(db2.prisma, TEST_CONFIG);
+-    await tokens.issueGuestTokens(registered.id, room.id); // session row kind-агностичен
+-
+-    await makeMembership2().exclude({ roomId: room.id, targetIdentityId: registered.id, actorId: ORG });
+-
+-    const sessions = await db2.prisma.session.findMany({ where: { identityId: registered.id } });
+-    expect(sessions[0].revokedAt).toBeNull();
+-  });
+-
++  // ADR-012: сценарий «REGISTERED-цель сохраняет сессии» (дизайн §0.2) удалён —
++  // второй живой REGISTERED непредставим ("Identity_single_registered_key":
++  // единственный REGISTERED — организатор, а он неисключаем). Ветка
++  // kind !== 'GUEST' в MembershipService.exclude сохранена до возврата аккаунтов.
+   it('актор-не-член → ActorNotMemberError', async () => {
+     const { room, guest } = await roomWithGuest();
+     await expect(
+       makeMembership2().exclude({ roomId: room.id, targetIdentityId: guest.identity.id, actorId: P1 }),
+     ).rejects.toBeInstanceOf(ActorNotMemberError);
+   });
+ 
+   it('актор-участник (не ORGANIZER) → ActorNotOrganizerError (матрица REQ-ID-011)', async () => {
+     const { room, guest } = await roomWithGuest();
+     await expect(
+diff --git a/packages/core/src/oauth/google-oauth.client.spec.ts b/packages/core/src/oauth/google-oauth.client.spec.ts
+deleted file mode 100644
+index 8901806..0000000
+--- a/packages/core/src/oauth/google-oauth.client.spec.ts
++++ /dev/null
+@@ -1,80 +0,0 @@
+-import type { AppConfig } from '../config/config.schema';
+-import { TEST_CONFIG } from '../testing/test-config';
+-import { GoogleOAuthClient } from './google-oauth.client';
+-import { OAuthError, OAUTH_ERROR_CODES } from './oauth.errors';
+-
+-const OAUTH_CONFIG: AppConfig = {
+-  ...TEST_CONFIG,
+-  GOOGLE_CLIENT_ID: 'test-client-id',
+-  GOOGLE_CLIENT_SECRET: 'test-client-secret',
+-  OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+-  OAUTH_REDIRECT_ALLOWLIST: ['http://localhost:3000/app'],
+-};
+-
+-const jsonResponse = (body: unknown, status = 200): Response =>
+-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+-
+-describe('GoogleOAuthClient (REQ-ID-015)', () => {
+-  afterEach(() => {
+-    jest.restoreAllMocks();
+-  });
+-
+-  it('exchanges the code at the token endpoint, then fetches userinfo with the bearer token', async () => {
+-    const fetchMock = jest
+-      .spyOn(globalThis, 'fetch')
+-      .mockResolvedValueOnce(jsonResponse({ access_token: 'at' }))
+-      .mockResolvedValueOnce(
+-        jsonResponse({ sub: 'sub-1', email: 'alex@example.com', email_verified: true, name: 'Alex' }),
+-      );
+-    const client = new GoogleOAuthClient(OAUTH_CONFIG);
+-
+-    const profile = await client.exchangeCode('c', 'v');
+-
+-    expect(fetchMock).toHaveBeenCalledTimes(2);
+-    const [tokenUrl, tokenInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+-    expect(tokenUrl).toBe('https://oauth2.googleapis.com/token');
+-    expect(tokenInit.method).toBe('POST');
+-    const body = tokenInit.body as URLSearchParams;
+-    expect(body.get('code')).toBe('c');
+-    expect(body.get('code_verifier')).toBe('v');
+-    expect(body.get('client_id')).toBe('test-client-id');
+-    expect(body.get('client_secret')).toBe('test-client-secret');
+-    expect(body.get('redirect_uri')).toBe('http://localhost:3000/auth/google/callback');
+-    expect(body.get('grant_type')).toBe('authorization_code');
+-
+-    const [infoUrl, infoInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+-    expect(infoUrl).toBe('https://openidconnect.googleapis.com/v1/userinfo');
+-    expect((infoInit.headers as Record<string, string>).authorization).toBe('Bearer at');
+-
+-    expect(profile).toEqual({ subject: 'sub-1', email: 'alex@example.com', emailVerified: true, displayName: 'Alex' });
+-  });
+-
+-  it('throws when the token endpoint responds not-ok', async () => {
+-    jest.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ error: 'invalid_grant' }, 400));
+-    const client = new GoogleOAuthClient(OAUTH_CONFIG);
+-    await expect(client.exchangeCode('c', 'v')).rejects.toThrow('google token endpoint: 400');
+-  });
+-
+-  it('defaults a missing email_verified claim to false (fail-closed)', async () => {
+-    jest
+-      .spyOn(globalThis, 'fetch')
+-      .mockResolvedValueOnce(jsonResponse({ access_token: 'at' }))
+-      .mockResolvedValueOnce(jsonResponse({ sub: 'sub-1', email: 'alex@example.com', name: 'Alex' }));
+-    const client = new GoogleOAuthClient(OAUTH_CONFIG);
+-
+-    const profile = await client.exchangeCode('c', 'v');
+-    expect(profile.emailVerified).toBe(false);
+-  });
+-
+-  it('throws OAUTH_NOT_CONFIGURED without the Google section', async () => {
+-    const client = new GoogleOAuthClient(TEST_CONFIG);
+-    let caught: unknown;
+-    try {
+-      await client.exchangeCode('c', 'v');
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    expect((caught as OAuthError).code).toBe(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED);
+-  });
+-});
+diff --git a/packages/core/src/oauth/google-oauth.client.ts b/packages/core/src/oauth/google-oauth.client.ts
+deleted file mode 100644
+index e49ed5c..0000000
+--- a/packages/core/src/oauth/google-oauth.client.ts
++++ /dev/null
+@@ -1,50 +0,0 @@
+-import { Inject, Injectable } from '@nestjs/common';
+-import { z } from 'zod';
+-import { APP_CONFIG } from '../config/config.tokens';
+-import type { AppConfig } from '../config/config.schema';
+-import { OAUTH_ERROR_CODES, OAuthError } from './oauth.errors';
+-import type { OAuthProviderClient, ProviderProfile } from './oauth-provider.client';
+-
+-// Единственный файл с сетевым кодом Google (design §2). Сырые ответы — loose-схемы:
+-// лишние поля Google нам безразличны, обязательные — fail-closed.
+-const googleTokenResponseSchema = z.looseObject({ access_token: z.string().min(1) });
+-const googleUserinfoSchema = z.looseObject({
+-  sub: z.string().min(1),
+-  email: z.email(),
+-  email_verified: z.boolean().default(false), // default — fail-closed к «не verified»
+-  name: z.string().optional(),
+-});
+-
+-@Injectable()
+-export class GoogleOAuthClient implements OAuthProviderClient {
+-  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+-
+-  async exchangeCode(code: string, pkceVerifier: string): Promise<ProviderProfile> {
+-    const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI } = this.config;
+-    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !OAUTH_REDIRECT_URI) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'google oauth not configured');
+-    }
+-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+-      method: 'POST',
+-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+-      body: new URLSearchParams({
+-        code,
+-        client_id: GOOGLE_CLIENT_ID,
+-        client_secret: GOOGLE_CLIENT_SECRET,
+-        redirect_uri: OAUTH_REDIRECT_URI,
+-        grant_type: 'authorization_code',
+-        code_verifier: pkceVerifier,
+-      }),
+-      signal: AbortSignal.timeout(10_000),
+-    });
+-    if (!tokenRes.ok) throw new Error(`google token endpoint: ${tokenRes.status}`);
+-    const tokenBody = googleTokenResponseSchema.parse(await tokenRes.json());
+-    const infoRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+-      headers: { authorization: `Bearer ${tokenBody.access_token}` },
+-      signal: AbortSignal.timeout(10_000),
+-    });
+-    if (!infoRes.ok) throw new Error(`google userinfo: ${infoRes.status}`);
+-    const info = googleUserinfoSchema.parse(await infoRes.json());
+-    return { subject: info.sub, email: info.email, emailVerified: info.email_verified, displayName: info.name };
+-  }
+-}
+diff --git a/packages/core/src/oauth/oauth-provider.client.ts b/packages/core/src/oauth/oauth-provider.client.ts
+deleted file mode 100644
+index 9f7f021..0000000
+--- a/packages/core/src/oauth/oauth-provider.client.ts
++++ /dev/null
+@@ -1,14 +0,0 @@
+-// Порт OAuth-провайдера (design §2): второй провайдер = новая реализация + данные,
+-// без изменений схемы/контракта. DI-токен — прецедент REFRESH_RATE_LIMITER.
+-export interface ProviderProfile {
+-  subject: string;
+-  email: string;
+-  emailVerified: boolean;
+-  displayName?: string | undefined;
+-}
+-
+-export interface OAuthProviderClient {
+-  exchangeCode(code: string, pkceVerifier: string): Promise<ProviderProfile>;
+-}
+-
+-export const OAUTH_PROVIDER_CLIENT = Symbol('OAUTH_PROVIDER_CLIENT');
+diff --git a/packages/core/src/oauth/oauth.constants.ts b/packages/core/src/oauth/oauth.constants.ts
+deleted file mode 100644
+index 51783eb..0000000
+--- a/packages/core/src/oauth/oauth.constants.ts
++++ /dev/null
+@@ -1,6 +0,0 @@
+-// Имена httpOnly-кук OAuth-флоу (REQ-ID-009, design §3). State/PKCE/redirect живут
+-// только в куках — никаких in-memory nonce-реестров (REQ-CORE-004). Атрибуты
+-// (httpOnly/secure/sameSite/maxAge) выставляет transport-слой (Task 7).
+-export const OAUTH_STATE_COOKIE = 'mm_oauth_state';
+-export const OAUTH_PKCE_COOKIE = 'mm_oauth_pkce';
+-export const OAUTH_REDIRECT_COOKIE = 'mm_oauth_redirect';
+diff --git a/packages/core/src/oauth/oauth.errors.ts b/packages/core/src/oauth/oauth.errors.ts
+deleted file mode 100644
+index 5f7a8b8..0000000
+--- a/packages/core/src/oauth/oauth.errors.ts
++++ /dev/null
+@@ -1,22 +0,0 @@
+-// Core-internal ошибки OAuth-флоу (REQ-ID-015/009). Коды совпадают с wire-кодами
+-// SDK (@mymozhem/sdk error-codes); маппинг в HTTP — дело exception-фильтра (Task 7).
+-export const OAUTH_ERROR_CODES = {
+-  OAUTH_NOT_CONFIGURED: 'OAUTH_NOT_CONFIGURED',
+-  OAUTH_REDIRECT_INVALID: 'OAUTH_REDIRECT_INVALID',
+-  OAUTH_STATE_INVALID: 'OAUTH_STATE_INVALID',
+-  OAUTH_ACCESS_DENIED: 'OAUTH_ACCESS_DENIED',
+-  OAUTH_EXCHANGE_FAILED: 'OAUTH_EXCHANGE_FAILED',
+-  OAUTH_EMAIL_UNVERIFIED: 'OAUTH_EMAIL_UNVERIFIED',
+-  OAUTH_EMAIL_CONFLICT: 'OAUTH_EMAIL_CONFLICT',
+-} as const;
+-export type OAuthErrorCode = (typeof OAUTH_ERROR_CODES)[keyof typeof OAUTH_ERROR_CODES];
+-
+-export class OAuthError extends Error {
+-  constructor(
+-    readonly code: OAuthErrorCode,
+-    message: string,
+-  ) {
+-    super(message);
+-    this.name = new.target.name;
+-  }
+-}
+diff --git a/packages/core/src/oauth/oauth.module.ts b/packages/core/src/oauth/oauth.module.ts
+deleted file mode 100644
+index 1d273ca..0000000
+--- a/packages/core/src/oauth/oauth.module.ts
++++ /dev/null
+@@ -1,19 +0,0 @@
+-import { Module } from '@nestjs/common';
+-import { ConfigModule } from '../config/config.module';
+-import { IdentityModule } from '../identity/identity.module';
+-import { AuthModule } from '../auth/auth.module';
+-import { OAuthService } from './oauth.service';
+-import { GoogleOAuthClient } from './google-oauth.client';
+-import { OAUTH_PROVIDER_CLIENT } from './oauth-provider.client';
+-
+-@Module({
+-  imports: [ConfigModule, IdentityModule, AuthModule],
+-  providers: [
+-    OAuthService,
+-    GoogleOAuthClient,
+-    // Порт → Google-реализация; в e2e подменяется override'ом токена (design §9).
+-    { provide: OAUTH_PROVIDER_CLIENT, useExisting: GoogleOAuthClient },
+-  ],
+-  exports: [OAuthService, OAUTH_PROVIDER_CLIENT],
+-})
+-export class OAuthModule {}
+diff --git a/packages/core/src/oauth/oauth.service.spec.ts b/packages/core/src/oauth/oauth.service.spec.ts
+deleted file mode 100644
+index aa49f4a..0000000
+--- a/packages/core/src/oauth/oauth.service.spec.ts
++++ /dev/null
+@@ -1,255 +0,0 @@
+-import { createHash } from 'node:crypto';
+-import { z } from 'zod';
+-import type { AppConfig } from '../config/config.schema';
+-import { TEST_CONFIG } from '../testing/test-config';
+-import { IdentityError, IDENTITY_ERROR_CODES } from '../identity/identity.errors';
+-import { OAuthService } from './oauth.service';
+-import { OAuthError, OAUTH_ERROR_CODES } from './oauth.errors';
+-import { OAUTH_PKCE_COOKIE, OAUTH_REDIRECT_COOKIE, OAUTH_STATE_COOKIE } from './oauth.constants';
+-
+-const OAUTH_CONFIG: AppConfig = {
+-  ...TEST_CONFIG,
+-  GOOGLE_CLIENT_ID: 'test-client-id',
+-  GOOGLE_CLIENT_SECRET: 'test-client-secret',
+-  OAUTH_REDIRECT_URI: 'http://localhost:3000/auth/google/callback',
+-  OAUTH_REDIRECT_ALLOWLIST: ['http://localhost:3000/app', 'http://localhost:3000/other'],
+-};
+-
+-const makeService = (config: AppConfig = OAUTH_CONFIG) => {
+-  const providerFake = { exchangeCode: jest.fn() };
+-  const identityFake = { findOrCreateByProvider: jest.fn() };
+-  const tokensFake = {
+-    issueRegisteredTokens: jest
+-      .fn()
+-      .mockResolvedValue({ accessToken: 'a', expiresIn: 900, refreshToken: 'r', kind: 'REGISTERED' }),
+-  };
+-  const service = new OAuthService(identityFake as never, tokensFake as never, providerFake as never, config);
+-  return { service, providerFake, identityFake, tokensFake };
+-};
+-
+-const cookieValue = (cookies: { name: string; value: string }[], name: string): string => {
+-  const found = cookies.find((c) => c.name === name);
+-  expect(found).toBeDefined();
+-  return found!.value;
+-};
+-
+-describe('OAuthService.start (REQ-ID-015/009)', () => {
+-  it('builds the Google authorize URL with state double-submit and PKCE S256 cookies', () => {
+-    const { service } = makeService();
+-    const { authorizeUrl, cookies } = service.start('http://localhost:3000/app');
+-
+-    const url = new URL(authorizeUrl);
+-    expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+-    expect(url.searchParams.get('client_id')).toBe('test-client-id');
+-    expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:3000/auth/google/callback');
+-    expect(url.searchParams.get('response_type')).toBe('code');
+-    expect(url.searchParams.get('scope')).toBe('openid email profile');
+-    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+-
+-    const stateCookie = cookieValue(cookies, OAUTH_STATE_COOKIE);
+-    expect(url.searchParams.get('state')).toBe(stateCookie);
+-
+-    const verifier = cookieValue(cookies, OAUTH_PKCE_COOKIE);
+-    const expectedChallenge = createHash('sha256').update(verifier).digest('base64url');
+-    expect(url.searchParams.get('code_challenge')).toBe(expectedChallenge);
+-
+-    expect(cookieValue(cookies, OAUTH_REDIRECT_COOKIE)).toBe('http://localhost:3000/app');
+-  });
+-
+-  it('falls back to the first allowlist entry when redirect is absent', () => {
+-    const { service } = makeService();
+-    const { cookies } = service.start();
+-    expect(cookieValue(cookies, OAUTH_REDIRECT_COOKIE)).toBe('http://localhost:3000/app');
+-  });
+-
+-  it('rejects a redirect outside the allowlist', () => {
+-    const { service } = makeService();
+-    let caught: unknown;
+-    try {
+-      service.start('https://evil.example.com/steal');
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    expect((caught as OAuthError).code).toBe(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID);
+-  });
+-
+-  it('throws OAUTH_NOT_CONFIGURED without the Google section (TEST_CONFIG as-is)', () => {
+-    const { service } = makeService(TEST_CONFIG);
+-    let caught: unknown;
+-    try {
+-      service.start();
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    expect((caught as OAuthError).code).toBe(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED);
+-  });
+-});
+-
+-describe('OAuthService.complete (REQ-ID-015/009)', () => {
+-  const happyCookies = {
+-    [OAUTH_STATE_COOKIE]: 'S',
+-    [OAUTH_PKCE_COOKIE]: 'V',
+-    [OAUTH_REDIRECT_COOKIE]: 'http://localhost:3000/other',
+-  };
+-  const happyProfile = { subject: 'sub', email: 'a@b.c', emailVerified: true, displayName: 'Alex' };
+-
+-  const expectOAuthError = async (promise: Promise<unknown>, code: string): Promise<void> => {
+-    let caught: unknown;
+-    try {
+-      await promise;
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    expect((caught as OAuthError).code).toBe(code);
+-  };
+-
+-  it('happy path: exchanges code with the PKCE verifier, provisions identity, issues tokens', async () => {
+-    const { service, providerFake, identityFake, tokensFake } = makeService();
+-    providerFake.exchangeCode.mockResolvedValue(happyProfile);
+-    identityFake.findOrCreateByProvider.mockResolvedValue({ id: 'ident-1' });
+-
+-    const result = await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+-
+-    expect(providerFake.exchangeCode).toHaveBeenCalledWith('c', 'V');
+-    expect(identityFake.findOrCreateByProvider).toHaveBeenCalledWith({
+-      provider: 'google',
+-      subject: 'sub',
+-      email: 'a@b.c',
+-      displayName: 'Alex',
+-    });
+-    expect(tokensFake.issueRegisteredTokens).toHaveBeenCalledWith('ident-1');
+-    expect(result.identityId).toBe('ident-1');
+-    expect(result.tokens).toEqual({ accessToken: 'a', expiresIn: 900, refreshToken: 'r', kind: 'REGISTERED' });
+-    expect(result.redirectTarget).toBe('http://localhost:3000/other');
+-  });
+-
+-  it('maps provider error=access_denied to OAUTH_ACCESS_DENIED', async () => {
+-    const { service } = makeService();
+-    await expectOAuthError(
+-      service.complete({ error: 'access_denied', cookies: happyCookies }),
+-      OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED,
+-    );
+-  });
+-
+-  it('rejects when state does not match the cookie', async () => {
+-    const { service } = makeService();
+-    await expectOAuthError(
+-      service.complete({ code: 'c', state: 'X', cookies: happyCookies }),
+-      OAUTH_ERROR_CODES.OAUTH_STATE_INVALID,
+-    );
+-  });
+-
+-  it('rejects when the state cookie is absent', async () => {
+-    const { service } = makeService();
+-    const cookies = { [OAUTH_PKCE_COOKIE]: 'V', [OAUTH_REDIRECT_COOKIE]: 'http://localhost:3000/other' };
+-    await expectOAuthError(
+-      service.complete({ code: 'c', state: 'S', cookies }),
+-      OAUTH_ERROR_CODES.OAUTH_STATE_INVALID,
+-    );
+-  });
+-
+-  it('rejects when code is absent', async () => {
+-    const { service } = makeService();
+-    await expectOAuthError(
+-      service.complete({ state: 'S', cookies: happyCookies }),
+-      OAUTH_ERROR_CODES.OAUTH_STATE_INVALID,
+-    );
+-  });
+-
+-  it('rejects when the PKCE cookie is absent', async () => {
+-    const { service } = makeService();
+-    const cookies = { [OAUTH_STATE_COOKIE]: 'S', [OAUTH_REDIRECT_COOKIE]: 'http://localhost:3000/other' };
+-    await expectOAuthError(
+-      service.complete({ code: 'c', state: 'S', cookies }),
+-      OAUTH_ERROR_CODES.OAUTH_STATE_INVALID,
+-    );
+-  });
+-
+-  it('re-validates the redirect cookie against the allowlist (cookie is httpOnly but unsigned)', async () => {
+-    const { service, providerFake } = makeService();
+-    providerFake.exchangeCode.mockResolvedValue(happyProfile);
+-    await expectOAuthError(
+-      service.complete({
+-        code: 'c',
+-        state: 'S',
+-        cookies: { ...happyCookies, [OAUTH_REDIRECT_COOKIE]: 'https://evil.example.com' },
+-      }),
+-      OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID,
+-    );
+-  });
+-
+-  it('rejects an unverified email fail-closed', async () => {
+-    const { service, providerFake } = makeService();
+-    providerFake.exchangeCode.mockResolvedValue({ ...happyProfile, emailVerified: false });
+-    await expectOAuthError(
+-      service.complete({ code: 'c', state: 'S', cookies: happyCookies }),
+-      OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED,
+-    );
+-  });
+-
+-  it('wraps a provider failure as OAUTH_EXCHANGE_FAILED (message includes the cause)', async () => {
+-    const { service, providerFake } = makeService();
+-    providerFake.exchangeCode.mockRejectedValue(new Error('google 500'));
+-
+-    let caught: unknown;
+-    try {
+-      await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    expect((caught as OAuthError).code).toBe(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED);
+-    expect((caught as OAuthError).message).toContain('code exchange failed: google 500');
+-  });
+-
+-  it('wraps a provider ZodError as OAUTH_EXCHANGE_FAILED without dumped issues/PII (REQ-SEC-004)', async () => {
+-    const { service, providerFake } = makeService();
+-    const parsed = z.email().safeParse('not-an-email');
+-    expect(parsed.success).toBe(false);
+-    if (parsed.success) return;
+-    providerFake.exchangeCode.mockRejectedValue(parsed.error);
+-
+-    let caught: unknown;
+-    try {
+-      await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBeInstanceOf(OAuthError);
+-    const oauthErr = caught as OAuthError;
+-    expect(oauthErr.code).toBe(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED);
+-    expect(oauthErr.message).toContain('provider response invalid');
+-    expect(oauthErr.message).not.toContain('not-an-email');
+-  });
+-
+-  it('translates IdentityError(EMAIL_CONFLICT) to OAUTH_EMAIL_CONFLICT', async () => {
+-    const { service, providerFake, identityFake } = makeService();
+-    providerFake.exchangeCode.mockResolvedValue(happyProfile);
+-    identityFake.findOrCreateByProvider.mockRejectedValue(
+-      new IdentityError(IDENTITY_ERROR_CODES.EMAIL_CONFLICT, 'email taken'),
+-    );
+-    await expectOAuthError(
+-      service.complete({ code: 'c', state: 'S', cookies: happyCookies }),
+-      OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT,
+-    );
+-  });
+-
+-  it('propagates IdentityError(PROVIDER_IDENTITY_GONE) as-is (not wrapped)', async () => {
+-    const { service, providerFake, identityFake } = makeService();
+-    providerFake.exchangeCode.mockResolvedValue(happyProfile);
+-    const gone = new IdentityError(IDENTITY_ERROR_CODES.PROVIDER_IDENTITY_GONE, 'identity deleted');
+-    identityFake.findOrCreateByProvider.mockRejectedValue(gone);
+-
+-    let caught: unknown;
+-    try {
+-      await service.complete({ code: 'c', state: 'S', cookies: happyCookies });
+-    } catch (err) {
+-      caught = err;
+-    }
+-    expect(caught).toBe(gone);
+-    expect(caught).not.toBeInstanceOf(OAuthError);
+-  });
+-});
+diff --git a/packages/core/src/oauth/oauth.service.ts b/packages/core/src/oauth/oauth.service.ts
+deleted file mode 100644
+index 1ebed83..0000000
+--- a/packages/core/src/oauth/oauth.service.ts
++++ /dev/null
+@@ -1,137 +0,0 @@
+-import { createHash, randomBytes } from 'node:crypto';
+-import { Inject, Injectable } from '@nestjs/common';
+-import type { Identity } from '@prisma/client';
+-import { ZodError } from 'zod';
+-import { IdentityService } from '../identity/identity.service';
+-import { IdentityError, IDENTITY_ERROR_CODES } from '../identity/identity.errors';
+-import { TokenService, type IssuedTokens } from '../auth/token.service';
+-import { APP_CONFIG } from '../config/config.tokens';
+-import type { AppConfig } from '../config/config.schema';
+-import { OAUTH_ERROR_CODES, OAuthError } from './oauth.errors';
+-import { OAUTH_PKCE_COOKIE, OAUTH_REDIRECT_COOKIE, OAUTH_STATE_COOKIE } from './oauth.constants';
+-import { OAUTH_PROVIDER_CLIENT, type OAuthProviderClient, type ProviderProfile } from './oauth-provider.client';
+-
+-const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+-
+-export interface OAuthStartResult {
+-  authorizeUrl: string;
+-  cookies: { name: string; value: string }[];
+-}
+-
+-export interface OAuthCompleteInput {
+-  code?: string | undefined;
+-  state?: string | undefined;
+-  error?: string | undefined;
+-  cookies: Record<string, string | undefined>;
+-}
+-
+-export interface OAuthCompleteResult {
+-  identityId: string;
+-  tokens: IssuedTokens;
+-  redirectTarget: string;
+-}
+-
+-@Injectable()
+-export class OAuthService {
+-  constructor(
+-    private readonly identity: IdentityService,
+-    private readonly tokens: TokenService,
+-    @Inject(OAUTH_PROVIDER_CLIENT) private readonly provider: OAuthProviderClient,
+-    @Inject(APP_CONFIG) private readonly config: AppConfig,
+-  ) {}
+-
+-  // REQ-ID-009: state — double-submit (nonce в httpOnly-куке === state в query),
+-  // PKCE S256; redirect — только из allowlist, перепроверяется и на complete.
+-  start(redirect?: string): OAuthStartResult {
+-    const cfg = this.googleConfig();
+-    const target = this.validateRedirect(redirect);
+-    const nonce = randomBytes(32).toString('base64url');
+-    const verifier = randomBytes(32).toString('base64url');
+-    const challenge = createHash('sha256').update(verifier).digest('base64url');
+-    const url = new URL(GOOGLE_AUTHORIZE_URL);
+-    url.searchParams.set('client_id', cfg.clientId);
+-    url.searchParams.set('redirect_uri', cfg.redirectUri);
+-    url.searchParams.set('response_type', 'code');
+-    url.searchParams.set('scope', 'openid email profile');
+-    url.searchParams.set('state', nonce);
+-    url.searchParams.set('code_challenge', challenge);
+-    url.searchParams.set('code_challenge_method', 'S256');
+-    return {
+-      authorizeUrl: url.toString(),
+-      cookies: [
+-        { name: OAUTH_STATE_COOKIE, value: nonce },
+-        { name: OAUTH_PKCE_COOKIE, value: verifier },
+-        { name: OAUTH_REDIRECT_COOKIE, value: target },
+-      ],
+-    };
+-  }
+-
+-  async complete(input: OAuthCompleteInput): Promise<OAuthCompleteResult> {
+-    this.googleConfig();
+-    if (input.error !== undefined) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, `google error: ${input.error}`);
+-    }
+-    const stateCookie = input.cookies[OAUTH_STATE_COOKIE];
+-    if (!stateCookie || !input.state || input.state !== stateCookie || !input.code) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
+-    }
+-    const verifier = input.cookies[OAUTH_PKCE_COOKIE];
+-    const redirectCookie = input.cookies[OAUTH_REDIRECT_COOKIE];
+-    if (!verifier || !redirectCookie) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'oauth cookies missing');
+-    }
+-    // Кука httpOnly, но не подписана — allowlist перепроверяется и здесь (design §3).
+-    const redirectTarget = this.validateRedirect(redirectCookie);
+-    let profile: ProviderProfile;
+-    try {
+-      profile = await this.provider.exchangeCode(input.code, verifier);
+-    } catch (err) {
+-      // ZodError.message в zod v4 — JSON-дамп issues с полученными значениями
+-      // (email/name провайдера — PII, REQ-SEC-004); в message не отдаём (final review 2026-09-03).
+-      const detail =
+-        err instanceof ZodError ? 'provider response invalid' : `code exchange failed: ${(err as Error).message}`;
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, detail);
+-    }
+-    if (profile.emailVerified !== true) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, `email not verified (sub ${profile.subject})`);
+-    }
+-    let identity: Identity;
+-    try {
+-      identity = await this.identity.findOrCreateByProvider({
+-        provider: 'google',
+-        subject: profile.subject,
+-        email: profile.email,
+-        displayName: profile.displayName,
+-      });
+-    } catch (err) {
+-      if (err instanceof IdentityError && err.code === IDENTITY_ERROR_CODES.EMAIL_CONFLICT) {
+-        throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, err.message);
+-      }
+-      throw err;
+-    }
+-    const tokens = await this.tokens.issueRegisteredTokens(identity.id);
+-    return { identityId: identity.id, tokens, redirectTarget };
+-  }
+-
+-  private googleConfig(): { clientId: string; clientSecret: string; redirectUri: string } {
+-    const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI } = this.config;
+-    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !OAUTH_REDIRECT_URI) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'google oauth not configured');
+-    }
+-    return { clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, redirectUri: OAUTH_REDIRECT_URI };
+-  }
+-
+-  private validateRedirect(target?: string): string {
+-    if (target === undefined) {
+-      const fallback = this.config.OAUTH_REDIRECT_ALLOWLIST[0];
+-      if (!fallback) {
+-        throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'redirect allowlist empty');
+-      }
+-      return fallback;
+-    }
+-    if (!this.config.OAUTH_REDIRECT_ALLOWLIST.includes(target)) {
+-      throw new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'redirect target not in allowlist');
+-    }
+-    return target;
+-  }
+-}
+diff --git a/packages/core/src/observability/pino-logger.module.ts b/packages/core/src/observability/pino-logger.module.ts
+index 037bc13..c736b97 100644
+--- a/packages/core/src/observability/pino-logger.module.ts
++++ b/packages/core/src/observability/pino-logger.module.ts
+@@ -64,51 +64,51 @@ export function buildPinoHttpOptions(config: AppConfig): {
+     // Запасной путь для платформ без предустановленного req.id (не Nest-Fastify):
+     // pino-http зовёт genReqId, только если req.id ещё пуст; в нашем стеке
+     // requestIdMiddleware присваивает uuid раньше (см. выше).
+     genReqId: (_req: GenReqIdReq, res: GenReqIdRes): string => {
+       const id = randomUUID();
+       res.setHeader('x-request-id', id);
+       return id;
+     },
+     serializers: {
+       // I-1 (REQ-SEC-009): std-сериализатор req несёт url С querystring и поле query —
+-      // OAuth callback (/auth/google/callback?code=…&state=…) сливал бы code/state
+-      // в каждую строку лога. База — stdSerializers.req (id/method/headers/remoteAddress
+-      // сохранены), из результата удалены query и querystring в url. Redact заголовков
+-      // применяется к сериализованному объекту — продолжает работать.
++      // секреты в query (code/state и т.п.) сливались бы в каждую строку лога.
++      // База — stdSerializers.req (id/method/headers/remoteAddress сохранены), из
++      // результата удалены query и querystring в url. Redact заголовков применяется
++      // к сериализованному объекту — продолжает работать.
+       req: (req: unknown): Record<string, unknown> => {
+         const serialized = stdSerializers.req(req as Parameters<typeof stdSerializers.req>[0]) as unknown as Record<
+           string,
+           unknown
+         >;
+         delete serialized.query;
+         if (typeof serialized.url === 'string') serialized.url = serialized.url.split('?')[0];
+         return serialized;
+       },
+       // Финревью батча D (Important #1, REQ-SEC-009): std-сериализатор res печатает
+-      // заголовки ответа — 302 authorize несёт OAuth state/code_challenge в location
+-      // (тот же класс, что I-1 для req.url). Query в location срезается, origin+path
++      // заголовки ответа — 302 redirect может нести query-секреты в location (тот
++      // же класс, что I-1 для req.url). Query в location срезается, origin+path
+       // сохранены для диагностики. set-cookie того же ответа — в redact.paths (C-1).
+       res: (res: unknown): Record<string, unknown> => {
+         const serialized = stdSerializers.res(res as Parameters<typeof stdSerializers.res>[0]) as unknown as Record<
+           string,
+           unknown
+         >;
+         const headers = serialized.headers as Record<string, unknown> | undefined;
+         if (headers && typeof headers.location === 'string') {
+           headers.location = headers.location.split('?')[0];
+         }
+         return serialized;
+       },
+     },
+     // Тела и payload'ы не логируются нормой дизайна; секретные заголовки маскируем.
+-    // C-1: set-cookie ОТВЕТА (refresh-токен, OAuth state/PKCE) — в том же ряду:
++    // C-1: set-cookie ОТВЕТА (refresh-токен и прочие сессионные куки) — в том же ряду:
+     // std-сериализатор res печатает response headers.
+     redact: {
+       paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+       censor: '[redacted]',
+     },
+   };
+ }
+ 
+ // Dynamic module определён ОДИН раз и импортируется только по ссылке — Nest
+ // дедуплицирует его по метаданным, повторный импорт в дереве не порождает
+diff --git a/packages/core/src/observability/pino-options.spec.ts b/packages/core/src/observability/pino-options.spec.ts
+index 4069ef2..a783cf0 100644
+--- a/packages/core/src/observability/pino-options.spec.ts
++++ b/packages/core/src/observability/pino-options.spec.ts
+@@ -11,87 +11,87 @@ describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
+ 
+   it('redact маскирует authorization, cookie и set-cookie ответа (Review Focus 5, C-1)', () => {
+     const opts = buildPinoHttpOptions(TEST_CONFIG);
+     expect(opts.redact.paths).toEqual([
+       'req.headers.authorization',
+       'req.headers.cookie',
+       'res.headers["set-cookie"]',
+     ]);
+   });
+ 
+-  // Сквозная проверка через реальную сериализацию pino (C-1 + I-1): refresh/OAuth
+-  // секреты — в set-cookie ответа и в query OAuth callback — не покидают процесс
+-  // в строке лога; query из url срезается, поле query отсутствует (REQ-SEC-009).
+-  it('строка лога: set-cookie/authorization замаскированы, query (code/state) срезан из url и не логируется', () => {
++  // Сквозная проверка через реальную сериализацию pino (C-1 + I-1): секреты —
++  // в set-cookie ответа и в query запроса — не покидают процесс в строке лога;
++  // query из url срезается, поле query отсутствует (REQ-SEC-009).
++  it('строка лога: set-cookie/authorization замаскированы, query-секреты срезаны из url и не логируются', () => {
+     const lines: string[] = [];
+     const stream = new Writable({
+       write(chunk, _enc, cb) {
+         lines.push(chunk.toString());
+         cb();
+       },
+     });
+     // info: строка запроса пишется на уровне info (TEST_CONFIG.LOG_LEVEL='warn' подавил бы её).
+     const opts = buildPinoHttpOptions({ ...TEST_CONFIG, LOG_LEVEL: 'info' });
+     const logger = pino({ level: opts.level, serializers: opts.serializers, redact: opts.redact }, stream);
+     const req = {
+       id: 'r-1',
+       method: 'GET',
+-      url: '/auth/google/callback?code=SECRET-CODE&state=SECRET-STATE',
++      url: '/auth/callback?code=SECRET-CODE&state=SECRET-STATE',
+       headers: { authorization: 'Bearer SECRET-TOKEN', cookie: 'mm_refresh=SECRET-COOKIE' },
+       remoteAddress: '127.0.0.1',
+     };
+     const res = {
+       statusCode: 200,
+       headers: { 'set-cookie': 'mm_refresh=SECRET-REFRESH; HttpOnly; Path=/auth' },
+     };
+     logger.info({ req, res }, 'request completed');
+     const line = lines.join('');
+     for (const secret of ['SECRET-CODE', 'SECRET-STATE', 'SECRET-TOKEN', 'SECRET-COOKIE', 'SECRET-REFRESH']) {
+       expect(line).not.toContain(secret);
+     }
+     expect(line).toContain('[redacted]');
+     const parsed = JSON.parse(line);
+-    expect(parsed.req.url).toBe('/auth/google/callback');
++    expect(parsed.req.url).toBe('/auth/callback');
+     expect(parsed.req).not.toHaveProperty('query');
+   });
+ 
+   // Финревью батча D (Important #1): std-сериализатор res печатает заголовки
+-  // ответа — 302 authorize несёт OAuth state/code_challenge в location, тот же
+-  // класс, что I-1 (req.url). Query в location срезается, origin+path сохранены.
+-  it('строка лога: query (state/code_challenge) срезан из res.headers.location на 302 authorize', () => {
++  // ответа — 302 редирект несёт query-секреты в location, тот же класс, что
++  // I-1 (req.url). Query в location срезается, origin+path сохранены.
++  it('строка лога: query-секреты срезаны из res.headers.location на 302 redirect', () => {
+     const lines: string[] = [];
+     const stream = new Writable({
+       write(chunk, _enc, cb) {
+         lines.push(chunk.toString());
+         cb();
+       },
+     });
+     const opts = buildPinoHttpOptions({ ...TEST_CONFIG, LOG_LEVEL: 'info' });
+     const logger = pino({ level: opts.level, serializers: opts.serializers, redact: opts.redact }, stream);
+     // Контракт std-сериализатора v7: заголовки читаются через getHeaders()
+     // (res.headersSent=true → statusCode сохраняется).
+     const res = {
+       statusCode: 302,
+       headersSent: true,
+       getHeaders: () => ({
+         location:
+-          'https://accounts.google.com/o/oauth2/v2/auth?client_id=C&state=SECRET-STATE&code_challenge=SECRET-CHALLENGE',
+-        'set-cookie': 'mm_oauth_state=SECRET-STATE; HttpOnly; Path=/auth',
++          'https://idp.example.com/authorize?client_id=C&state=SECRET-STATE&code_challenge=SECRET-CHALLENGE',
++        'set-cookie': 'mm_state=SECRET-STATE; HttpOnly; Path=/auth',
+       }),
+     };
+     logger.info({ res }, 'request completed');
+     const line = lines.join('');
+     for (const secret of ['SECRET-STATE', 'SECRET-CHALLENGE']) {
+       expect(line).not.toContain(secret);
+     }
+     const parsed = JSON.parse(line);
+-    expect(parsed.res.headers.location).toBe('https://accounts.google.com/o/oauth2/v2/auth');
++    expect(parsed.res.headers.location).toBe('https://idp.example.com/authorize');
+   });
+ 
+   it('genReqId генерирует uuid и отражает его в заголовок x-request-id', () => {
+     const setHeader = jest.fn();
+     const id = buildPinoHttpOptions(TEST_CONFIG).genReqId({ headers: {} }, { setHeader });
+     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+     expect(setHeader).toHaveBeenCalledWith('x-request-id', id);
+   });
+ 
+   // Nest-Fastify присваивает raw req.id ДО middleware (fastify-middie: raw.id = req.id,
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index e8b6cbb..eed6f49 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -100,21 +100,23 @@ describe('EventLogService.commitCoreEvent', () => {
+       )
+       .catch((e: unknown) => e);
+ 
+     expect(err).toBeInstanceOf(ContractError);
+     expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
+   it('records actorId on lifecycle events when the caller supplies it (REQ-RT-009)', async () => {
+     const ACTOR = '00000000-0000-0000-0000-0000000000c3';
+-    await seedIdentity(db.prisma, { id: ACTOR, email: 'actor@example.test' });
++    // ADR-012: второй живой REGISTERED невозможен ("Identity_single_registered_key");
++    // актору достаточно существующей identity — kind для записи actorId не значим.
++    await seedIdentity(db.prisma, { id: ACTOR, kind: 'GUEST' });
+     const room = await rooms.create(ORG);
+     await rooms.cancel(room.id, ACTOR);
+ 
+     const log = await readRoomLog(db.prisma, room.id);
+     expect(log).toHaveLength(1);
+     expect(log[0]).toMatchObject({ type: 'core.room.cancelled', actorId: ACTOR });
+   });
+ 
+   it('serializes concurrent commits via the advisory lock: dense seqs 1..N (REQ-RT-007)', async () => {
+     const room = await rooms.create(ORG);
+diff --git a/packages/core/src/rewards/rewards-schema.int-spec.ts b/packages/core/src/rewards/rewards-schema.int-spec.ts
+index a46fe79..9670e5b 100644
+--- a/packages/core/src/rewards/rewards-schema.int-spec.ts
++++ b/packages/core/src/rewards/rewards-schema.int-spec.ts
+@@ -9,20 +9,27 @@ describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
+   let db: TestDb;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+   }, 120_000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
++  afterEach(async () => {
++    // ADR-012: seedRoomPrizeWinner сеет организатора на вызов, а
++    // "Identity_single_registered_key" допускает ровно одного живого REGISTERED —
++    // чистим identity (CASCADE забирает room/rewards-строки теста).
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity", room."Room" CASCADE');
++  });
++
+   it('has the partial unique index on active awards (REQ-RWD-003)', async () => {
+     const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
+       SELECT indexdef FROM pg_indexes
+       WHERE schemaname = 'rewards' AND indexname = 'Award_single_active_winner_per_prize_key'
+     `;
+     expect(rows).toHaveLength(1);
+     expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
+     expect(rows[0].indexdef).toContain('"roomId"');
+     expect(rows[0].indexdef).toContain('"prizeId"');
+     expect(rows[0].indexdef).toContain('"winnerId"');
+@@ -32,21 +39,22 @@ describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
+ 
+   it('has the CHECK quantity >= 0 on Prize (REQ-RWD-010)', async () => {
+     const rows = await db.prisma.$queryRaw<{ conname: string }[]>`
+       SELECT conname FROM pg_constraint
+       WHERE conname = 'Prize_quantity_nonnegative' AND connamespace = 'rewards'::regnamespace
+     `;
+     expect(rows).toHaveLength(1);
+   });
+ 
+   // Сиды комнаты/приза/победителя. Значения уникальны на вызов: тесты делят одну
+-  // testcontainer-БД, фиксированные email/код комнаты конфликтовали бы по P2002.
++  // testcontainer-БД (identity транкейтится в afterEach — ADR-012: один живой
++  // REGISTERED), код комнаты уникален сам по себе.
+   async function seedRoomPrizeWinner() {
+     const org = await seedIdentity(db.prisma, {
+       email: `org-${randomUUID()}@example.test`,
+     });
+     const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
+     const room = await db.prisma.room.create({
+       data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+     });
+     const prize = await db.prisma.prize.create({
+       data: { roomId: room.id, name: 'Приз', quantityTotal: 2, quantity: 2 },
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+index 49ad941..4a58546 100644
+--- a/packages/core/src/rewards/rewards.int-spec.ts
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -51,28 +51,30 @@ describe('RewardsService (int)', () => {
+     await moduleRef.init();
+     rewards = moduleRef.get(RewardsService);
+     outbox = moduleRef.get(EventOutbox);
+   }, 120_000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
++    // ADR-012: identity."Identity" в списке — seedPrize сеет организатора на вызов,
++    // а "Identity_single_registered_key" допускает ровно одного живого REGISTERED.
+     await db.prisma.$executeRawUnsafe(
+-      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE',
++      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room", identity."Identity" CASCADE',
+     );
+   });
+ 
+   // Хелпер: комната DRAFT с организатором (membership нужен assertOrganizer в
+   // fulfill/revoke) + приз с фондом quantity. Значения уникальны на вызов:
+-  // тесты делят одну testcontainer-БД, identity не транкейтится.
++  // тесты делят одну testcontainer-БД.
+   async function seedPrize(quantity: number) {
+     const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
+     const room = await db.prisma.room.create({
+       data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
+     });
+     await db.prisma.membership.create({
+       data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
+     });
+     const prize = await db.prisma.prize.create({
+       data: { roomId: room.id, name: 'Приз', quantityTotal: quantity, quantity },
+diff --git a/packages/core/src/transport/auth.tokens.ts b/packages/core/src/transport/auth.tokens.ts
+index 62b003c..9c2339e 100644
+--- a/packages/core/src/transport/auth.tokens.ts
++++ b/packages/core/src/transport/auth.tokens.ts
+@@ -1,8 +1,3 @@
+ // Отдельный инстанс лимитера для refresh-эндпоинта (REQ-SEC-007) — не делит состояние
+ // с join-лимитером.
+ export const REFRESH_RATE_LIMITER = Symbol('REFRESH_RATE_LIMITER');
+-
+-// Отдельные инстансы лимитеров для OAuth-эндпоинтов (REQ-SEC-007): start и callback
+-// не делят состояние ни между собой, ни с join/refresh.
+-export const OAUTH_START_RATE_LIMITER = Symbol('OAUTH_START_RATE_LIMITER');
+-export const OAUTH_CALLBACK_RATE_LIMITER = Symbol('OAUTH_CALLBACK_RATE_LIMITER');
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index 432bf51..c6c3c15 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -5,21 +5,20 @@ import { ContractError } from '@mymozhem/sdk';
+ import { AuthError } from '../auth/auth.errors';
+ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+   TargetNotExcludableError,
+   TargetNotMemberError,
+ } from '../membership/membership.errors';
+-import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
+ import { RoomConflictError, RoomNotConfiguredError, RoomOrganizerNotRegisteredError, RoomSettingsFrozenError, RoomTransitionError } from '../room/room.errors';
+ import {
+   ActorNotMemberError as RealtimeActorNotMemberError,
+   EventTypeUnknownError,
+   RoomNotActiveError,
+ } from '../realtime/realtime.errors';
+ import { HttpExceptionFilter } from './http-exception.filter';
+ 
+ type ReplyMock = { status: jest.Mock; send: jest.Mock };
+ 
+@@ -50,29 +49,20 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+     // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+     ['rate limited', new JoinRateLimitedError('x'), 429, 'RATE_LIMITED'],
+     ['room full', new RoomParticipantLimitReachedError('x'), 409, 'ROOM_PARTICIPANT_LIMIT_REACHED'],
+     // Срез исключения (REQ-ID-006): статусы добавлены в Task 4 (exhaustive-гейт),
+     // кейсы здесь — регрессия маппинга.
+     ['actor not member', new ActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
+     ['actor not organizer', new ActorNotOrganizerError('x'), 403, 'ACTOR_NOT_ORGANIZER'],
+     ['target not member', new TargetNotMemberError('x'), 404, 'TARGET_NOT_MEMBER'],
+     ['target not excludable', new TargetNotExcludableError('x'), 409, 'TARGET_NOT_EXCLUDABLE'],
+     ['auth', new AuthError('SESSION_INVALID', 'reuse detected, family revoked'), 401, 'SESSION_INVALID'],
+-    // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7): core-код 1:1 в wire,
+-    // статус из таблицы маппинга.
+-    ['oauth not configured', new OAuthError(OAUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED, 'x'), 503, 'OAUTH_NOT_CONFIGURED'],
+-    ['oauth redirect invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'x'), 400, 'OAUTH_REDIRECT_INVALID'],
+-    ['oauth state invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'x'), 401, 'OAUTH_STATE_INVALID'],
+-    ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
+-    ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
+-    ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
+-    ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
+     // RoomError — полное покрытие: ROOM_ORGANIZER_NOT_REGISTERED с POST /rooms
+     // (REQ-ID-005), остальные — с lifecycle-контура UI-среза (решение №9); коды в
+     // wire 1:1 (строковый паритет room.errors.ts), статус 409 — отказ из-за состояния.
+     ['room organizer not registered', new RoomOrganizerNotRegisteredError('x'), 403, 'ROOM_ORGANIZER_NOT_REGISTERED'],
+     ['room transition invalid', new RoomTransitionError('x'), 409, 'ROOM_TRANSITION_INVALID'],
+     ['room conflict', new RoomConflictError('x'), 409, 'ROOM_CONFLICT'],
+     ['room not configured', new RoomNotConfiguredError('x'), 409, 'ROOM_NOT_CONFIGURED'],
+     ['room settings frozen', new RoomSettingsFrozenError('x'), 409, 'ROOM_SETTINGS_FROZEN'],
+     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
+     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
+@@ -153,30 +143,18 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+       filter.catch(err, makeHost(reply));
+       expect(logger.warn).toHaveBeenCalledWith(
+         expect.objectContaining({ requestId: 'req-1' }),
+         'refresh reuse detected, family <uuid> revoked',
+       );
+       expect(logger.error).not.toHaveBeenCalled();
+       // Wire не меняется: всё ещё ровно {code} (REQ-SEC-006).
+       expect(reply.send.mock.calls[0][0]).toEqual({ code: 'SESSION_INVALID' });
+     });
+ 
+-    it('logs 4xx OAuthError message at warn level (та же норма, что AuthError; message — фиксированные строки + sub)', () => {
+-      const err = new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'state mismatch or code missing');
+-      const { filter, reply, logger } = makeFilter();
+-      filter.catch(err, makeHost(reply));
+-      expect(logger.warn).toHaveBeenCalledWith(
+-        expect.objectContaining({ requestId: 'req-1' }),
+-        'state mismatch or code missing',
+-      );
+-      expect(logger.error).not.toHaveBeenCalled();
+-      expect(reply.send.mock.calls[0][0]).toEqual({ code: 'OAUTH_STATE_INVALID' });
+-    });
+-
+     it('does not log non-auth 4xx at all', () => {
+       const { filter, reply, logger } = makeFilter();
+       filter.catch(new RoomJoinDeniedError('no room for code'), makeHost(reply));
+       expect(logger.error).not.toHaveBeenCalled();
+       expect(logger.warn).not.toHaveBeenCalled();
+     });
+   });
+ });
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index e8a5453..86e9f8e 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -1,44 +1,35 @@
+ import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/common';
+ import { Prisma } from '@prisma/client';
+ import { ZodError } from 'zod';
+ import { ContractError } from '@mymozhem/sdk';
+ import { MembershipError } from '../membership/membership.errors';
+ import { AuthError } from '../auth/auth.errors';
+-import { OAuthError } from '../oauth/oauth.errors';
+ import { RoomError } from '../room/room.errors';
+ import { RealtimeError } from '../realtime/realtime.errors';
+ import { PinoLogger } from '../observability/pino-logger.module';
+ 
+ // Единственная точка маппинга ошибка → HTTP (design §5): контроллеры статусов не знают.
+ // Наружу — ровно {code} (REQ-SEC-006); полное исключение уходит только в серверный лог.
+ const STATUS_BY_WIRE_CODE = {
+   ROOM_JOIN_DENIED: 403,
+   RATE_LIMITED: 429,
+   ROOM_PARTICIPANT_LIMIT_REACHED: 409,
+   // Срез исключения (REQ-ID-006, design-таблица маппинга): добавлено в Task 4 —
+   // расширение MEMBERSHIP_ERROR_CODES без этих статусов ломает compile-time
+   // exhaustive-маппинг ниже (гейт Task 4); спек-кейсы фильтра — Task 7.
+   ACTOR_NOT_MEMBER: 403,
+   ACTOR_NOT_ORGANIZER: 403,
+   TARGET_NOT_MEMBER: 404,
+   TARGET_NOT_EXCLUDABLE: 409,
+   REQUEST_INVALID: 400,
+   SESSION_INVALID: 401,
+-  // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
+-  OAUTH_NOT_CONFIGURED: 503,
+-  OAUTH_REDIRECT_INVALID: 400,
+-  OAUTH_STATE_INVALID: 401,
+-  OAUTH_ACCESS_DENIED: 403,
+-  OAUTH_EXCHANGE_FAILED: 502,
+-  OAUTH_EMAIL_UNVERIFIED: 403,
+-  OAUTH_EMAIL_CONFLICT: 409,
+   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
+   ROOM_ORGANIZER_NOT_REGISTERED: 403,
+   // UI-срез (lifecycle-контур, решение №9): остальные RoomError идут в wire 1:1
+   // (строковый паритет заложен в room.errors.ts). 409 — отказ из-за состояния
+   // комнаты (переход, заморозка, гонка), не из-за формы запроса.
+   ROOM_TRANSITION_INVALID: 409,
+   ROOM_CONFLICT: 409,
+   ROOM_NOT_CONFIGURED: 409,
+   ROOM_SETTINGS_FROZEN: 409,
+   // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
+@@ -73,38 +64,36 @@ export class HttpExceptionFilter implements ExceptionFilter {
+     // платформенный счётчик 'req-N'; корреляционный uuid — в raw.id (REQ-OPS-004).
+     const req = host.switchToHttp().getRequest<{ id?: string; raw?: { id?: string } }>();
+     const requestId = req.raw?.id ?? req.id;
+     const code = this.toWireCode(exception);
+     // Nest-встроенные HttpException (404 неизвестного роута и т.п.) сохраняют свой
+     // статус («его status», маппинг design §5); wire-код при этом типизированный.
+     const status: number =
+       exception instanceof HttpException ? exception.getStatus() : STATUS_BY_WIRE_CODE[code];
+     if (status >= 500) {
+       this.logger.error({ requestId, err: exception }, 'request failed');
+-    } else if (exception instanceof AuthError || exception instanceof OAuthError) {
++    } else if (exception instanceof AuthError) {
+       // Design §11: наружу все отказы refresh слиты в один SESSION_INVALID, поэтому
+       // различие reuse/expired/unknown обязан нести серверный лог — иначе сигнал кражи
+-      // токена не оставляет следа для расследования. Та же норма для OAuthError
+-      // (причина отказа флоу — в логе, наружу ровно {code}). Message обоих классов
+-      // безопасен: фиксированные строки + familyId/sub, без token-материала.
++      // токена не оставляет следа для расследования. Message класса безопасен:
++      // фиксированные строки + familyId, без token-материала.
+       this.logger.warn({ requestId }, exception.message);
+     }
+     void reply.status(status).send({ code });
+   }
+ 
+   private toWireCode(exception: unknown): WireCode {
+     if (exception instanceof MembershipError) {
+       // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+       return exception.code === 'JOIN_RATE_LIMITED' ? 'RATE_LIMITED' : exception.code;
+     }
+     if (exception instanceof AuthError) return 'SESSION_INVALID';
+-    if (exception instanceof OAuthError) return exception.code;
+     if (exception instanceof RoomError) {
+       // Покрытие полное (UI-срез, lifecycle-контур): все коды RoomError присутствуют
+       // в STATUS_BY_WIRE_CODE и идут наружу 1:1; неизвестный код — fail-closed в
+       // INTERNAL_ERROR с error-логом, как прежде.
+       return exception.code in STATUS_BY_WIRE_CODE ? (exception.code as WireCode) : 'INTERNAL_ERROR';
+     }
+     // Ошибки контракта с wire-паритетом кода (rewards ф.3 и далее): класс-
+     // специфичные ветки выше сохраняют свои правила свёртки; сюда попадают
+     // ContractError'ы, коды которых сознательно добавлены в STATUS_BY_WIRE_CODE.
+     if (exception instanceof ContractError && exception.code in STATUS_BY_WIRE_CODE) {
+diff --git a/packages/core/src/transport/http.types.ts b/packages/core/src/transport/http.types.ts
+index 757b8ef..7360f4b 100644
+--- a/packages/core/src/transport/http.types.ts
++++ b/packages/core/src/transport/http.types.ts
+@@ -9,21 +9,21 @@ export interface RequestLike {
+   readonly headers: Record<string, string | string[] | undefined>;
+ }
+ 
+ export interface ReplyLike {
+   setCookie(
+     name: string,
+     value: string,
+     options: {
+       httpOnly: boolean;
+       secure: boolean;
+-      sameSite: 'strict' | 'lax'; // lax — oauth state/pkce/redirect (возврат с Google, design §3)
++      sameSite: 'strict' | 'lax';
+       path: string;
+       maxAge: number;
+     },
+   ): unknown;
+-  // OAuth-флоу: одноразовые куки гасятся при любом исходе; 302 на Google и на цель.
++  // Одноразовые куки гасятся при любом исходе флоу, который их выставил.
+   clearCookie(name: string, options: { path: string }): unknown;
+   // Fastify v5: redirect(url, code?) — URL первым (порядок v4 (code, url) перевёрнут,
+   // wire-e2e поймал: v4-порядок даёт FST_ERR_BAD_STATUS_CODE → 500).
+   redirect(url: string, statusCode?: number): unknown;
+ }
+diff --git a/packages/core/src/transport/oauth.controller.ts b/packages/core/src/transport/oauth.controller.ts
+deleted file mode 100644
+index 075321b..0000000
+--- a/packages/core/src/transport/oauth.controller.ts
++++ /dev/null
+@@ -1,81 +0,0 @@
+-import { Controller, Get, Inject, Query, Req, Res } from '@nestjs/common';
+-import { oauthCallbackQuerySchema, oauthStartQuerySchema } from '@mymozhem/sdk';
+-import { OAuthService } from '../oauth/oauth.service';
+-import { OAUTH_PKCE_COOKIE, OAUTH_REDIRECT_COOKIE, OAUTH_STATE_COOKIE } from '../oauth/oauth.constants';
+-import { JoinRateLimiter } from '../membership/join-rate-limiter';
+-import { JoinRateLimitedError } from '../membership/membership.errors';
+-import { APP_CONFIG } from '../config/config.tokens';
+-import type { AppConfig } from '../config/config.schema';
+-import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER } from './auth.tokens';
+-import { setRefreshCookie } from './refresh-cookie';
+-import type { ReplyLike, RequestLike } from './http.types';
+-
+-// Тонкий транспорт (design §3): rate-limit → схема → сервис → куки/redirect.
+-// Статусов не знает — ошибки уходят в фильтр. Access-токен в URL не попадает
+-// (REQ-ID-008): клиент после лендинга вызывает POST /auth/refresh.
+-@Controller('auth')
+-export class OAuthController {
+-  constructor(
+-    private readonly oauth: OAuthService,
+-    @Inject(OAUTH_START_RATE_LIMITER) private readonly startLimiter: JoinRateLimiter,
+-    @Inject(OAUTH_CALLBACK_RATE_LIMITER) private readonly callbackLimiter: JoinRateLimiter,
+-    @Inject(APP_CONFIG) private readonly config: AppConfig,
+-  ) {}
+-
+-  @Get('google')
+-  start(@Query() query: unknown, @Req() req: RequestLike, @Res({ passthrough: true }) reply: ReplyLike): void {
+-    if (!this.startLimiter.tryAcquire(req.ip)) {
+-      throw new JoinRateLimitedError('oauth start rate limit exceeded');
+-    }
+-    const { redirect } = oauthStartQuerySchema.parse(query ?? {});
+-    const result = this.oauth.start(redirect);
+-    for (const cookie of result.cookies) this.setOAuthCookie(reply, cookie.name, cookie.value);
+-    // Fastify v5: redirect(url, code) — URL первым аргументом.
+-    void reply.redirect(result.authorizeUrl, 302);
+-  }
+-
+-  @Get('google/callback')
+-  async callback(
+-    @Query() query: unknown,
+-    @Req() req: RequestLike,
+-    @Res({ passthrough: true }) reply: ReplyLike,
+-  ): Promise<void> {
+-    if (!this.callbackLimiter.tryAcquire(req.ip)) {
+-      throw new JoinRateLimitedError('oauth callback rate limit exceeded');
+-    }
+-    const q = oauthCallbackQuerySchema.parse(query ?? {});
+-    try {
+-      const result = await this.oauth.complete({
+-        code: q.code,
+-        state: q.state,
+-        error: q.error,
+-        cookies: req.cookies,
+-      });
+-      setRefreshCookie(reply, result.tokens.refreshToken, this.config, result.tokens.kind);
+-      this.clearOAuthCookies(reply);
+-      void reply.redirect(result.redirectTarget, 302);
+-    } catch (err) {
+-      // Одноразовость state: куки гасятся при любом исходе (design §3).
+-      this.clearOAuthCookies(reply);
+-      throw err;
+-    }
+-  }
+-
+-  private setOAuthCookie(reply: ReplyLike, name: string, value: string): void {
+-    void reply.setCookie(name, value, {
+-      httpOnly: true,
+-      secure: this.config.NODE_ENV === 'production',
+-      // Lax, не Strict: браузер обязан прислать куки на возврате с Google —
+-      // top-level GET-навигация (design §3, осознанное отличие от refresh-куки).
+-      sameSite: 'lax',
+-      path: '/auth',
+-      maxAge: this.config.OAUTH_STATE_TTL,
+-    });
+-  }
+-
+-  private clearOAuthCookies(reply: ReplyLike): void {
+-    for (const name of [OAUTH_STATE_COOKIE, OAUTH_PKCE_COOKIE, OAUTH_REDIRECT_COOKIE]) {
+-      void reply.clearCookie(name, { path: '/auth' });
+-    }
+-  }
+-}
+diff --git a/packages/core/src/transport/transport.module.ts b/packages/core/src/transport/transport.module.ts
+index 5f71085..2c1a20a 100644
+--- a/packages/core/src/transport/transport.module.ts
++++ b/packages/core/src/transport/transport.module.ts
+@@ -1,58 +1,43 @@
+ import { Module } from '@nestjs/common';
+ import { APP_FILTER } from '@nestjs/core';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { MembershipModule } from '../membership/membership.module';
+ import { AuthModule } from '../auth/auth.module';
+-import { OAuthModule } from '../oauth/oauth.module';
+ import { PinoLoggerModule } from '../observability/pino-logger.module';
+ import { RoomModule } from '../room/room.module';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { JoinController } from './join.controller';
+ import { AuthController } from './auth.controller';
+ import { ExcludeController } from './exclude.controller';
+-import { OAuthController } from './oauth.controller';
+ import { RoomsController } from './rooms.controller';
+ import { RoomsLifecycleController } from './rooms-lifecycle.controller';
+ import { MembersController } from './members.controller';
+ import { HttpExceptionFilter } from './http-exception.filter';
+-import { OAUTH_CALLBACK_RATE_LIMITER, OAUTH_START_RATE_LIMITER, REFRESH_RATE_LIMITER } from './auth.tokens';
++import { REFRESH_RATE_LIMITER } from './auth.tokens';
+ 
+ @Module({
+-  imports: [ConfigModule, MembershipModule, AuthModule, OAuthModule, RoomModule, PinoLoggerModule],
++  imports: [ConfigModule, MembershipModule, AuthModule, RoomModule, PinoLoggerModule],
+   controllers: [
+     JoinController,
+     AuthController,
+     ExcludeController,
+-    OAuthController,
+     RoomsController,
+     // UI-срез (решения №9/№10): HTTP-контур lifecycle комнаты и ростер.
+     RoomsLifecycleController,
+     MembersController,
+   ],
+   providers: [
+     // Единственная точка маппинга ошибка → HTTP для всего приложения (design §5).
+     { provide: APP_FILTER, useClass: HttpExceptionFilter },
+     // Отдельный инстанс лимитера для refresh (REQ-SEC-007) — не делит состояние
+     // с join-лимитером из MembershipModule.
+     {
+       provide: REFRESH_RATE_LIMITER,
+       useFactory: (config: AppConfig) => new JoinRateLimiter(config.REFRESH_RATE_LIMIT),
+       inject: [APP_CONFIG],
+     },
+-    // Отдельные инстансы для OAuth start/callback (REQ-SEC-007) — состояние не
+-    // делится ни между собой, ни с join/refresh.
+-    {
+-      provide: OAUTH_START_RATE_LIMITER,
+-      useFactory: (config: AppConfig) => new JoinRateLimiter(config.OAUTH_RATE_LIMIT),
+-      inject: [APP_CONFIG],
+-    },
+-    {
+-      provide: OAUTH_CALLBACK_RATE_LIMITER,
+-      useFactory: (config: AppConfig) => new JoinRateLimiter(config.OAUTH_RATE_LIMIT),
+-      inject: [APP_CONFIG],
+-    },
+   ],
+ })
+ export class TransportModule {}

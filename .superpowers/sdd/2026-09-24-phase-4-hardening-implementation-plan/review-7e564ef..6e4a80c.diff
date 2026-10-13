@@ -1,0 +1,326 @@
+# Review package: 7e564ef..6e4a80c
+
+## Commits
+6e4a80c fix(identity): close sweep race window C-8.1 — tx-aware guard + re-check rollback
+
+## Files changed
+ packages/core/src/identity/anonymization-guards.ts |  10 +-
+ packages/core/src/identity/guest-sweep.int-spec.ts | 103 +++++++++++++++++++++
+ packages/core/src/identity/guest-sweep.service.ts  |  88 +++++++++++-------
+ .../src/rewards/rewards-anonymization.guard.ts     |  10 +-
+ 4 files changed, 171 insertions(+), 40 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/identity/anonymization-guards.ts b/packages/core/src/identity/anonymization-guards.ts
+index fe4a0ef..39a2a51 100644
+--- a/packages/core/src/identity/anonymization-guards.ts
++++ b/packages/core/src/identity/anonymization-guards.ts
+@@ -1,10 +1,14 @@
++import type { Prisma } from '@prisma/client';
++
+ // Приостановка TTL гостя через hook, не импортом (design 2026-09-10 §5,
+ // REQ-RWD-001/013): identity объявляет токен; rewards регистрирует guard в
+ // composition root. Паттерн — по прецеденту onAccessRevoked (membership).
+ export interface AnonymizationGuard {
+-  // Возвращает подмножество identityIds, у которых есть нерешённая награда
+-  // (AWARDED). identity про rewards не знает.
+-  hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>>;
++  // Возвращает подмножество identityIds с нерешённой наградой (AWARDED).
++  // tx — транзакция свипа: внетранзакционное чтение создавало окно гонки C-8.1
++  // (award, закоммиченный между гард-чеком и коммитом свипа, оставался невидимым);
++  // обе точки опроса (до анонимизации и re-check после) читают через tx вызывающего.
++  hasOpenAwards(tx: Prisma.TransactionClient, identityIds: readonly string[]): Promise<Set<string>>;
+ }
+ 
+ export const ANONYMIZATION_GUARDS = Symbol('ANONYMIZATION_GUARDS');
+diff --git a/packages/core/src/identity/guest-sweep.int-spec.ts b/packages/core/src/identity/guest-sweep.int-spec.ts
+index 7a25658..c83e88a 100644
+--- a/packages/core/src/identity/guest-sweep.int-spec.ts
++++ b/packages/core/src/identity/guest-sweep.int-spec.ts
+@@ -1,22 +1,24 @@
+ import { randomUUID } from 'node:crypto';
+ import { Global, Module } from '@nestjs/common';
+ import { Test } from '@nestjs/testing';
++import type { Prisma } from '@prisma/client';
+ import type { AppEffect } from '@mymozhem/sdk';
+ import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { TokenService } from '../auth/token.service';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import { MembershipModule } from '../membership/membership.module';
+ import { PrismaModule } from '../prisma/prisma.module';
++import { PrismaService } from '../prisma/prisma.service';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { RewardsAnonymizationGuard } from '../rewards/rewards-anonymization.guard';
+ import { RewardsModule } from '../rewards/rewards.module';
+ import { RewardsService } from '../rewards/rewards.service';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
+ import { GuestSweepService } from './guest-sweep.service';
+@@ -234,10 +236,111 @@ describe('GuestSweepService — приостановка при открытой
+     expect(await sweep.sweepExpiredGuests()).toBe(0);
+     after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
+     expect(after.deletedAt).toBeNull();
+     const award2 = await db.prisma.award.findFirstOrThrow({ where: { winnerId: guest2.id } });
+     await rewards.revoke(room.id, award2.id, org.id);
+     expect(await sweep.sweepExpiredGuests()).toBe(1);
+     after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
+     expect(after.deletedAt).not.toBeNull();
+   });
+ });
++
++describe('GuestSweepService — окно гонки C-8.1: re-check откатывает свип', () => {
++  const RACE_TARGET = Symbol('RACE_TARGET');
++  type RaceTarget = { winnerId: string; roomId: string; prizeId: string };
++
++  class RacingGuard implements AnonymizationGuard {
++    private calls = 0;
++    constructor(
++      private readonly prisma: PrismaService,
++      private readonly real: RewardsAnonymizationGuard,
++      private readonly target: RaceTarget,
++    ) {}
++    async hasOpenAwards(tx: Prisma.TransactionClient, ids: readonly string[]): Promise<Set<string>> {
++      this.calls += 1;
++      if (this.calls === 1) {
++        // «Конкурирующий» award — своим соединением, до блокировок свипа.
++        await this.prisma.award.create({
++          data: {
++            roomId: this.target.roomId,
++            prizeId: this.target.prizeId,
++            winnerId: this.target.winnerId,
++            status: 'AWARDED',
++            sourceAppId: 'lottery',
++          },
++        });
++        return new Set();
++      }
++      return this.real.hasOpenAwards(tx, ids);
++    }
++  }
++
++  let db: TestDb;
++  let sweep: GuestSweepService;
++  let target: RaceTarget;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз гонки', quantityTotal: 1, quantity: 1 },
++    });
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
++    target = { winnerId: guest.id, roomId: room.id, prizeId: prize.id };
++
++    const RACE_TOKEN = RACE_TARGET;
++    @Global()
++    @Module({
++      // PrismaModule нужен прямо: он не @Global, а RewardsModule не ре-экспортирует
++      // PrismaService — без imports фабрика не разрешит PrismaService в этом скоупе.
++      imports: [RewardsModule, PrismaModule],
++      providers: [
++        { provide: RACE_TOKEN, useValue: target },
++        {
++          provide: ANONYMIZATION_GUARDS,
++          useFactory: (prisma: PrismaService, real: RewardsAnonymizationGuard, t: RaceTarget): AnonymizationGuard[] => [
++            new RacingGuard(prisma, real, t),
++          ],
++          inject: [PrismaService, RewardsAnonymizationGuard, RACE_TOKEN],
++        },
++      ],
++      exports: [ANONYMIZATION_GUARDS],
++    })
++    class TestRaceWiringModule {}
++
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        AppRuntimeModule.register([]),
++        MembershipModule,
++        RealtimeModule,
++        RewardsModule,
++        IdentityModule,
++        TestRaceWiringModule,
++      ],
++    })
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    await moduleRef.init();
++    sweep = moduleRef.get(GuestSweepService);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('award, закоммиченный между гард-чеком и коммитом, откатывает анонимизацию (0, identity не тронута)', async () => {
++    const anonymized = await sweep.sweepExpiredGuests();
++    expect(anonymized).toBe(0);
++    const after = await db.prisma.identity.findUniqueOrThrow({ where: { id: target.winnerId } });
++    expect(after.deletedAt).toBeNull(); // свип откачен — REQ-RWD-013 победил
++    const award = await db.prisma.award.findFirst({ where: { winnerId: target.winnerId, status: 'AWARDED' } });
++    expect(award).not.toBeNull(); // «конкурирующая» награда — на месте
++  });
++});
+diff --git a/packages/core/src/identity/guest-sweep.service.ts b/packages/core/src/identity/guest-sweep.service.ts
+index 3968ec0..ac21d3d 100644
+--- a/packages/core/src/identity/guest-sweep.service.ts
++++ b/packages/core/src/identity/guest-sweep.service.ts
+@@ -2,59 +2,83 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
+ 
+ // Свип анонимизации гостей (REQ-ID-003/014, догон фазы 3): истечение guest_ttl
+ // реализуется анонимизацией строки (обнуление PII, сохранение id — внешние ключи
+ // и actorId в логе остаются валидными), не физическим удалением. База TTL —
+ // createdAt (решение владельца, design §0.8). Приостановка при открытой награде —
+ // через ANONYMIZATION_GUARDS (REQ-RWD-013); без подключённого rewards приостановки нет.
++// Внутренний сигнал отката при гонке C-8.1: не доменная ошибка, на провод не
++// маппится (свип вызывается только планировщиком); ловится в sweepExpiredGuests.
++class SweepSuspensionRaceError extends Error {
++  constructor(readonly racedCount: number) {
++    super(`concurrent award detected during sweep for ${racedCount} identit(ies)`);
++    this.name = new.target.name;
++  }
++}
++
+ @Injectable()
+ export class GuestSweepService {
+   private readonly logger = new Logger(GuestSweepService.name);
+ 
+   constructor(
+     private readonly prisma: PrismaService,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
+     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
+   ) {}
+ 
+   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
+-  // самого свипа (выборка кандидатов + запись); перечитывание deletedAt в
+-  // updateMany — вторая линия от гонки с ручным исключением. Гард читает ВНЕ
+-  // транзакции (hasOpenAwards идёт через this.prisma, отдельное соединение):
+-  // остаётся узкое окно «award закоммичен между гард-чеком и коммитом свипа» —
+-  // принято как риск MVP (свип раз в CLEANUP_INTERVAL, окно миллисекунды).
+-  // Закрытие окна — design-level решение (tx-aware гард / serializable+retry),
+-  // зафиксировано в леджере для владельца.
++  // свипа; C-8.1 (ф.4) закрыто re-check'ом: гард опрашивается дважды ВНУТРИ tx —
++  // до анонимизации и после updateMany. READ COMMITTED делает видимым любой award,
++  // закоммитившийся до перепроверки (включая тот, чей INSERT ждал нашей
++  // FOR NO KEY UPDATE блокировки на identity — FK-проверка Award берёт FOR KEY
++  // SHARE, блокировки конфликтуют) → throw откатывает всю tx. Остаточное
++  // направление «анонимизирован → награждён» (award коммитится после COMMIT
++  // свипа) закрыто гардой identity.deletedAt в RewardsService.awardPrize.
+   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
+     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
+-    return this.prisma.$transaction(async (tx) => {
+-      const candidates = await tx.identity.findMany({
+-        where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
+-        select: { id: true },
++    try {
++      return await this.prisma.$transaction(async (tx) => {
++        const candidates = await tx.identity.findMany({
++          where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
++          select: { id: true },
++        });
++        if (candidates.length === 0) return 0;
++        const ids = candidates.map((c) => c.id);
++        const suspended = new Set<string>();
++        for (const guard of this.guards) {
++          for (const id of await guard.hasOpenAwards(tx, ids)) suspended.add(id);
++        }
++        const sweepIds = ids.filter((id) => !suspended.has(id));
++        if (sweepIds.length === 0) return 0;
++        const anonymized = await tx.identity.updateMany({
++          where: { id: { in: sweepIds }, deletedAt: null },
++          data: { displayName: null, email: null, deletedAt: now },
++        });
++        await tx.session.updateMany({
++          where: { identityId: { in: sweepIds }, revokedAt: null },
++          data: { revokedAt: now },
++        });
++        // C-8.1: re-check после updateMany — award, закоммитившийся между первым
++        // чеком и этой строкой, здесь виден → откат всей tx (анонимизация и
++        // отзыв сессий отменяются).
++        const raced = new Set<string>();
++        for (const guard of this.guards) {
++          for (const id of await guard.hasOpenAwards(tx, sweepIds)) raced.add(id);
++        }
++        if (raced.size > 0) throw new SweepSuspensionRaceError(raced.size);
++        this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
++        return anonymized.count;
+       });
+-      if (candidates.length === 0) return 0;
+-      const ids = candidates.map((c) => c.id);
+-      const suspended = new Set<string>();
+-      for (const guard of this.guards) {
+-        for (const id of await guard.hasOpenAwards(ids)) suspended.add(id);
++    } catch (err) {
++      if (err instanceof SweepSuspensionRaceError) {
++        // Ожидаемый исход гонки, не алерт: следующий тик CLEANUP_INTERVAL
++        // обработает гостя как приостановленного (award уже виден первому чеку).
++        this.logger.warn(`guest sweep rolled back: concurrent award for ${err.racedCount} identit(ies) (C-8.1)`);
++        return 0;
+       }
+-      const sweepIds = ids.filter((id) => !suspended.has(id));
+-      if (sweepIds.length === 0) return 0;
+-      const anonymized = await tx.identity.updateMany({
+-        where: { id: { in: sweepIds }, deletedAt: null },
+-        data: { displayName: null, email: null, deletedAt: now },
+-      });
+-      // Отзыв живых сессий гостя — по прецеденту среза исключения
+-      // (membership.service.ts:118-123). Сессия гостя под приостановкой истекает
+-      // по своему капу как обычно (design §5) — здесь её нет.
+-      await tx.session.updateMany({
+-        where: { identityId: { in: sweepIds }, revokedAt: null },
+-        data: { revokedAt: now },
+-      });
+-      this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
+-      return anonymized.count;
+-    });
++      throw err;
++    }
+   }
+ }
+diff --git a/packages/core/src/rewards/rewards-anonymization.guard.ts b/packages/core/src/rewards/rewards-anonymization.guard.ts
+index eea9fcc..59cace7 100644
+--- a/packages/core/src/rewards/rewards-anonymization.guard.ts
++++ b/packages/core/src/rewards/rewards-anonymization.guard.ts
+@@ -1,20 +1,20 @@
+ import { Injectable } from '@nestjs/common';
++import type { Prisma } from '@prisma/client';
+ import type { AnonymizationGuard } from '../identity/anonymization-guards';
+-import { PrismaService } from '../prisma/prisma.service';
+ 
+ // REQ-RWD-013: гость с нерешённой наградой (AWARDED; FULFILLED/REVOKED — решённые)
+ // не анонимизируется до разрешения — иначе приз осиротеет из-за обнуления имени
+ // победителя до вручения.
+ @Injectable()
+ export class RewardsAnonymizationGuard implements AnonymizationGuard {
+-  constructor(private readonly prisma: PrismaService) {}
+-
+-  async hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>> {
++  // PrismaService больше не инжектируется (C-8.1, ф.4): чтение строго через tx
++  // вызывающего — внетранзакционное чтение создавало окно гонки со свипом.
++  async hasOpenAwards(tx: Prisma.TransactionClient, identityIds: readonly string[]): Promise<Set<string>> {
+     if (identityIds.length === 0) return new Set();
+-    const rows = await this.prisma.award.findMany({
++    const rows = await tx.award.findMany({
+       where: { winnerId: { in: [...identityIds] }, status: 'AWARDED' },
+       select: { winnerId: true },
+     });
+     return new Set(rows.map((r) => r.winnerId));
+   }
+ }

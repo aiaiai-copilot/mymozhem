@@ -1,0 +1,185 @@
+# Review package: 4281de2..f569d57
+
+## Commits
+f569d57 feat: machine-enforced boundary + gate-checks-the-gate (ADR-002, REQ-CTR-001, REQ-DEV-001)
+1c328e4 fix(sdk): mark destructured seq as used in missing-seq fixture
+
+## Files changed
+ .dependency-cruiser.cjs                       | 45 +++++++++++++++++++++++++
+ eslint.config.js                              | 34 +++++++++++++++++++
+ packages/sdk/src/events/log-event.fixtures.ts |  1 +
+ scripts/verify-guardrails.mjs                 | 48 +++++++++++++++++++++++++++
+ 4 files changed, 128 insertions(+)
+
+## Diff
+diff --git a/.dependency-cruiser.cjs b/.dependency-cruiser.cjs
+new file mode 100644
+index 0000000..d31b66f
+--- /dev/null
++++ b/.dependency-cruiser.cjs
+@@ -0,0 +1,45 @@
++/** @type {import('dependency-cruiser').IConfiguration} */
++module.exports = {
++  forbidden: [
++    {
++      name: 'sdk-is-leaf',
++      comment: 'SDK не импортирует внутренние пакеты — это лист контракта (REQ-CTR-002).',
++      severity: 'error',
++      from: { path: '^packages/sdk/src' },
++      to: { path: '^packages/', pathNot: '^packages/sdk/' },
++    },
++    {
++      name: 'app-only-through-sdk',
++      comment: 'App-модуль общается с ядром только через SDK, не напрямую (REQ-CTR-001).',
++      severity: 'error',
++      from: { path: '^packages/app-' },
++      to: { path: '^packages/core/' },
++    },
++    {
++      name: 'socketio-only-in-realtime',
++      comment: 'socket.io импортируется только из Realtime-модуля ядра (REQ-RT-006).',
++      severity: 'error',
++      from: { pathNot: '^packages/core/src/realtime' },
++      to: { path: 'node_modules/socket[.]io' },
++    },
++    {
++      name: 'no-circular',
++      comment: 'Циклические зависимости запрещены.',
++      severity: 'error',
++      from: {},
++      to: { circular: true },
++    },
++    {
++      name: 'not-to-unresolvable',
++      comment: 'Импорт несуществующего модуля — ошибка (ловит опечатки; делает gate-probe независимым от порядка задач).',
++      severity: 'error',
++      from: {},
++      to: { couldNotResolve: true },
++    },
++  ],
++  options: {
++    doNotFollow: { path: 'node_modules' },
++    tsConfig: { fileName: 'tsconfig.base.json' },
++    tsPreCompilationDeps: true,
++  },
++};
+diff --git a/eslint.config.js b/eslint.config.js
+new file mode 100644
+index 0000000..b6f8384
+--- /dev/null
++++ b/eslint.config.js
+@@ -0,0 +1,34 @@
++const js = require('@eslint/js');
++const tseslint = require('typescript-eslint');
++
++const moduleLevelMutableRule = {
++  'no-restricted-syntax': [
++    'error',
++    {
++      selector: "Program > VariableDeclaration[kind='let']",
++      message: 'Мутабельное module-level состояние запрещено (REQ-CORE-004).',
++    },
++    {
++      selector: "Program > VariableDeclaration[kind='var']",
++      message: 'Мутабельное module-level состояние запрещено (REQ-CORE-004).',
++    },
++    {
++      selector: "Program > ExportNamedDeclaration > VariableDeclaration[kind='let']",
++      message: 'Мутабельный module-level экспорт запрещён (REQ-CORE-004).',
++    },
++    {
++      selector: "Program > ExportNamedDeclaration > VariableDeclaration[kind='var']",
++      message: 'Мутабельный module-level экспорт запрещён (REQ-CORE-004).',
++    },
++  ],
++};
++
++module.exports = tseslint.config(
++  { ignores: ['**/dist/**', '**/node_modules/**', '.turbo/**'] },
++  js.configs.recommended,
++  ...tseslint.configs.recommended,
++  {
++    files: ['**/*.ts'],
++    rules: moduleLevelMutableRule,
++  },
++);
+diff --git a/packages/sdk/src/events/log-event.fixtures.ts b/packages/sdk/src/events/log-event.fixtures.ts
+index 40a889a..7ee8cc4 100644
+--- a/packages/sdk/src/events/log-event.fixtures.ts
++++ b/packages/sdk/src/events/log-event.fixtures.ts
+@@ -23,20 +23,21 @@ export const validLogEvents: LogEvent[] = [
+ 
+ export const invalidLogEventCases: { name: string; value: unknown }[] = [
+   {
+     name: 'unknown visibility level',
+     value: { ...validLogEvents[0], visibility: 'secret' },
+   },
+   {
+     name: 'missing seq',
+     value: (() => {
+       const { seq, ...rest } = validLogEvents[0];
++      void seq;
+       return rest;
+     })(),
+   },
+   {
+     name: 'negative seq',
+     value: { ...validLogEvents[0], seq: -1 },
+   },
+   {
+     name: 'non-uuid roomId',
+     value: { ...validLogEvents[0], roomId: 'not-a-uuid' },
+diff --git a/scripts/verify-guardrails.mjs b/scripts/verify-guardrails.mjs
+new file mode 100644
+index 0000000..22bc1ea
+--- /dev/null
++++ b/scripts/verify-guardrails.mjs
+@@ -0,0 +1,48 @@
++// Proves the guardrails themselves are alive: injects a KNOWN violation and
++// asserts each enforcer fails on it. A silently-green fence is the v1 failure
++// mode this closes (ADR-002, REQ-DEV-001).
++import { execSync } from 'node:child_process';
++import { writeFileSync, rmSync, mkdirSync } from 'node:fs';
++
++function expectFailure(label, cmd) {
++  try {
++    execSync(cmd, { stdio: 'pipe' });
++  } catch {
++    console.log(`OK   — guardrail fired on: ${label}`);
++    return;
++  }
++  console.error(`FAIL — guardrail did NOT fire on: ${label}`);
++  process.exitCode = 1;
++}
++
++// 1) Boundary probe: a file in sdk importing core (forbidden: sdk is a leaf).
++const boundaryProbe = 'packages/sdk/src/__guardrail_probe__.ts';
++writeFileSync(
++  boundaryProbe,
++  "import '../../core/src/health/health.module';\nexport const probe = 1;\n",
++);
++
++// 2) Mutable-state probe: a top-level `let` export (forbidden: REQ-CORE-004).
++mkdirSync('scripts/__probe__', { recursive: true });
++const mutableProbe = 'scripts/__probe__/mutable.ts';
++writeFileSync(mutableProbe, 'export let leaked = 1;\nleaked = 2;\n');
++
++try {
++  expectFailure(
++    'sdk → core import (dependency-cruiser)',
++    `pnpm exec depcruise ${boundaryProbe} --config .dependency-cruiser.cjs`,
++  );
++  expectFailure(
++    'module-level mutable export (eslint)',
++    `pnpm exec eslint ${mutableProbe} --no-ignore`,
++  );
++} finally {
++  rmSync(boundaryProbe, { force: true });
++  rmSync('scripts/__probe__', { recursive: true, force: true });
++}
++
++if (process.exitCode) {
++  console.error('\nGuardrails are NOT enforcing. Fix before merge.');
++} else {
++  console.log('\nAll guardrails verified alive.');
++}

@@ -1,0 +1,114 @@
+# Review package: 6ec127747e07f6fbea884cdbdd2e72abd75dc9b4..HEAD
+
+## Commits
+46363d0 fix(core): match P2010-wrapped 23505 in room code collision classifier (REQ-ID-013)
+
+## Files changed
+ packages/core/src/room/room-code.spec.ts | 45 +++++++++++++++++++++++++++++++-
+ packages/core/src/room/room-code.ts      | 15 ++++++++---
+ 2 files changed, 55 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/room/room-code.spec.ts b/packages/core/src/room/room-code.spec.ts
+index e7418eb..3ea13a8 100644
+--- a/packages/core/src/room/room-code.spec.ts
++++ b/packages/core/src/room/room-code.spec.ts
+@@ -1,17 +1,60 @@
+-import { generateRoomCode, ROOM_CODE_ALPHABET } from './room-code';
++import { generateRoomCode, isRoomCodeCollision, ROOM_CODE_ALPHABET } from './room-code';
+ 
+ describe('generateRoomCode (REQ-ID-013)', () => {
+   it('produces a code of the requested length from the safe alphabet only', () => {
+     const code = generateRoomCode(8);
+     expect(code).toHaveLength(8);
+     for (const ch of code) expect(ROOM_CODE_ALPHABET).toContain(ch);
+   });
+ 
+   it('excludes confusable characters by construction (no 0/o, 1/l/i)', () => {
+     expect(ROOM_CODE_ALPHABET).not.toMatch(/[01ilo]/);
+   });
+ 
+   it('respects other lengths', () => {
+     expect(generateRoomCode(12)).toHaveLength(12);
+   });
+ });
++
++describe('isRoomCodeCollision (REQ-ID-013)', () => {
++  // Форма, которую реально бросает Prisma 7.8 + adapter-pg при failed $queryRaw:
++  // PrismaClientKnownRequestError P2010, SQLSTATE и имя индекса — внутри message.
++  const p2010 = (message: string) => ({ code: 'P2010', message });
++
++  it('matches a P2010 raw-query error carrying 23505 on the Room_code_key index', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Room_code_key"`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(true);
++  });
++
++  it('rejects a P2010 on a different index', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Membership_single_organizer_key"`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it('rejects a P2010 with a different SQLSTATE', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23502`. Message: `null value in column "code" violates not-null constraint`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it('rejects a non-P2010 error even with 23505 in the message', () => {
++    const err = {
++      code: 'P2002',
++      message:
++        'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Room_code_key"`',
++    };
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it.each([null, undefined, new Error('boom'), '23505', {}])(
++    'rejects non-error-shaped input (%p)',
++    (input) => {
++      expect(isRoomCodeCollision(input)).toBe(false);
++    },
++  );
++});
+diff --git a/packages/core/src/room/room-code.ts b/packages/core/src/room/room-code.ts
+index e7658b7..a7182eb 100644
+--- a/packages/core/src/room/room-code.ts
++++ b/packages/core/src/room/room-code.ts
+@@ -6,21 +6,28 @@ import { randomInt } from 'node:crypto';
+ export const ROOM_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+ 
+ export function generateRoomCode(length: number): string {
+   let code = '';
+   for (let i = 0; i < length; i++) {
+     code += ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)];
+   }
+   return code;
+ }
+ 
+-// Unique violation on the room code (index "Room_code_key"). Driver-adapter raw
+-// errors surface the Postgres SQLSTATE; the retry loop in create() is a safety net —
+-// a collision is a ~1e-12 event and intentionally untested.
++// Unique violation on the room code (index "Room_code_key"). Prisma 7 + adapter-pg
++// wraps every failing $queryRaw in PrismaClientKnownRequestError with code P2010 and
++// message `Raw query failed. Code: \`23505\`. Message: \`duplicate key value violates
++// unique constraint "Room_code_key"...\`` — the raw SQLSTATE never reaches the top
++// level (verified against @prisma/client@7.8.0 runtime + @prisma/adapter-pg@7.8.0
++// convertError: 23505 → UniqueConstraintViolation with originalCode '23505', also
++// reachable as meta.driverAdapterError.cause.originalCode). The retry loop in
++// create() is a safety net — a collision is a ~1e-12 event and intentionally untested
++// end-to-end; the classifier itself is unit-tested in room-code.spec.ts.
+ export function isRoomCodeCollision(e: unknown): boolean {
+   const err = e as { code?: string; message?: string } | null;
+   return (
+-    err?.code === '23505' &&
++    err?.code === 'P2010' &&
+     typeof err.message === 'string' &&
++    err.message.includes('23505') &&
+     err.message.includes('Room_code_key')
+   );
+ }

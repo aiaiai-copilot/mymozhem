@@ -1,0 +1,47 @@
+# Review package: 2084fe3..25c1820
+
+## Commits
+25c1820 docs(core): честный комментарий о гонке гард-чека в GuestSweepService — гард вне транзакции, окно принято как риск MVP
+
+## Files changed
+ packages/core/src/identity/guest-sweep.service.ts | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/identity/guest-sweep.service.ts b/packages/core/src/identity/guest-sweep.service.ts
+index b7540a0..3968ec0 100644
+--- a/packages/core/src/identity/guest-sweep.service.ts
++++ b/packages/core/src/identity/guest-sweep.service.ts
+@@ -12,24 +12,28 @@ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-g
+ @Injectable()
+ export class GuestSweepService {
+   private readonly logger = new Logger(GuestSweepService.name);
+ 
+   constructor(
+     private readonly prisma: PrismaService,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
+     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
+   ) {}
+ 
+-  // Возвращает число анонимизированных identity. Вся выборка/гард/запись — одна
+-  // транзакция: гард-чек внутри неё закрывает окно гонки «награда создана между
+-  // чтением кандидатов и анонимизацией» (перечитывание deletedAt в updateMany —
+-  // вторая линия от гонки с ручным исключением).
++  // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
++  // самого свипа (выборка кандидатов + запись); перечитывание deletedAt в
++  // updateMany — вторая линия от гонки с ручным исключением. Гард читает ВНЕ
++  // транзакции (hasOpenAwards идёт через this.prisma, отдельное соединение):
++  // остаётся узкое окно «award закоммичен между гард-чеком и коммитом свипа» —
++  // принято как риск MVP (свип раз в CLEANUP_INTERVAL, окно миллисекунды).
++  // Закрытие окна — design-level решение (tx-aware гард / serializable+retry),
++  // зафиксировано в леджере для владельца.
+   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
+     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
+     return this.prisma.$transaction(async (tx) => {
+       const candidates = await tx.identity.findMany({
+         where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
+         select: { id: true },
+       });
+       if (candidates.length === 0) return 0;
+       const ids = candidates.map((c) => c.id);
+       const suspended = new Set<string>();

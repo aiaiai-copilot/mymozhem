@@ -1,0 +1,103 @@
+# Review package: 4d33181..e30ac5a
+
+## Commits
+e30ac5a feat(server): квиз в composition root — манифест и рантайм-модуль через register
+
+## Files changed
+ apps/server/package.json      | 1 +
+ apps/server/src/app.module.ts | 7 +++++--
+ pnpm-lock.yaml                | 3 +++
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/apps/server/package.json b/apps/server/package.json
+index 44bc05d..7dd5fc8 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -8,20 +8,21 @@
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+     "start": "node dist/main.js",
+     "create-room": "node scripts/create-room.mjs"
+   },
+   "dependencies": {
+     "@fastify/cookie": "^11.1.2",
+     "@fastify/cors": "^11.3.0",
+     "@fastify/helmet": "^13.1.0",
++    "@mymozhem/app-quiz": "workspace:*",
+     "@mymozhem/core": "workspace:*",
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-fastify": "^11.0.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 120189a..1126b42 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,27 +1,30 @@
+ import { Module } from '@nestjs/common';
++import { createQuizApp } from '@mymozhem/app-quiz';
+ import {
+   AppRegistryModule,
+   AppRuntimeModule,
+   HealthModule,
+   IdentityModule,
+   MembershipModule,
+   PrismaModule,
+   RealtimeModule,
+   RoomModule,
+   TransportModule,
+ } from '@mymozhem/core';
+ 
++const quiz = createQuizApp();
++
+ @Module({
+   imports: [
+     PrismaModule,
+     HealthModule,
+-    AppRegistryModule.register([]),
+-    AppRuntimeModule.register([]), // пусто до Task 12 (quiz-модуль)
++    AppRegistryModule.register([quiz.manifest]),
++    AppRuntimeModule.register([quiz.runtime]),
+     RoomModule,
+     IdentityModule,
+     MembershipModule,
+     RealtimeModule,
+     TransportModule,
+   ],
+ })
+ export class AppModule {}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index b3fc3e1..9a0308d 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -37,20 +37,23 @@ importers:
+     dependencies:
+       '@fastify/cookie':
+         specifier: ^11.1.2
+         version: 11.1.2
+       '@fastify/cors':
+         specifier: ^11.3.0
+         version: 11.3.0
+       '@fastify/helmet':
+         specifier: ^13.1.0
+         version: 13.1.0
++      '@mymozhem/app-quiz':
++        specifier: workspace:*
++        version: link:../../packages/app-quiz
+       '@mymozhem/core':
+         specifier: workspace:*
+         version: link:../../packages/core
+       '@mymozhem/sdk':
+         specifier: workspace:*
+         version: link:../../packages/sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':

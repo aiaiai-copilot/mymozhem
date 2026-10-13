@@ -1,0 +1,1362 @@
+# Review package: 5e837c1..c577c8e
+
+## Commits
+c577c8e feat(web,ops): вход организатора по setup-токену, необязательное имя гостя, безпризовый розыгрыш (ADR-012); compose/README/чеклист под zero-PII дефолт
+
+## Files changed
+ .github/workflows/ci.yml                           |  8 +-
+ README.md                                          |  8 ++
+ apps/server/scripts/e2e-web-seed.mjs               | 50 ------------
+ apps/web/e2e/smoke.spec.ts                         | 89 ++++------------------
+ apps/web/src/App.tsx                               |  7 +-
+ apps/web/src/api/api-client.spec.ts                | 14 +++-
+ apps/web/src/api/endpoints.ts                      | 19 ++++-
+ apps/web/src/components/winners.tsx                |  5 +-
+ apps/web/src/pages/host/host-login-page.tsx        | 55 +++++++++++++
+ apps/web/src/pages/host/host-session.ts            | 12 +--
+ apps/web/src/pages/host/prizes-panel.spec.ts       | 45 +++++++++++
+ apps/web/src/pages/host/prizes-panel.tsx           | 78 ++++++++++++++++++-
+ apps/web/src/pages/host/setup-page.tsx             | 35 +--------
+ apps/web/src/pages/landing.tsx                     | 22 ++----
+ apps/web/src/pages/play/join-form.spec.ts          | 21 +++++
+ apps/web/src/pages/play/join-form.tsx              | 22 ++++--
+ docker-compose.yml                                 | 17 ++---
+ .../2026-09-23-ui-slice-smoke-checklist.md         | 44 +++++------
+ 18 files changed, 314 insertions(+), 237 deletions(-)
+
+## Diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d6920e6..64dcd5c 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -42,20 +42,23 @@ jobs:
+   # зашит в e2e/playwright.config.ts, а стенд живёт только внутри раннера.
+   e2e-web:
+     runs-on: ubuntu-latest
+     needs: build
+     env:
+       # Фиктивный тестовый секрет (REQ-SEC-002 требует >=32 байта): стенд
+       # эфемерен и не покидает раннер. Job-level, потому что compose-CLI
+       # интерполирует окружение файла в каждом шаге (up/exec/down), а compose
+       # помечает JWT_SECRET как обязательный (:? — fail-closed).
+       JWT_SECRET: ci-e2e-dummy-jwt-secret-0123456789abcdef0123456789abcdef
++      # Фиктивный setup-токен стенда (ADR-012 §2, >=32 байта): smoke логинит
++      # организатора через UI этим же значением (compose-директива :?).
++      ORGANIZER_SETUP_TOKEN: ci-e2e-dummy-organizer-setup-token-0123456789abcdef
+     steps:
+       - uses: actions/checkout@v4
+       - uses: pnpm/action-setup@v4
+         with:
+           version: 11.1.3
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 24
+           cache: pnpm
+       # node_modules нужны только для @playwright/test и запуска теста;
+@@ -69,19 +72,14 @@ jobs:
+             if curl -fsS http://localhost:3000/health/live > /dev/null; then exit 0; fi
+             sleep 2
+           done
+           echo "server did not become live" >&2
+           docker compose logs server
+           exit 1
+       # Бинарь playwright живёт только в apps/web (devDependency @mymozhem/web);
+       # из корня workspace `pnpm exec playwright` его не видит — без --filter
+       # шаг падает с "Command not found".
+       - run: pnpm --filter @mymozhem/web exec playwright install --with-deps chromium
+-      - name: Seed REGISTERED-сессии организатора
+-        run: |
+-          TOKEN=$(docker compose exec -T server node apps/server/scripts/e2e-web-seed.mjs --email=e2e@example.com | jq -r .refreshToken)
+-          test -n "$TOKEN" && test "$TOKEN" != "null"
+-          echo "E2E_REFRESH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+       - run: pnpm --filter @mymozhem/web test:e2e
+       - name: Погасить стенд
+         if: always()
+         run: docker compose down -v
+diff --git a/README.md b/README.md
+index 63d6de6..b69dced 100644
+--- a/README.md
++++ b/README.md
+@@ -1,17 +1,25 @@
+ # MyMozhem
+ 
+ Платформа для приложений-конкурсов (квизы, лотереи, дегустации) на живых и асинхронных событиях. Единый развёртываемый артефакт; ядро даёт общие примитивы (идентичность, комнаты, членство, realtime, реестр приложений), механики — подключаемые app-модули.
+ 
+ **Этап:** MVP (перепроектирование после негодного прототипа v1). Траектория: прототип → **MVP** → платформа → BaaS/SaaS.
+ **Метод:** AI-Driven / Specification-Driven Development. Спецификация в `docs/` — источник истины и вход для AI-агентов.
+ 
++## Quickstart (self-hosted)
++
++```bash
++ORGANIZER_SETUP_TOKEN=<случайная строка ≥32 байт> docker compose up -d --build
++```
++
++Стенд поднимается на `http://localhost:3000` (API и SPA — same-origin из одного контейнера). Вход организатора — по setup-токену инстанса (ADR-012): лендинг → «Войти по токену организатора» → ввод токена; регистрации и внешних аккаунтов нет. Участники заходят по коду комнаты, имя необязательно (сервер назначит псевдоним). Призовой режим выключен по умолчанию (`PRIZE_MODE=off`); включение (`PRIZE_MODE=on`) — юридическая ответственность организатора (лотереи, налоги).
++
+ ## Где что
+ 
+ ```
+ docs/
+   spec/
+     normative-package-v1.2.md   ← ГЛАВНЫЙ документ: 11 ADR, ~90 требований, модель угроз, фазовый план
+     appendix-v1-extract.md      ← образцы из прототипа v1 (что заимствовать, что нет)
+   roadmap.md                    ← этапы + разметка оверинжиниринга + порядок контролей качества
+   adr/                          ← отдельные ADR по мере принятия новых (пока консолидированы в spec)
+   audits/
+diff --git a/apps/server/scripts/e2e-web-seed.mjs b/apps/server/scripts/e2e-web-seed.mjs
+deleted file mode 100644
+index 2afc95d..0000000
+--- a/apps/server/scripts/e2e-web-seed.mjs
++++ /dev/null
+@@ -1,50 +0,0 @@
+-// Seed для e2e-smoke веб-клиента (Task 16): REGISTERED identity + живая сессия
+-// через TokenService — та же Session-запись и хэш, что у OAuth-complete, но без
+-// Google: реальных кредов у стенда нет, а гейт /host проверяет лишь валидность
+-// refresh-куки (интерпретация I-4 плана: seed обходит Google).
+-//
+-// Запуск — ВНУТРИ контейнера server: compose by design не публикует порт
+-// Postgres на хост, а в контейнере DATABASE_URL и JWT_SECRET уже выставлены:
+-//   docker compose exec -T server node apps/server/scripts/e2e-web-seed.mjs \
+-//     --email=e2e@example.com
+-// stdout: {"refreshToken":"..."} — значение куки mm_refresh (REFRESH_COOKIE).
+-// Скрипт идемпотентен: identity переиспользуется по частичному уникальному
+-// индексу, каждый прогон создаёт новую независимую сессию (новое familyId).
+-//
+-// Импорты — точечные subpath из dist, НЕ barrel '@mymozhem/core': его
+-// dist/index.js на require-time подтягивает тестовый харнес testcontainers.
+-import 'reflect-metadata';
+-import { loadConfig } from '@mymozhem/core/dist/config/config.schema.js';
+-import { PrismaService } from '@mymozhem/core/dist/prisma/prisma.service.js';
+-import { TokenService } from '@mymozhem/core/dist/auth/token.service.js';
+-
+-const arg = (name, fallback) =>
+-  process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1] ?? fallback;
+-
+-const email = arg('email', 'e2e@example.com');
+-
+-// Единая config-схема валидирует всё окружение (REQ-OPS-003) — JWT_SECRET
+-// обязателен и здесь: TokenService подписывает access-токены тем же секретом.
+-const config = loadConfig(process.env);
+-const prisma = new PrismaService();
+-await prisma.onModuleInit();
+-try {
+-  // Reuse по частичному уникальному индексу "Identity_registered_email_key"
+-  // (kind=REGISTERED, deletedAt IS NULL): повторный
+-  // seed с тем же email не создаёт второго организатора.
+-  let identity = await prisma.identity.findFirst({
+-    where: { email, kind: 'REGISTERED', deletedAt: null },
+-  });
+-  identity ??= await prisma.identity.create({ data: { kind: 'REGISTERED', email } });
+-
+-  // Ручная сборка (по паттерну core int-спек): @Inject-декоратор
+-  // TokenService вне Nest-контекста — чистая метка, позиционные аргументы решают.
+-  const tokens = new TokenService(prisma, config);
+-  const issued = await tokens.issueRegisteredTokens(identity.id);
+-  // Наружу — только refreshToken: access короткоживущий, и клиент обязан пройти
+-  // refresh тем же путём, что реальный организатор после OAuth-лендинга, —
+-  // иначе smoke не упражнял бы refresh-шов.
+-  console.log(JSON.stringify({ refreshToken: issued.refreshToken }));
+-} finally {
+-  await prisma.onModuleDestroy();
+-}
+diff --git a/apps/web/e2e/smoke.spec.ts b/apps/web/e2e/smoke.spec.ts
+index 70ca518..65f6357 100644
+--- a/apps/web/e2e/smoke.spec.ts
++++ b/apps/web/e2e/smoke.spec.ts
+@@ -1,112 +1,55 @@
+-import { execFile } from 'node:child_process';
+-import { promisify } from 'node:util';
+ import { expect, test } from '@playwright/test';
+ 
+-const execFileAsync = promisify(execFile);
+-
+-// Имя refresh-куки — константа REFRESH_COOKIE ядра
+-// (packages/core/src/auth/auth.constants.ts). Хардкод осознанный: e2e — это
+-// потребитель wire-контракта снаружи, импорт core из apps/web запрещён
+-// границей (ADR-002); если константу переименуют, smoke упадёт — и правильно.
+-const REFRESH_COOKIE = 'mm_refresh';
+-const BASE = 'http://localhost:3000';
+-// Лендинг шлёт ровно `${origin}/host` (landing.tsx); стенд обязан принять его
+-// OAUTH_REDIRECT_ALLOWLIST'ом (exact match, z.array(z.url()) — config.schema).
+-const HOST_REDIRECT = `${BASE}/host`;
+-
+-// Refresh-токен организатора: из env (CI прогоняет seed отдельным шагом) или
+-// прямым вызовом seed-скрипта в контейнере (локальный прогон — compose не
+-// публикует Postgres на хост by design, поэтому seed бежит внутри server).
+-async function seedRefreshToken(): Promise<string> {
+-  const fromEnv = process.env.E2E_REFRESH_TOKEN;
+-  if (fromEnv) return fromEnv;
+-  const { stdout } = await execFileAsync(
+-    'docker',
+-    [
+-      'compose',
+-      'exec',
+-      '-T',
+-      'server',
+-      'node',
+-      'apps/server/scripts/e2e-web-seed.mjs',
+-      '--email=e2e@example.com',
+-    ],
+-    {
+-      env: {
+-        ...process.env,
+-        // compose-CLI интерполирует окружение файла даже для exec (JWT_SECRET
+-        // в compose помечен :? — fail-closed, REQ-SEC-002). Это значение видит
+-        // только локальный интерполятор; контейнер работает на своём env.
+-        JWT_SECRET: 'e2e-seed-cli-interpolation-only-0123456789abcdef',
+-      },
+-    },
+-  );
+-  const parsed = JSON.parse(stdout.trim()) as { refreshToken?: unknown };
+-  if (typeof parsed.refreshToken !== 'string') {
+-    throw new Error(`e2e-web-seed не вернул refreshToken: ${stdout}`);
+-  }
+-  return parsed.refreshToken;
++// Setup-токен стенда (ADR-012 §2): вход организатора идёт через UI той же
++// креденшалой, что задана стенду в ORGANIZER_SETUP_TOKEN (compose-директива :? —
++// без неё стенд не стартует). Прогон обязан передать то же значение явно;
++// без него smoke падает сразу, а не таймаутом на первом шаге.
++const SETUP_TOKEN = process.env.ORGANIZER_SETUP_TOKEN;
++if (!SETUP_TOKEN) {
++  throw new Error('ORGANIZER_SETUP_TOKEN is required for smoke (same value as the compose stand)');
+ }
+ 
+ // Единый smoke UI-среза (Task 16): организатор ведёт квиз, участник отвечает
+ // верно и видит reveal-вердикт, экран показывает вопрос. Три browser-context'а
+ // в одном test — общий код комнаты и строгая последовательность шагов.
+-test('smoke: host → play → screen против compose-стенда', async ({ browser, request }) => {
+-  // Шаг 0. OAuth-шов env↔UI (требование финревью батча 5): без реальных
+-  // Google-кредов (compose несёт dummy-тройку) проверяем, что redirect лендинга
+-  // проходит allowlist и сервер отвечает 302 на accounts.google.com, а не 400
+-  // OAUTH_REDIRECT_INVALID. maxRedirects: 0 — за Google не ходим.
+-  const oauthStart = await request.get(
+-    `/auth/google?redirect=${encodeURIComponent(HOST_REDIRECT)}`,
+-    { maxRedirects: 0 },
+-  );
+-  expect(oauthStart.status()).toBe(302);
+-  expect(oauthStart.headers()['location']).toMatch(/^https:\/\/accounts\.google\.com\//);
+-
+-  // Шаг 1. Организатор: seed-кука mm_refresh → /host → гейт → setup → консоль.
++test('smoke: host → play → screen против compose-стенда', async ({ browser }) => {
++  // Шаг 1. Организатор: лендинг → «Войти по токену организатора» → /host/login
++  // → setup-токен → bootstrap (refresh-куку ставит сервер) → гейт → setup.
+   const host = await (await browser.newContext()).newPage();
+-  // Лендинг — вторая половина шва: ссылка обязана нести тот самый absolute URL.
+   await host.goto('/');
+-  await expect(host.getByRole('link', { name: 'Войти через Google' })).toHaveAttribute(
+-    'href',
+-    `/auth/google?redirect=${encodeURIComponent(HOST_REDIRECT)}`,
+-  );
+-  // Сервер ставит куку httpOnly, SameSite=Strict, Path=/auth (refresh-cookie.ts)
+-  // — зеркалим path: refresh-эндпоинт единственный её потребитель. secure не
+-  // ставим: стенд живёт на http://localhost.
+-  await host.context().addCookies([
+-    { name: REFRESH_COOKIE, value: await seedRefreshToken(), domain: 'localhost', path: '/auth' },
+-  ]);
+-  await host.goto('/host');
+-  // Гейт: молчаливый refresh по куке → REGISTERED → setup (комнаты ещё нет).
++  await host.getByRole('link', { name: 'Войти по токену организатора' }).click();
++  await host.waitForURL('**/host/login');
++  await host.getByLabel('Токен организатора').fill(SETUP_TOKEN);
++  await host.getByRole('button', { name: 'Войти' }).click();
++  // Гейт: молчаливый refresh по свежей куке → REGISTERED → setup (комнаты ещё нет).
+   await host.waitForURL('**/host/new');
+   await expect(host.getByRole('heading', { name: 'Настройка комнаты' })).toBeVisible();
+ 
+   // Редактор квиза: 1 вопрос, 2 варианта; correctIndex=0 — дефолт формы
+   // (первое радио «Правильный» отмечено), значит «Париж» — верный ответ.
+   await host.getByLabel('Текст вопроса').fill('Столица Франции?');
+   await host.getByPlaceholder('Вариант 1').fill('Париж');
+   await host.getByPlaceholder('Вариант 2').fill('Лион');
+   await host.getByRole('button', { name: 'Сохранить и запустить' }).click();
+   await host.waitForURL('**/host/console');
+   await expect(host.getByRole('heading', { name: 'Консоль ведущего' })).toBeVisible();
+   await expect(host.getByText('Код комнаты:')).toBeVisible();
+   const roomCode = (await host.locator('.room-code strong').innerText()).trim();
+   expect(roomCode.length).toBeGreaterThanOrEqual(6);
+ 
+   // Шаг 2. Участник: новый context → /play/<code> → join → лобби активной игры
+   // (комната уже ACTIVE — setup завершился activate до консоли).
+   const player = await (await browser.newContext()).newPage();
+   await player.goto(`/play/${roomCode}`);
+   await expect(player.getByRole('heading', { name: 'Вход в игру' })).toBeVisible();
+-  await player.getByLabel('Ваше имя').fill('Маша');
++  await player.getByLabel('Ваше имя (необязательно)').fill('Маша');
+   await player.getByRole('button', { name: 'Играть' }).click();
+   await expect(player.getByText('Игра идёт. Ждём вопрос…')).toBeVisible();
+ 
+   // Шаг 3. Экран: третий context → spectator-join по коду из URL.
+   const screen = await (await browser.newContext()).newPage();
+   await screen.goto(`/screen/${roomCode}`);
+   await expect(screen.getByText('Игра идёт. Ждём вопрос…')).toBeVisible();
+ 
+   // Шаг 4. Организатор открывает вопрос: у участника — варианты, на экране —
+   // вопрос крупно (h1.screen-question — проекторная раскладка дизайна §4).
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 274f76e..170a10f 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -1,26 +1,29 @@
+ import { Route, Routes } from 'react-router-dom';
+ import { LandingPage } from './pages/landing';
+ import { ConsolePage } from './pages/host/console-page';
+ import { HostGate } from './pages/host/host-gate';
++import { HostLoginPage } from './pages/host/host-login-page';
+ import { SetupPage } from './pages/host/setup-page';
+ import { NotFoundPage } from './pages/not-found';
+ import { PlayPage } from './pages/play/play-page';
+ import { ScreenPage } from './pages/screen/screen-page';
+ 
+-// Маршруты UI-среза (план 2026-09-23): / — лендинг, /host — OAuth-гейт
+-// организатора, /host/new — setup комнаты (Task 13), /host/console — консоль
++// Маршруты UI-среза (план 2026-09-23): / — лендинг, /host/login — вход
++// организатора по setup-токену (ADR-012 §2), /host — гейт организатора,
++// /host/new — setup комнаты (Task 13), /host/console — консоль
+ // ведущего (Task 14), /play — участник (Task 11), /screen — проектор (Task 12).
+ // '*' — catch-all: опечатка в URL даёт 404-страницу, а не пустой экран.
+ export function App() {
+   return (
+     <Routes>
+       <Route path="/" element={<LandingPage />} />
++      <Route path="/host/login" element={<HostLoginPage />} />
+       <Route path="/host" element={<HostGate />} />
+       <Route path="/host/new" element={<SetupPage />} />
+       <Route path="/host/console" element={<ConsolePage />} />
+       <Route path="/play/:code?" element={<PlayPage />} />
+       <Route path="/screen/:code" element={<ScreenPage />} />
+       <Route path="*" element={<NotFoundPage />} />
+     </Routes>
+   );
+ }
+diff --git a/apps/web/src/api/api-client.spec.ts b/apps/web/src/api/api-client.spec.ts
+index d9c7dfc..088551e 100644
+--- a/apps/web/src/api/api-client.spec.ts
++++ b/apps/web/src/api/api-client.spec.ts
+@@ -1,27 +1,29 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { z, ZodError } from 'zod';
+ import {
+   awardResponseSchema,
+   createRoomResponseSchema,
+   excludeResponseSchema,
++  joinResponseSchema,
+   listPrizesResponseSchema,
+   listRewardsResponseSchema,
+   prizeResponseSchema,
+   rosterResponseSchema,
+   tokenResponseSchema,
+ } from '@mymozhem/sdk';
+ import { ApiClient, type ApiRequest } from './api-client';
+ import { ApiError } from './api-error';
+ import type { TokenProvider } from './token-provider';
+ import {
+   activateRoom,
++  bootstrapOrganizer,
+   cancelRoom,
+   completeRoom,
+   configureRoom,
+   createPrize,
+   createRoom,
+   excludeMember,
+   fulfillAward,
+   joinRoom,
+   listMembers,
+   listPrizes,
+@@ -213,42 +215,46 @@ describe('endpoints', () => {
+     const calls: ApiRequest<z.ZodType>[] = [];
+     const client = {
+       call: <S extends z.ZodType>(req: ApiRequest<S>): Promise<z.output<S>> => {
+         calls.push(req as ApiRequest<z.ZodType>);
+         return Promise.resolve(undefined as z.output<S>);
+       },
+     } as ApiClient;
+     return { calls, client };
+   };
+ 
+-  it('все 14 обёрток маппятся на пути/методы/схемы HTTP-контракта', async () => {
++  it('все 15 обёрток маппятся на пути/методы/схемы HTTP-контракта', async () => {
+     const { calls, client } = makeRecordingClient();
+ 
+     await joinRoom(client, { code: 'ABCD-1234', displayName: 'Гость' });
+     await refreshSession(client);
++    await bootstrapOrganizer(client, { setupToken: 'x'.repeat(32) });
+     await createRoom(client, { joinPolicy: 'guests' });
+     await configureRoom(client, ROOM_ID, { appId: 'quiz', manifestVersion: 1, settings: {} });
+     await activateRoom(client, ROOM_ID);
+     await completeRoom(client, ROOM_ID);
+     await cancelRoom(client, ROOM_ID);
+     await listMembers(client, ROOM_ID);
+     await listPrizes(client, ROOM_ID);
+     await createPrize(client, ROOM_ID, { name: 'Кубок', quantity: 3 });
+     await listRewards(client, ROOM_ID);
+     await fulfillAward(client, ROOM_ID, AWARD_ID);
+     await revokeAward(client, ROOM_ID, AWARD_ID);
+     await excludeMember(client, ROOM_ID, IDENTITY_ID, { reason: 'флуд' });
+ 
+     const expected: Array<Pick<ApiRequest<z.ZodType>, 'method' | 'path' | 'schema'> & { auth?: boolean }> = [
+-      // join/refresh — без access-токена: refresh ездит httpOnly-кукой (REQ-ID-008).
+-      { method: 'POST', path: '/rooms/join', schema: tokenResponseSchema, auth: false },
++      // join/refresh/bootstrap — без access-токена: refresh ездит httpOnly-кукой
++      // (REQ-ID-008), bootstrap её ставит (ADR-012 §2). Ответ join несёт
++      // фактический displayName (joinResponseSchema, ADR-012 §3).
++      { method: 'POST', path: '/rooms/join', schema: joinResponseSchema, auth: false },
+       { method: 'POST', path: '/auth/refresh', schema: tokenResponseSchema, auth: false },
++      { method: 'POST', path: '/auth/organizer', schema: tokenResponseSchema, auth: false },
+       { method: 'POST', path: '/rooms', schema: createRoomResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/configure`, schema: createRoomResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/activate`, schema: createRoomResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/complete`, schema: createRoomResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/cancel`, schema: createRoomResponseSchema },
+       { method: 'GET', path: `/rooms/${ROOM_ID}/members`, schema: rosterResponseSchema },
+       { method: 'GET', path: `/rooms/${ROOM_ID}/prizes`, schema: listPrizesResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/prizes`, schema: prizeResponseSchema },
+       { method: 'GET', path: `/rooms/${ROOM_ID}/rewards`, schema: listRewardsResponseSchema },
+       { method: 'POST', path: `/rooms/${ROOM_ID}/awards/${AWARD_ID}/fulfill`, schema: awardResponseSchema },
+@@ -258,12 +264,14 @@ describe('endpoints', () => {
+ 
+     expect(calls).toHaveLength(expected.length);
+     expected.forEach((exp, i) => {
+       expect(calls[i]?.method, `calls[${i}].method`).toBe(exp.method);
+       expect(calls[i]?.path, `calls[${i}].path`).toBe(exp.path);
+       expect(calls[i]?.schema, `calls[${i}].schema`).toBe(exp.schema);
+       if (exp.auth !== undefined) expect(calls[i]?.auth, `calls[${i}].auth`).toBe(exp.auth);
+     });
+     // Тело join доезжает как есть — сервер валидирует по joinRequestSchema сам.
+     expect(calls[0]?.body).toEqual({ code: 'ABCD-1234', displayName: 'Гость' });
++    // Тело bootstrap — ровно setup-токен (сервер парсит strict-схемой).
++    expect(calls[2]?.body).toEqual({ setupToken: 'x'.repeat(32) });
+   });
+ });
+diff --git a/apps/web/src/api/endpoints.ts b/apps/web/src/api/endpoints.ts
+index 4e9463d..eb86506 100644
+--- a/apps/web/src/api/endpoints.ts
++++ b/apps/web/src/api/endpoints.ts
+@@ -1,45 +1,56 @@
+ import {
+   awardResponseSchema,
+   createRoomResponseSchema,
+   excludeResponseSchema,
++  joinResponseSchema,
+   listPrizesResponseSchema,
+   listRewardsResponseSchema,
+   prizeResponseSchema,
+   rosterResponseSchema,
+   tokenResponseSchema,
+   type AwardResponse,
+   type ConfigureRoomRequest,
+   type CreatePrizeRequest,
+   type CreateRoomRequest,
+   type CreateRoomResponse,
+   type ExcludeRequest,
+   type ExcludeResponse,
+   type JoinRequest,
++  type JoinResponse,
+   type ListPrizesResponse,
+   type ListRewardsResponse,
++  type OrganizerBootstrapRequest,
+   type PrizeResponse,
+   type RosterResponse,
+   type TokenResponse,
+ } from '@mymozhem/sdk';
+ import type { ApiClient } from './api-client';
+ 
+ // Тонкие обёртки эндпоинтов (дизайн §3): единственное место на клиенте, где известны
+ // пути HTTP-контракта (сверены с контроллерами ядра, packages/core/src/transport и
+ // rewards). Схемы ответов — только из SDK (единый источник истины, REQ-CTR-005).
+ // Lifecycle/configure отвечают формой createRoomResponseSchema — так парсит сервер
+ // (toRoomResponse), отдельной схемы в SDK нет и не нужно.
+ 
+-// join/refresh — auth:false: access-токена ещё нет, refresh ездит httpOnly-кукой
+-// (REQ-ID-008), Bearer на этих вызовах бессмысленнен.
+-export const joinRoom = (c: ApiClient, input: JoinRequest): Promise<TokenResponse> =>
+-  c.call({ method: 'POST', path: '/rooms/join', body: input, schema: tokenResponseSchema, auth: false });
++// join/refresh/bootstrap — auth:false: access-токена ещё нет, refresh ездит
++// httpOnly-кукой (REQ-ID-008), Bearer на этих вызовах бессмысленнен.
++
++// ADR-012 §2: bootstrap единственного организатора инстанса по setup-токену
++// из конфигурации сервера; refresh-куку ставит сервер в ответе.
++export const bootstrapOrganizer = (c: ApiClient, input: OrganizerBootstrapRequest): Promise<TokenResponse> =>
++  c.call({ method: 'POST', path: '/auth/organizer', body: input, schema: tokenResponseSchema, auth: false });
++
++// joinRoom — ответ теперь несёт фактический displayName (ADR-012 §3): заданный
++// или назначенный сервером псевдоним, если имя не задавали.
++export const joinRoom = (c: ApiClient, input: JoinRequest): Promise<JoinResponse> =>
++  c.call({ method: 'POST', path: '/rooms/join', body: input, schema: joinResponseSchema, auth: false });
+ 
+ export const refreshSession = (c: ApiClient): Promise<TokenResponse> =>
+   c.call({ method: 'POST', path: '/auth/refresh', schema: tokenResponseSchema, auth: false });
+ 
+ export const createRoom = (c: ApiClient, input: CreateRoomRequest): Promise<CreateRoomResponse> =>
+   c.call({ method: 'POST', path: '/rooms', body: input, schema: createRoomResponseSchema });
+ 
+ export const configureRoom = (
+   c: ApiClient,
+   roomId: string,
+diff --git a/apps/web/src/components/winners.tsx b/apps/web/src/components/winners.tsx
+index 638230e..9cc35b4 100644
+--- a/apps/web/src/components/winners.tsx
++++ b/apps/web/src/components/winners.tsx
+@@ -2,26 +2,29 @@ import type { LotteryState } from '@mymozhem/app-lottery';
+ import { displayNameOf } from './roster-names';
+ 
+ interface WinnersProps {
+   // Проекция лотереи из лога (draw.completed): drawId → { prizeId, winnerId }.
+   draws: LotteryState['draws'];
+   names: Map<string, string>;
+ }
+ 
+ // Список победителей розыгрыша (functional-minimum). Названий призов на клиенте
+ // нет (listPrizes — контур консоли организатора), поэтому показываем prizeId.
++// prizeId null — безпризовой розыгрыш (ADR-012 §4): строка без «приз …».
+ export function Winners({ draws, names }: WinnersProps) {
+   const entries = Object.entries(draws);
+   if (entries.length === 0) return null;
+   return (
+     <section>
+       <h2>Победители розыгрыша</h2>
+       <ul>
+         {entries.map(([drawId, draw]) => (
+           <li key={drawId}>
+-            {displayNameOf(names, draw.winnerId)} — приз {draw.prizeId}
++            {draw.prizeId === null
++              ? displayNameOf(names, draw.winnerId)
++              : `${displayNameOf(names, draw.winnerId)} — приз ${draw.prizeId}`}
+           </li>
+         ))}
+       </ul>
+     </section>
+   );
+ }
+diff --git a/apps/web/src/pages/host/host-login-page.tsx b/apps/web/src/pages/host/host-login-page.tsx
+new file mode 100644
+index 0000000..6bf5736
+--- /dev/null
++++ b/apps/web/src/pages/host/host-login-page.tsx
+@@ -0,0 +1,55 @@
++import { useState, type FormEvent } from 'react';
++import { useNavigate } from 'react-router-dom';
++import { ApiError } from '../../api/api-error';
++import { bootstrapOrganizer } from '../../api/endpoints';
++import { anonClient, hostSession } from './host-session';
++
++// ADR-012 §2: вход организатора — setup-токен из конфигурации инстанса
++// (self-hosted норма). Токен НЕ персистится: живёт только в state формы;
++// после протухания refresh-сессии вводится заново.
++export function HostLoginPage() {
++  const navigate = useNavigate();
++  const [token, setToken] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const submit = (e: FormEvent) => {
++    e.preventDefault();
++    if (!token || busy) return;
++    setBusy(true);
++    setError(null);
++    void bootstrapOrganizer(anonClient, { setupToken: token })
++      .then((res) => {
++        hostSession.setAccessToken(res.accessToken);
++        navigate('/host');
++      })
++      .catch((err: unknown) =>
++        setError(
++          err instanceof ApiError && err.code === 'ORGANIZER_SETUP_INVALID'
++            ? 'Неверный токен организатора.'
++            : 'Не удалось войти. Попробуйте ещё раз.',
++        ),
++      )
++      .finally(() => setBusy(false));
++  };
++  return (
++    <main>
++      <h1>Вход организатора</h1>
++      <form onSubmit={submit}>
++        <label>
++          Токен организатора
++          <input
++            type="password"
++            value={token}
++            onChange={(e) => setToken(e.target.value)}
++            autoComplete="off"
++            disabled={busy}
++          />
++        </label>
++        {error ? <p role="alert">{error}</p> : null}
++        <button type="submit" disabled={busy || !token}>
++          Войти
++        </button>
++      </form>
++    </main>
++  );
++}
+diff --git a/apps/web/src/pages/host/host-session.ts b/apps/web/src/pages/host/host-session.ts
+index ba43828..83b962d 100644
+--- a/apps/web/src/pages/host/host-session.ts
++++ b/apps/web/src/pages/host/host-session.ts
+@@ -1,23 +1,25 @@
+ import { ApiClient } from '../../api/api-client';
+ import { refreshSession } from '../../api/endpoints';
+ import { SessionStore } from '../../state/session';
+ 
+-// anonClient (тот же паттерн, что в play-page): refresh — auth:false,
+-// access-токена ему не нужен, провайдер всегда отдаёт null.
+-const anonClient = new ApiClient({
++// anonClient (тот же паттерн, что в play-page): refresh/bootstrap — auth:false,
++// access-токена им не нужен, провайдер всегда отдаёт null. Экспортируется для
++// host-login-page (ruling: консоль не плодит второй клиент/SessionStore).
++export const anonClient = new ApiClient({
+   getAccessToken: () => null,
+   refresh: () => Promise.resolve(),
+ });
+ 
+-// Один SessionStore на host-флоу: gate ставит access-токен после OAuth-refresh,
+-// setup/console расходуют его авторизованными вызовами. Страницы /host/* сменяются
++// Один SessionStore на host-флоу: gate ставит access-токен после refresh,
++// login — после bootstrap по setup-токену (ADR-012 §2), setup/console
++// расходуют его авторизованными вызовами. Страницы /host/* сменяются
+ // router-навигацией без перезагрузки, поэтому module-level экземпляр — способ
+ // разделить токен между ними; это состояние области /host в браузере, а не
+ // процессное состояние (REQ-CORE-004 — про сервер).
+ export const hostSession = new SessionStore(
+   async () => (await refreshSession(anonClient)).accessToken,
+ );
+ 
+ // Авторизованный клиент host-области: 401 → silent refresh той же кукой → один
+ // retry (контракт ApiClient).
+ export const hostClient = new ApiClient(hostSession);
+diff --git a/apps/web/src/pages/host/prizes-panel.spec.ts b/apps/web/src/pages/host/prizes-panel.spec.ts
+index b24d639..4b64768 100644
+--- a/apps/web/src/pages/host/prizes-panel.spec.ts
++++ b/apps/web/src/pages/host/prizes-panel.spec.ts
+@@ -1,17 +1,19 @@
+ import { describe, expect, it } from 'vitest';
+ import type { PrizeResponse } from '@mymozhem/sdk';
+ import {
+   DRAW_ID_GENERATION_FAILED,
+   isDrawable,
+   startDrawAttempt,
++  startParticipantDrawAttempt,
+   tryStartDrawAttempt,
++  tryStartParticipantDrawAttempt,
+   type DrawAttempt,
+ } from './prizes-panel';
+ 
+ const ROOM = '11111111-1111-4111-8111-111111111111';
+ 
+ const prize = (quantity: number): PrizeResponse => ({
+   id: '22222222-2222-4222-8222-222222222222',
+   roomId: ROOM,
+   name: 'Кубок',
+   quantityTotal: 2,
+@@ -99,10 +101,53 @@ describe('tryStartDrawAttempt', () => {
+ 
+   it('успешная генерация → попытка без ошибки (прозрачный pass-through)', () => {
+     const p = prize(1);
+     const result = tryStartDrawAttempt(p, null, () => '88888888-8888-4888-8888-888888888888');
+     expect(result).toEqual({
+       attempt: { drawId: '88888888-8888-4888-8888-888888888888', prizeId: p.id },
+       error: null,
+     });
+   });
+ });
++
++// Безпризовой розыгрыш «Разыграть участника» (ADR-012 §4 / REQ-RWD-002b):
++// prizeId null — wire-команда draw.run уходит без ключа prizeId. Тот же
++// дисциплинарный паттерн, что у призового: одна попытка за раз, повторный клик
++// до ack не тратит новый drawId, бросок генератора — текстом ошибки панели.
++describe('startParticipantDrawAttempt', () => {
++  it('нет pending-попытки → попытка с drawId генератора и prizeId null', () => {
++    const attempt = startParticipantDrawAttempt(null, () => '99999999-9999-4999-8999-999999999999');
++    expect(attempt).toEqual({ drawId: '99999999-9999-4999-8999-999999999999', prizeId: null });
++  });
++
++  it('pending-попытка уже есть → null, генератор drawId НЕ вызывается', () => {
++    const pending: DrawAttempt = {
++      drawId: '44444444-4444-4444-8444-444444444444',
++      prizeId: prize(1).id,
++    };
++    let generated = 0;
++    const attempt = startParticipantDrawAttempt(pending, () => {
++      generated += 1;
++      return '55555555-5555-4555-8555-555555555555';
++    });
++    expect(attempt).toBeNull();
++    expect(generated).toBe(0);
++  });
++});
++
++describe('tryStartParticipantDrawAttempt', () => {
++  it('генератор бросает → ошибка всплывает, попытка НЕ создана (pending не залипнет)', () => {
++    const result = tryStartParticipantDrawAttempt(null, () => {
++      throw new TypeError('crypto.randomUUID is not a function');
++    });
++    expect(result.attempt).toBeNull();
++    expect(result.error).toBe(DRAW_ID_GENERATION_FAILED);
++  });
++
++  it('успешная генерация → попытка без ошибки (прозрачный pass-through)', () => {
++    const result = tryStartParticipantDrawAttempt(null, () => '66666666-6666-4666-8666-666666666666');
++    expect(result).toEqual({
++      attempt: { drawId: '66666666-6666-4666-8666-666666666666', prizeId: null },
++      error: null,
++    });
++  });
++});
+diff --git a/apps/web/src/pages/host/prizes-panel.tsx b/apps/web/src/pages/host/prizes-panel.tsx
+index ee57912..01ed38f 100644
+--- a/apps/web/src/pages/host/prizes-panel.tsx
++++ b/apps/web/src/pages/host/prizes-panel.tsx
+@@ -1,22 +1,23 @@
+ import { useEffect, useState, type FormEvent } from 'react';
+ import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
+ import { LOTTERY_APP_ID } from '@mymozhem/app-lottery';
+ import { ApiError } from '../../api/api-error';
+ import { createPrize, listPrizes } from '../../api/endpoints';
+ import { hostClient } from './host-session';
+ 
+ // Попытка розыгрыша: drawId — клиентский uuid, ключ идемпотентности команды
+-// lottery.draw.run (манифест app-lottery; дизайн ф.3 §4).
++// lottery.draw.run (манифест app-lottery; дизайн ф.3 §4). prizeId null —
++// безпризовой розыгрыш «Разыграть участника» (ADR-012 §4 / REQ-RWD-002b).
+ export interface DrawAttempt {
+   drawId: string;
+-  prizeId: string;
++  prizeId: string | null;
+ }
+ 
+ // Селектор «приз доступен для розыгрыша» (бриф Task 15): остаток фонда > 0.
+ export const isDrawable = (prize: PrizeResponse): boolean => prize.quantity > 0;
+ 
+ // Одна попытка за раз: повторный клик до ack обязан вернуть null и НЕ тратить
+ // новый drawId — два разных ключа были бы двумя розыгрышами одного приза.
+ export const startDrawAttempt = (
+   prize: PrizeResponse,
+   pending: DrawAttempt | null,
+@@ -41,24 +42,51 @@ export const tryStartDrawAttempt = (
+   pending: DrawAttempt | null,
+   makeDrawId: () => string,
+ ): { attempt: DrawAttempt | null; error: string | null } => {
+   try {
+     return { attempt: startDrawAttempt(prize, pending, makeDrawId), error: null };
+   } catch {
+     return { attempt: null, error: DRAW_ID_GENERATION_FAILED };
+   }
+ };
+ 
++// Безпризовая попытка («Разыграть участника»): приза нет — проверять остаток
++// фонда нечего, гард только pending (та же дисциплина идемпотентности).
++export const startParticipantDrawAttempt = (
++  pending: DrawAttempt | null,
++  makeDrawId: () => string,
++): DrawAttempt | null => {
++  if (pending !== null) return null;
++  return { drawId: makeDrawId(), prizeId: null };
++};
++
++// Тот же перехват синхронного броска crypto.randomUUID(), что tryStartDrawAttempt.
++export const tryStartParticipantDrawAttempt = (
++  pending: DrawAttempt | null,
++  makeDrawId: () => string,
++): { attempt: DrawAttempt | null; error: string | null } => {
++  try {
++    return { attempt: startParticipantDrawAttempt(pending, makeDrawId), error: null };
++  } catch {
++    return { attempt: null, error: DRAW_ID_GENERATION_FAILED };
++  }
++};
++
+ // UX-маппинг ошибок REST/publish панели — тот же стиль, что commandErrorText
+ // на console-page: человеческий глагол + честный код (REQ-SEC-006).
+ const panelErrorText = (e: unknown): string => {
+-  if (e instanceof ApiError) return `Действие не выполнено (${e.code}).`;
++  if (e instanceof ApiError) {
++    // Серверный гейт prize_mode=off (ADR-012 §4): клиент режим не знает —
++    // отказ createPrize/draw.run с призом приезжает этим кодом.
++    if (e.code === 'PRIZES_DISABLED') return 'Призовой режим выключен на этом сервере.';
++    return `Действие не выполнено (${e.code}).`;
++  }
+   return 'Ошибка сети. Действие не выполнено.';
+ };
+ 
+ // Публичные события, после которых остатки фонда могли измениться: awarded —
+ // серверный декремент при розыгрыше, revoked — возврат quantity при отзыве
+ // (rewards.service). Оба public (REWARDS_EVENTS) — visibility-дисциплина.
+ const PRIZE_REFETCH_EVENTS = new Set(['rewards.reward.awarded', 'rewards.reward.revoked']);
+ 
+ interface PrizesPanelProps {
+   roomId: string;
+@@ -70,20 +98,21 @@ interface PrizesPanelProps {
+   disabled: boolean;
+   // Лог — триггер событийного рефетча остатков (см. PRIZE_REFETCH_EVENTS).
+   events: ProjectedEvent[];
+   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
+ }
+ 
+ // Панель призов и розыгрыша (бриф Task 15): форма name+quantity → createPrize →
+ // рефетч; в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
+ // lottery.draw.run; результат приезжает draw.completed и виден в <Winners>.
+ // draw.completed сам модуль коммитит — клиент его не публикует никогда.
++// ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw (без prizeId).
+ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: PrizesPanelProps) {
+   const [prizes, setPrizes] = useState<PrizeResponse[] | null>(null);
+   const [name, setName] = useState('');
+   const [quantity, setQuantity] = useState('1');
+   const [creating, setCreating] = useState(false);
+   const [pendingDraw, setPendingDraw] = useState<DrawAttempt | null>(null);
+   const [error, setError] = useState<string | null>(null);
+ 
+   // Панель сама владеет списком призов: prizes — контур консоли организатора,
+   // в общий useRoomFeed они не входят (табло/экран их не видят).
+@@ -141,27 +170,53 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }:
+     );
+     // Синхронный отказ генератора drawId (вне secure context) — в текст панели;
+     // pending не тронут, попытки не было.
+     if (startError) {
+       setError(startError);
+       return;
+     }
+     if (!attempt) return; // повторный клик до ack — не попытка (идемпотентность)
+     setPendingDraw(attempt);
+     setError(null);
+-    void publish('lottery.draw.run', { drawId: attempt.drawId, prizeId: attempt.prizeId })
++    // prizeId типизирован nullable (общий DrawAttempt), но призовая попытка его
++    // всегда несёт; null на wire недопустим (drawRunPayload: uuid optional) —
++    // шлём ключ только при наличии.
++    void publish(
++      'lottery.draw.run',
++      attempt.prizeId === null
++        ? { drawId: attempt.drawId }
++        : { drawId: attempt.drawId, prizeId: attempt.prizeId },
++    )
+       .catch((e: unknown) => setError(panelErrorText(e)))
+       // Ack ИЛИ ошибка — попытка завершена, кнопка снова доступна; результат
+       // приезжает отдельно публичным draw.completed, его здесь не ждём.
+       .finally(() => setPendingDraw(null));
+   };
+ 
++  // Безпризовой розыгрыш (ADR-012 §4): publish БЕЗ prizeId — тот же
++  // tryStartDrawAttempt-паттерн (pending-гард, crypto.randomUUID).
++  const runParticipantDraw = () => {
++    const { attempt, error: startError } = tryStartParticipantDrawAttempt(pendingDraw, () =>
++      crypto.randomUUID(),
++    );
++    if (startError) {
++      setError(startError);
++      return;
++    }
++    if (!attempt) return;
++    setPendingDraw(attempt);
++    setError(null);
++    void publish('lottery.draw.run', { drawId: attempt.drawId })
++      .catch((e: unknown) => setError(panelErrorText(e)))
++      .finally(() => setPendingDraw(null));
++  };
++
+   const isLottery = pinnedAppId === LOTTERY_APP_ID;
+ 
+   return (
+     <section>
+       <h2>Призы</h2>
+       <form onSubmit={submitPrize}>
+         <label>
+           Название{' '}
+           <input
+             value={name}
+@@ -177,20 +232,35 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }:
+             step={1}
+             value={quantity}
+             onChange={(e) => setQuantity(e.target.value)}
+             disabled={disabled || creating}
+           />
+         </label>{' '}
+         <button type="submit" disabled={disabled || creating}>
+           Добавить приз
+         </button>
+       </form>
++      {/* ADR-012 §4: создание приза — юридическая ответственность организатора
++          (лотереи, налоги). Текст виден всегда: клиент режим не знает, серверный
++          гейт отвечает PRIZES_DISABLED при prize_mode=off. */}
++      <p>Призовой режим — юридическая ответственность организатора (лотереи, налоги).</p>
++      {isLottery ? (
++        <p>
++          <button
++            type="button"
++            disabled={disabled || pendingDraw !== null}
++            onClick={runParticipantDraw}
++          >
++            Разыграть участника
++          </button>
++        </p>
++      ) : null}
+       {prizes === null ? <p>Загружаем призы…</p> : null}
+       {prizes !== null && prizes.length === 0 ? <p>Призов пока нет.</p> : null}
+       {prizes !== null && prizes.length > 0 ? (
+         <ul>
+           {prizes.map((p) => (
+             <li key={p.id}>
+               {p.name} — осталось {p.quantity} из {p.quantityTotal}{' '}
+               {isLottery ? (
+                 <button
+                   type="button"
+diff --git a/apps/web/src/pages/host/setup-page.tsx b/apps/web/src/pages/host/setup-page.tsx
+index d8e7402..2cbe329 100644
+--- a/apps/web/src/pages/host/setup-page.tsx
++++ b/apps/web/src/pages/host/setup-page.tsx
+@@ -34,23 +34,20 @@ const submitErrorText = (e: unknown): string => {
+ 
+ // Setup комнаты организатора (дизайн Task 13): комната (DRAFT) создаётся при
+ // входе на страницу или переиспользуется сохранённая; выбор приложения — квиз
+ // (редактор) или лотерея (атрибут розыгрыша); submit → configureRoom →
+ // activateRoom → консоль.
+ export function SetupPage() {
+   const navigate = useNavigate();
+   const [roomId, setRoomId] = useState<string | null>(() => SessionStore.loadHostRoomId());
+   const [roomError, setRoomError] = useState<string | null>(null);
+   const [appKind, setAppKind] = useState<AppKind>('quiz');
+-  const [drawEligibility, setDrawEligibility] = useState<'guests_allowed' | 'verified'>(
+-    'guests_allowed',
+-  );
+   const [busy, setBusy] = useState(false);
+   const [submitError, setSubmitError] = useState<string | null>(null);
+   const createStarted = useRef(false);
+ 
+   // Гейт /host обязан пройти раньше: прямая перезагрузка /host/new без токена
+   // возвращается на гейт — он сделает refresh и приведёт обратно.
+   useEffect(() => {
+     if (!hostSession.getAccessToken()) navigate('/host', { replace: true });
+   }, [navigate]);
+ 
+@@ -83,27 +80,24 @@ export function SetupPage() {
+       .then(() => activateRoom(hostClient, roomId))
+       .then(() => navigate('/host/console'))
+       .catch((e: unknown) => setSubmitError(submitErrorText(e)))
+       .finally(() => setBusy(false));
+   };
+ 
+   const submitQuiz = (settings: QuizSettings) =>
+     finalize(QUIZ_APP_ID, QUIZ_MANIFEST_VERSION, settings);
+ 
+   const submitLottery = () =>
+-    // Дефолт схемы — guests_allowed: шлём явно выбранное значение (для дефолта
+-    // эквивалентно {}, но прозрачнее); parse — та же серверная схема.
+-    finalize(
+-      LOTTERY_APP_ID,
+-      LOTTERY_MANIFEST_VERSION,
+-      lotterySettingsSchema.parse({ drawEligibility }),
+-    );
++    // ADR-012 §4: draw_eligibility удалена (verified-ветка приостановлена —
++    // REGISTERED только организатор); settings-схема лотереи — пустая (I-5:
++    // точка расширения манифеста). parse — та же серверная схема.
++    finalize(LOTTERY_APP_ID, LOTTERY_MANIFEST_VERSION, lotterySettingsSchema.parse({}));
+ 
+   if (roomError) {
+     return (
+       <main>
+         <p role="alert">{roomError}</p>
+       </main>
+     );
+   }
+   if (!roomId) {
+     return (
+@@ -139,40 +133,19 @@ export function SetupPage() {
+       </fieldset>
+       {appKind === 'quiz' ? (
+         <QuizEditor onSubmit={submitQuiz} busy={busy} />
+       ) : (
+         <form
+           onSubmit={(e) => {
+             e.preventDefault();
+             submitLottery();
+           }}
+         >
+-          <fieldset disabled={busy}>
+-            <legend>Кто участвует в розыгрыше</legend>
+-            <label>
+-              <input
+-                type="radio"
+-                name="draw-eligibility"
+-                checked={drawEligibility === 'guests_allowed'}
+-                onChange={() => setDrawEligibility('guests_allowed')}
+-              />
+-              Все участники, включая гостей
+-            </label>
+-            <label>
+-              <input
+-                type="radio"
+-                name="draw-eligibility"
+-                checked={drawEligibility === 'verified'}
+-                onChange={() => setDrawEligibility('verified')}
+-              />
+-              Только зарегистрированные
+-            </label>
+-          </fieldset>
+           <button type="submit" disabled={busy}>
+             Сохранить и запустить
+           </button>
+         </form>
+       )}
+       {submitError ? <p role="alert">{submitError}</p> : null}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/pages/landing.tsx b/apps/web/src/pages/landing.tsx
+index 95a750b..153dd3a 100644
+--- a/apps/web/src/pages/landing.tsx
++++ b/apps/web/src/pages/landing.tsx
+@@ -1,48 +1,36 @@
+ import { useState, type FormEvent } from 'react';
+-import { useNavigate } from 'react-router-dom';
++import { Link, useNavigate } from 'react-router-dom';
+ 
+-// Лендинг (дизайн Task 13): два входа. Организатор — полная перезагрузка страницы
+-// на /auth/google (backend владеет /auth, router Link здесь не подходит);
+-// участник — по коду комнаты в /play.
++// Лендинг (дизайн Task 13): два входа. Организатор — страница ввода setup-токена
++// инстанса (ADR-012 §2; router-Link уместен: полная перезагрузка нужна была
++// только OAuth-флоу); участник — по коду комнаты в /play.
+ export function LandingPage() {
+   const navigate = useNavigate();
+   const [code, setCode] = useState('');
+ 
+   const submit = (e: FormEvent) => {
+     e.preventDefault();
+     const trimmed = code.trim();
+     // encodeURIComponent: код попадает в path-параметр, посторонние символы
+     // (/, ?, #) не должны ломать маршрут.
+     if (trimmed) navigate(`/play/${encodeURIComponent(trimmed)}`);
+   };
+ 
+   return (
+     <main>
+       <h1>MyMozhem</h1>
+       <p>Квизы и розыгрыши для живых событий.</p>
+       <section>
+         <h2>Я организатор</h2>
+         <p>
+-          {/* redirect обязан быть АБСОЛЮТНЫМ URL: серверный allowlist
+-              (OAUTH_REDIRECT_ALLOWLIST, REQ-ID-009) парсится как z.url() и
+-              сверяется точным совпадением строки (OAuthService.validateRedirect)
+-              — относительный '/host' не пройдёт ни при одной конфигурации.
+-              Same-origin по дизайну §0.3, поэтому origin берём из location. */}
+-          <a
+-            href={
+-              '/auth/google?redirect=' +
+-              encodeURIComponent(`${window.location.origin}/host`)
+-            }
+-          >
+-            Войти через Google
+-          </a>
++          <Link to="/host/login">Войти по токену организатора</Link>
+         </p>
+       </section>
+       <section>
+         <h2>У меня есть код</h2>
+         <form onSubmit={submit}>
+           <label>
+             Код комнаты
+             <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
+           </label>
+           <button type="submit" disabled={!code.trim()}>
+diff --git a/apps/web/src/pages/play/join-form.spec.ts b/apps/web/src/pages/play/join-form.spec.ts
+new file mode 100644
+index 0000000..07eb568
+--- /dev/null
++++ b/apps/web/src/pages/play/join-form.spec.ts
+@@ -0,0 +1,21 @@
++import { describe, expect, it } from 'vitest';
++import { buildJoinRequest } from './join-form';
++
++// Тело join (ADR-012 §3): имя необязательно — пустое уходит БЕЗ ключа
++// displayName, сервер назначит псевдоним и вернёт фактическое имя в ответе
++// (joinResponseSchema). Ключ обязан отсутствовать, а не быть пустой строкой:
++// strict-схема с displayNameSchema.min(1) отклонила бы пустое значение.
++describe('buildJoinRequest', () => {
++  it('пустое имя → body без displayName', () => {
++    const body = buildJoinRequest('ABCD-1234', '');
++    expect(body).toEqual({ code: 'ABCD-1234' });
++    expect(body).not.toHaveProperty('displayName');
++  });
++
++  it('непустое имя → body с displayName', () => {
++    expect(buildJoinRequest('ABCD-1234', 'Маша')).toEqual({
++      code: 'ABCD-1234',
++      displayName: 'Маша',
++    });
++  });
++});
+diff --git a/apps/web/src/pages/play/join-form.tsx b/apps/web/src/pages/play/join-form.tsx
+index 9e8a6f0..4ee372b 100644
+--- a/apps/web/src/pages/play/join-form.tsx
++++ b/apps/web/src/pages/play/join-form.tsx
+@@ -1,17 +1,23 @@
+ import { useState, type FormEvent } from 'react';
+-import { DISPLAY_NAME_MAX_LENGTH } from '@mymozhem/sdk';
++import { DISPLAY_NAME_MAX_LENGTH, type JoinRequest } from '@mymozhem/sdk';
+ import { ApiError } from '../../api/api-error';
+ import type { ApiClient } from '../../api/api-client';
+ import { joinRoom } from '../../api/endpoints';
+ import { decodeAccessClaims, SessionStore } from '../../state/session';
+ 
++// Тело join (ADR-012 §3): имя необязательно — пустое уходит БЕЗ ключа
++// displayName (пустая строка не прошла бы displayNameSchema.min(1)), сервер
++// назначит псевдоним и вернёт фактическое имя в ответе.
++export const buildJoinRequest = (code: string, trimmedName: string): JoinRequest =>
++  trimmedName ? { code, displayName: trimmedName } : { code };
++
+ interface JoinFormProps {
+   // Код из URL (:code): ссылка-приглашение — код показываем read-only, вводить
+   // не просим. Без кода в URL — обычное поле ввода.
+   codeFromUrl?: string;
+   initialDisplayName?: string;
+   // anon-клиент: join — auth:false, access-токена ещё нет.
+   client: ApiClient;
+   session: SessionStore;
+   onJoined: (roomId: string) => void;
+   // Ошибка авто-входа (протухшая сохранённая сессия) — показываем над формой.
+@@ -45,38 +51,41 @@ export function JoinForm({
+ }: JoinFormProps) {
+   const [code, setCode] = useState(codeFromUrl ?? '');
+   const [displayName, setDisplayName] = useState(initialDisplayName ?? '');
+   const [busy, setBusy] = useState(false);
+   const [error, setError] = useState<string | null>(initialError ?? null);
+ 
+   const submit = (e: FormEvent) => {
+     e.preventDefault();
+     const trimmedCode = code.trim();
+     const trimmedName = displayName.trim();
+-    if (!trimmedCode || !trimmedName) {
+-      setError('Введите код комнаты и имя.');
++    // Имя не обязательно (ADR-012 §3) — пустое уходит без displayName, сервер
++    // назначит псевдоним; обязателен только код комнаты.
++    if (!trimmedCode) {
++      setError('Введите код комнаты.');
+       return;
+     }
+     setBusy(true);
+     setError(null);
+-    void joinRoom(client, { code: trimmedCode, displayName: trimmedName })
++    void joinRoom(client, buildJoinRequest(trimmedCode, trimmedName))
+       .then((res) => {
+         session.setAccessToken(res.accessToken);
+         // roomId — только из claims токена (REQ-RT-009 по смыслу: идентичность —
+         // из аутентифицированного контекста, не из payload/URL).
+         const claims = decodeAccessClaims(res.accessToken);
+         if (!claims.roomId) {
+           setError('Ответ сервера без комнаты. Попробуйте ещё раз.');
+           return;
+         }
+         // Переживающая перезагрузку идентификация (дизайн §5): код+имя, не токен.
+-        SessionStore.saveGuest({ code: trimmedCode, displayName: trimmedName });
++        // Сохраняем ФАКТИЧЕСКОЕ имя из ответа — оно могло быть псевдонимом.
++        SessionStore.saveGuest({ code: trimmedCode, displayName: res.displayName });
+         onJoined(claims.roomId);
+       })
+       .catch((err: unknown) => setError(joinErrorText(err)))
+       .finally(() => setBusy(false));
+   };
+ 
+   return (
+     <form onSubmit={submit}>
+       <h1>Вход в игру</h1>
+       {codeFromUrl ? (
+@@ -88,25 +97,26 @@ export function JoinForm({
+           Код комнаты
+           <input
+             value={code}
+             onChange={(e) => setCode(e.target.value)}
+             autoComplete="off"
+             disabled={busy}
+           />
+         </label>
+       )}
+       <label>
+-        Ваше имя
++        Ваше имя (необязательно)
+         <input
+           value={displayName}
+           onChange={(e) => setDisplayName(e.target.value)}
+           maxLength={DISPLAY_NAME_MAX_LENGTH}
++          placeholder="Получите псевдоним, если пусто"
+           autoComplete="off"
+           disabled={busy}
+         />
+       </label>
+       {error ? <p role="alert">{error}</p> : null}
+       <button type="submit" disabled={busy}>
+         {busy ? 'Входим…' : 'Играть'}
+       </button>
+     </form>
+   );
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 10f35ca..3271a1b 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -17,31 +17,26 @@ services:
+   server:
+     build: .
+     environment:
+       DATABASE_URL: postgresql://mymozhem:mymozhem@postgres:5432/mymozhem?schema=public
+       # REQ-SEC-002: обязателен, >=32 байта; без значения в окружении compose не стартует.
+       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (>=32 bytes)}
+       # REQ-SEC-008: allowlist origin через запятую; пусто = CORS-заголовки не выдаются.
+       CORS_ORIGINS: ${CORS_ORIGINS:-}
+       # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
+       TRUST_PROXY: ${TRUST_PROXY:-false}
+-      # OAuth-шов e2e-smoke (Task 16): dummy-креды Google. Start-эндпоинт только
+-      # строит authorize-URL (обращения к Google нет), но без all-or-none тройки
+-      # (superRefine в config.schema) /auth/google отвечал бы 503
+-      # OAUTH_NOT_CONFIGURED и smoke не смог бы проверить 302-шов env↔UI.
+-      # На боевой деплой эти значения не годятся — callback с ними не пройдёт.
+-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-e2e-dummy-client-id}
+-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-e2e-dummy-client-secret}
+-      OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:-http://localhost:3000/auth/google/callback}
+-      # REQ-ID-009: allowlist redirect'ов — exact match (z.array(z.url()));
+-      # лендинг после OAuth шлёт ровно ${origin}/host.
+-      OAUTH_REDIRECT_ALLOWLIST: ${OAUTH_REDIRECT_ALLOWLIST:-http://localhost:3000/host}
++      # ADR-012 §2: bootstrap единственного организатора инстанса. Обязателен
++      # (>=32 байта); без значения в окружении compose не стартует.
++      ORGANIZER_SETUP_TOKEN: ${ORGANIZER_SETUP_TOKEN:?ORGANIZER_SETUP_TOKEN is required (>=32 bytes)}
++      # ADR-012 §4: призовой режим выключен по умолчанию; on — юридическая
++      # ответственность организатора (лотереи, налоги).
++      PRIZE_MODE: ${PRIZE_MODE:-off}
+       # UI-срез (дизайн §2): same-origin раздача собранного SPA из того же образа
+       # (build-стейдж Dockerfile собирает apps/web турбо-таской в /app/apps/web/dist).
+       WEB_STATIC_DIR: /app/apps/web/dist
+       PORT: 3000
+       NODE_ENV: production
+     ports:
+       - "3000:3000"
+     depends_on:
+       postgres:
+         condition: service_healthy
+diff --git a/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md b/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
+index ac87a11..c4deeda 100644
+--- a/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
++++ b/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
+@@ -1,61 +1,55 @@
+ # Smoke-чеклист первого события (UI-срез)
+ 
+ **Дата:** 2026-09-24
+ **Назначение:** ручной прогон перед первым живым событием. Каждая строка — наблюдаемый результат (что именно должно быть видно), не «проверить, что работает». Прогоняется против локального/LAN-стенда, НЕ против production.
+-**Блокер приёмки среза:** ~~строка 1 (OAuth с реальными Google-кредами)~~ — **ПРОГНАНА 2026-09-24** (протокол — таблица ниже; фикс приёмки `54da914`). Критерий §8.1 дизайна верифицирован, exit-аудит финализирован.
++**Блокер приёмки среза:** ~~строка 1 (OAuth с реальными Google-кредами)~~ — **ПРОГНАНА 2026-09-24** (фикс приёмки `54da914`; протокол того прогона — в git-истории файла, строки с тех пор переписаны). Критерий §8.1 дизайна верифицирован, exit-аудит финализирован.
+ 
+-**Стенд для прогона:** `docker compose up -d --build` из корня репозитория (web-статика раздаётся тем же контейнером, same-origin). Для прогона с телефонов стенд поднимается на машине в общей Wi-Fi сети, участники ходят на `http://<ip-машины>` (см. §0.3).
++**Ревизия ADR-012 (2026-10-12):** OAuth-вход удалён; §0.1 и §1 переписаны под setup-токен инстанса (zero-PII дефолт). §0.2 и §0.3 сохранены без изменений механики.
++
++**Стенд для прогона:** `ORGANIZER_SETUP_TOKEN=<токен стенда, ≥32 байта> docker compose up -d --build` из корня репозитория (web-статика раздаётся тем же контейнером, same-origin). Для прогона с телефонов стенд поднимается на машине в общей Wi-Fi сети, участники ходят на `http://<ip-машины>` (см. §0.3).
+ 
+ ---
+ 
+ ## 0. Предусловия (проверить ДО прогона)
+ 
+-### 0.1. Пара env↔UI: allowlist редиректа
+-
+-`OAUTH_REDIRECT_ALLOWLIST` обязан содержать `<origin>/host` **ровно в том виде**, что шлёт лендинг. Лендинг строит absolute URL из `window.location.origin` (`apps/web/src/pages/landing.tsx:31-38`), сервер сверяет точным совпадением строки (`packages/core/src/oauth/oauth.service.ts:124-136`; схема парсит значения как URL — `packages/core/src/config/config.schema.ts:62`).
++### 0.1. Setup-токен стенда
+ 
+-- localhost-стенд: дефолт compose `http://localhost:3000/host` (`docker-compose.yml:37`) — совпадает, ничего не делаем.
+-- LAN-стенд: `OAUTH_REDIRECT_ALLOWLIST=http://<ip>/host` (например `http://192.168.1.50:3000/host`). Без порта, со слэшом в конце, с https вместо http — не совпадёт: сервер ответит `OAUTH_REDIRECT_INVALID` ещё до ухода в Google.
++Значение задано в env стенда (`ORGANIZER_SETUP_TOKEN`, ≥32 байта; compose-директива `:?` — без него стенд не стартует, `docker-compose.yml`). Это единственная креденшала организатора инстанса (ADR-012 §2): сервер сравнивает её timing-safe и ограничивает попытки rate-limit'ом.
+ 
+-**Наблюдаемый результат:** `curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://<origin>/auth/google?redirect=<urlencoded http://<origin>/host>"` → `302`, `redirect_url` на `https://accounts.google.com/...`.
++**Наблюдаемый результат:** `curl -s -X POST http://<origin>/auth/organizer -H 'content-type: application/json' -d '{"setupToken":"…"}'` → `200` + заголовок `Set-Cookie: mm_refresh` (и JSON с accessToken). С неверным токеном — `401` с телом `{"code":"ORGANIZER_SETUP_INVALID"}`.
+ 
+ ### 0.2. Хост и тест-игрок — разные браузеры/профили
+ 
+-Refresh-кука одна на origin (`mm_refresh`, path `/auth`): OAuth-логин организатора затирает гостевую куку участника и наоборот. **Правило прогона:** консоль ведущего — в одном браузере (или профиле), тест-игрок с десктопа — в другом браузере/профиле/окне инкогнито; телефоны — отдельные устройства, там проблемы нет. Нарушение правила выглядит как «участника внезапно разлогинило / консоль потеряла сессию» — это не баг, а следствие shared-куки.
++Refresh-кука одна на origin (`mm_refresh`, path `/auth`): вход организатора по setup-токену затирает гостевую куку участника и наоборот. **Правило прогона:** консоль ведущего — в одном браузере (или профиле), тест-игрок с десктопа — в другом браузере/профиле/окне инкогнито; телефоны — отдельные устройства, там проблемы нет. Нарушение правила выглядит как «участника внезапно разлогинило / консоль потеряла сессию» — это не баг, а следствие shared-куки.
+ 
+ **Наблюдаемый результат:** после входа организатора вкладка участника в другом браузере продолжает получать события; в том же браузере — не проверяем.
+ 
+ ### 0.3. LAN по plain HTTP — известное ограничение розыгрыша
+ 
+ `crypto.randomUUID()` — secure-context-only API: на `http://<ip>` (не localhost) кнопка «Разыграть» не сможет сгенерировать drawId. Клиент показывает честную ошибку «Действие не выполнено: браузер не даёт сгенерировать идентификатор розыгрыша (нужен HTTPS или localhost)» (`apps/web/src/pages/host/prizes-panel.tsx:30-31`), а не мёртвую кнопку. **Если событие планируется по LAN по plain HTTP — это норма платформы, решение о fallback (TLS-терминатор / иной источник drawId) принимает владелец до события**, не ведущий в моменте.
+ 
+ **Наблюдаемый результат (контрольный прогон):** консоль по `http://<ip>` → «Разыграть» → текст ошибки в панели призов; по `http://localhost:3000` на машине стенда — розыгрыш проходит (строка 9).
+ 
+ ---
+ 
+-## 1. OAuth с реальными Google-кредами — ДЕЙСТВИЕ ВЛАДЕЛЬЦА
+-
+-Playwright-smoke проверяет только 302-шов (`apps/web/e2e/smoke.spec.ts:55-64`); полный круг Google → callback → сессия ручной.
++## 1. Вход организатора по setup-токену
+ 
+-**Подготовка (владелец):**
+-1. Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID (Web application). Authorized redirect URI: `http://<origin>/auth/google/callback` (серверный callback — `packages/core/src/transport/oauth.controller.ts:37`).
+-2. Передать стенду реальные значения: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OAUTH_REDIRECT_URI=http://<origin>/auth/google/callback` (все три обязаны быть заданы вместе — all-or-none, иначе 503 `OAUTH_NOT_CONFIGURED`).
+-3. Проверить §0.1 (allowlist содержит `http://<origin>/host`).
++Playwright-smoke проходит этот путь целиком (`apps/web/e2e/smoke.spec.ts`, шаг 1); здесь — ручная проверка с токеном стенда.
+ 
+ **Прогон:**
+-1.1. Открыть лендинг → «Войти через Google».
+-**Результат:** полная перезагрузка на `accounts.google.com` с client_id стенда (не dummy), выбор аккаунта, возврат на `http://<origin>/host` без экрана ошибки.
+-1.2. После callback — гейт консоли.
+-**Результат:** молчаливый refresh → переход на `/host/new` (комнаты ещё нет). Повторный заход на `/` → «Войти через Google» → сразу в `/host/*` без выбора аккаунта (refresh-кука жива).
+-1.3. Негатив: открыть `/host` в чистом профиле без куки.
+-**Результат:** редирект на лендинг `/` (гейт не пускает гостя/анонима в консоль).
++1.1. Открыть лендинг → «Войти по токену организатора».
++**Результат:** переход на `/host/login` (router-навигация, без перезагрузки), форма с полем «Токен организатора».
++1.2. Ввести setup-токен стенда → «Войти».
++**Результат:** bootstrap ставит refresh-куку, гейт молча делает refresh → переход на `/host/new` (комнаты ещё нет). Повторный заход на `/host` — сразу в `/host/*` без ввода токена (refresh-кука жива).
++1.3. Негатив: ввести неверный токен → «Войти».
++**Результат:** ошибка «Неверный токен организатора.» (role=alert), перехода нет; токен нигде не сохраняется (после протухания refresh-сессии вводится заново).
+ 
+ ---
+ 
+ ## 2. Create → editor → configure → activate
+ 
+ 2.1. `/host/new`: выбрать приложение «Квиз», заполнить редактор: 2+ вопроса, у каждого 2+ варианта, отметить правильные, сохранить.
+ **Результат:** кнопка «Сохранить и запустить» активна только при валидной форме; после нажатия — переход на `/host/console`, статус комнаты ACTIVE, код комнаты крупно + копируемая ссылка.
+ 2.2. Контроль backend-контура (не UI-действие, проверка шва): комната активирована через HTTP lifecycle-контур, не сервисным вызовом — после spectator-join экран показывает статус/ведение, выведенный из snapshot комнаты (производный статус через deriveRoomStatus, `apps/web/src/pages/screen/screen-page.tsx:123`, — не литеральные имена core-событий): комната не в состоянии «ожидание настройки», после открытия вопроса — его текст.
+ 
+ ---
+@@ -99,21 +93,21 @@ Playwright-smoke проверяет только 302-шов (`apps/web/e2e/smoke
+ ## 7. Reload консоли mid-event
+ 
+ 7.1. В разгар вопроса перезагрузить страницу консоли (F5).
+ **Результат:** после reload консоль показывает ту же комнату: код комнаты и ссылки на месте, ведение продолжается с текущего состояния (roomId/code переживают перезагрузку в localStorage — `apps/web/src/state/session.ts:71-83`, `apps/web/src/pages/host/console-page.tsx:31`).
+ 
+ ---
+ 
+ ## 8. Пауза > 15 минут (silent refresh)
+ 
+ 8.1. Оставить консоль бездействовать дольше access TTL (15 мин), затем нажать любую команду (например, «Закрыть вопрос» или создать приз).
+-**Результат:** команда проходит без повторного OAuth-логина и без видимой ошибки — клиент молча обновил access-токен через refresh (`apps/web/src/api/api-client.ts:34-35`: 401 → один refresh → один retry).
++**Результат:** команда проходит без повторного ввода setup-токена и без видимой ошибки — клиент молча обновил access-токен через refresh (`apps/web/src/api/api-client.ts:34-35`: 401 → один refresh → один retry).
+ 
+ ---
+ 
+ ## 9. Приз + розыгрыш + fulfill/revoke
+ 
+ 9.1. Консоль, панель призов: создать приз «Главный приз», quantity 1.
+ **Результат:** приз в списке с остатком 1.
+ 9.2. «Разыграть» (в lottery-комнате; в quiz-комнате кнопка не рисуется — одна комната = одно приложение, I-5: для события «квиз + розыгрыш» создаётся вторая комната, участники заходят по второму коду).
+ **Результат:** на клиентах (участники + экран) появляется победитель из числа участников; остаток приза в консоли уменьшился до 0.
+ 9.3. fulfill: отметить вручение.
+@@ -145,24 +139,24 @@ Playwright-smoke проверяет только 302-шов (`apps/web/e2e/smoke
+ **Результат:** видит финальное состояние (табло/итоги), а не ошибку и не «ожидание вопроса».
+ 
+ ---
+ 
+ ## Протокол прогона
+ 
+ Заполнить перед событием; каждая строка — ✅ / ❌ + комментарий.
+ 
+ | # | Строка | Статус | Комментарий |
+ |---|---|---|---|
+-| 0.1 | allowlist ↔ лендинг (302 probe) | ✅ 2026-09-24 | `OAUTH_REDIRECT_ALLOWLIST=http://localhost:3000/host` (дефолт compose), 302 → accounts.google.com с реальным client_id |
++| 0.1 | setup-токен стенда (curl-probe bootstrap) | | |
+ | 0.2 | раздельные браузеры/профили | | |
+ | 0.3 | LAN: честная ошибка «Разыграть» / localhost OK | | localhost-прогон 2026-09-24, LAN не упражнялся |
+-| 1.1–1.3 | OAuth полный круг + гейт (владелец) | ✅ 2026-09-24 | Реальные креды (client `mymozhem-local-test`, test users — 2 email). 1.1: Google → callback → `/host` ✅; 1.2: повторный вход без выбора аккаунта ✅; 1.3: чистое инкогнито → редирект на лендинг ✅. **По ходу найден и исправлен баг:** strict-схема callback отклоняла штатный вход (Google дописывает scope/authuser/prompt → 400 REQUEST_INVALID) — фикс `54da914` (SDK strip) + контрактный тест |
++| 1.1–1.3 | вход организатора по setup-токену + негатив | | |
+ | 2.1–2.2 | create → editor → activate | | |
+ | 3.1–3.3 | два телефона + негатив кода | | |
+ | 4.1 | экран read-only | | |
+ | 5.1–5.3 | ведение: open/answer/close/reveal, табло сходится | | |
+ | 6.1 | обрыв Wi-Fi → перефолд | | |
+ | 7.1 | reload консоли mid-event | | |
+ | 8.1 | пауза >15 мин → silent refresh | | |
+ | 9.1–9.4 | приз/розыгрыш/fulfill/revoke | | |
+ | 10.1 | конец колоды: disabled + confirm | | |
+ | 11.1 | exclude → дисконнект | | |

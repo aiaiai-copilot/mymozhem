@@ -1,0 +1,176 @@
+# Review package: 47d7105..107e12d
+
+## Commits
+107e12d refactor(core): extract shared TEST_CONFIG into src/testing (REQ-OPS-003)
+
+## Files changed
+ packages/core/src/membership/membership.service.int-spec.ts | 13 ++-----------
+ packages/core/src/realtime/event-log.int-spec.ts            | 11 +----------
+ packages/core/src/room/room.service.int-spec.ts             | 11 +----------
+ packages/core/src/testing/test-config.ts                    | 12 ++++++++++++
+ 4 files changed, 16 insertions(+), 31 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 59bb8df..5cbea1c 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -1,48 +1,39 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+-import type { AppConfig } from '../config/config.schema';
++import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from './membership.service';
+ import { JoinRateLimiter } from './join-rate-limiter';
+ import {
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+ } from './membership.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const IP = '203.0.113.7';
+ const IP2 = '198.51.100.9';
+ 
+-const TEST_CONFIG: AppConfig = {
+-  NODE_ENV: 'test',
+-  PORT: 3000,
+-  DATABASE_URL: 'postgresql://unused',
+-  ROOM_CODE_MIN_LEN: 8,
+-  ROOM_PARTICIPANT_LIMIT: 500,
+-  JOIN_RATE_LIMIT_IP: 20,
+-};
+-
+ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   let db: TestDb;
+   let roomService: RoomService;
+ 
+   const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
+     new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+-      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? 500 },
++      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+     );
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(),
+       new AppRegistryService([]),
+       new MembershipService(
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index 40a0509..55239a0 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -1,33 +1,24 @@
+ import { ContractError, validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
++import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+-import type { AppConfig } from '../config/config.schema';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+-const TEST_CONFIG: AppConfig = {
+-  NODE_ENV: 'test',
+-  PORT: 3000,
+-  DATABASE_URL: 'postgresql://unused',
+-  ROOM_CODE_MIN_LEN: 8,
+-  ROOM_PARTICIPANT_LIMIT: 500,
+-  JOIN_RATE_LIMIT_IP: 20,
+-};
+-
+ describe('EventLogService.commitCoreEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     rooms = new RoomService(
+       db.prisma,
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 0e23855..ac32848 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,45 +1,36 @@
+ import { validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
++import { TEST_CONFIG } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
+-import type { AppConfig } from '../config/config.schema';
+ import { RoomService } from './room.service';
+ import {
+   RoomError,
+   RoomTransitionError,
+   RoomConflictError,
+   RoomNotConfiguredError,
+   RoomOrganizerNotRegisteredError,
+   RoomSettingsFrozenError,
+ } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
+ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+ 
+-const TEST_CONFIG: AppConfig = {
+-  NODE_ENV: 'test',
+-  PORT: 3000,
+-  DATABASE_URL: 'postgresql://unused',
+-  ROOM_CODE_MIN_LEN: 8,
+-  ROOM_PARTICIPANT_LIMIT: 500,
+-  JOIN_RATE_LIMIT_IP: 20,
+-};
+-
+ const makeService = (db: TestDb) =>
+   new RoomService(
+     db.prisma,
+     new EventLogService(),
+     new AppRegistryService([validManifests[0]]),
+     new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+new file mode 100644
+index 0000000..1e0750a
+--- /dev/null
++++ b/packages/core/src/testing/test-config.ts
+@@ -0,0 +1,12 @@
++import type { AppConfig } from '../config/config.schema';
++
++// Shared AppConfig for int-specs. Values are inert: DATABASE_URL is unused because
++// startTestDb() points PrismaService at a throwaway testcontainer.
++export const TEST_CONFIG: AppConfig = {
++  NODE_ENV: 'test',
++  PORT: 3000,
++  DATABASE_URL: 'postgresql://unused',
++  ROOM_CODE_MIN_LEN: 8,
++  ROOM_PARTICIPANT_LIMIT: 500,
++  JOIN_RATE_LIMIT_IP: 20,
++};

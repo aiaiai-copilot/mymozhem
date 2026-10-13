@@ -1,0 +1,234 @@
+# Review package: 3b6e190..HEAD
+
+## Commits
+1f390d3 docs(core): фактический механизм сериализации C-8.1 в комментариях + восстановленные rationale свипа
+cc5eec9 fix(rewards): award-гарда C-8.1 — блокирующее чтение FOR NO KEY UPDATE (амендмент 2026-09-25)
+
+## Files changed
+ packages/core/src/identity/guest-sweep.service.ts | 23 +++++---
+ packages/core/src/rewards/rewards.int-spec.ts     | 71 +++++++++++++++++++++++
+ packages/core/src/rewards/rewards.service.ts      | 19 +++---
+ 3 files changed, 99 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/identity/guest-sweep.service.ts b/packages/core/src/identity/guest-sweep.service.ts
+index ac21d3d..ade1959 100644
+--- a/packages/core/src/identity/guest-sweep.service.ts
++++ b/packages/core/src/identity/guest-sweep.service.ts
+@@ -22,47 +22,56 @@ class SweepSuspensionRaceError extends Error {
+ export class GuestSweepService {
+   private readonly logger = new Logger(GuestSweepService.name);
+ 
+   constructor(
+     private readonly prisma: PrismaService,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
+     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
+   ) {}
+ 
+   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
+-  // свипа; C-8.1 (ф.4) закрыто re-check'ом: гард опрашивается дважды ВНУТРИ tx —
+-  // до анонимизации и после updateMany. READ COMMITTED делает видимым любой award,
+-  // закоммитившийся до перепроверки (включая тот, чей INSERT ждал нашей
+-  // FOR NO KEY UPDATE блокировки на identity — FK-проверка Award берёт FOR KEY
+-  // SHARE, блокировки конфликтуют) → throw откатывает всю tx. Остаточное
+-  // направление «анонимизирован → награждён» (award коммитится после COMMIT
+-  // свипа) закрыто гардой identity.deletedAt в RewardsService.awardPrize.
++  // свипа; C-8.1 (ф.4, амендмент 2026-09-25) закрыто re-check'ом: гард опрашивается
++  // дважды ВНУТРИ tx — до анонимизации и после updateMany. READ COMMITTED делает
++  // видимым любой award, закоммитившийся до перепроверки → throw откатывает всю tx.
++  // С параллельным награждением пути сериализует блокирующее чтение award-гарды
++  // (RewardsService.awardPrize): FOR NO KEY UPDATE — тот же режим, что у updateMany
++  // свипа, а режим конфликтует сам с собой на строке identity → кто первым взял
++  // блокировку, тот выиграл; проигравший после ожидания перечитывает строку (EPQ).
++  // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY UPDATE
++  // она не конфликтует. Остаточное направление «анонимизирован → награждён»
++  // закрыто той же гардой identity.deletedAt.
+   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
+     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
+     try {
+       return await this.prisma.$transaction(async (tx) => {
+         const candidates = await tx.identity.findMany({
+           where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
+           select: { id: true },
+         });
+         if (candidates.length === 0) return 0;
+         const ids = candidates.map((c) => c.id);
+         const suspended = new Set<string>();
+         for (const guard of this.guards) {
+           for (const id of await guard.hasOpenAwards(tx, ids)) suspended.add(id);
+         }
+         const sweepIds = ids.filter((id) => !suspended.has(id));
+         if (sweepIds.length === 0) return 0;
+         const anonymized = await tx.identity.updateMany({
++          // deletedAt: null в where — вторая линия защиты от гонки с ручным
++          // исключением: concurrent exclusion мог успеть soft-delete'нуть
++          // identity между выборкой кандидатов и этим updateMany.
+           where: { id: { in: sweepIds }, deletedAt: null },
+           data: { displayName: null, email: null, deletedAt: now },
+         });
++        // Отзыв живых сессий гостя — по прецеденту среза исключения
++        // (membership.service.ts:147-153). Сессия гостя под приостановкой
++        // истекает по своему капу как обычно (design §5) — здесь её нет.
+         await tx.session.updateMany({
+           where: { identityId: { in: sweepIds }, revokedAt: null },
+           data: { revokedAt: now },
+         });
+         // C-8.1: re-check после updateMany — award, закоммитившийся между первым
+         // чеком и этой строкой, здесь виден → откат всей tx (анонимизация и
+         // отзыв сессий отменяются).
+         const raced = new Set<string>();
+         for (const guard of this.guards) {
+           for (const id of await guard.hasOpenAwards(tx, sweepIds)) raced.add(id);
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+index 2553668..49ad941 100644
+--- a/packages/core/src/rewards/rewards.int-spec.ts
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -1,12 +1,13 @@
+ import { randomUUID } from 'node:crypto';
+ import { Test } from '@nestjs/testing';
++import type { Prisma } from '@prisma/client';
+ import type { AppEffect } from '@mymozhem/sdk';
+ import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import { MembershipModule } from '../membership/membership.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+@@ -110,20 +111,90 @@ describe('RewardsService (int)', () => {
+     await expect(
+       outbox.run((tx) =>
+         rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, swept.id)]),
+       ),
+     ).rejects.toMatchObject({ code: 'IDENTITY_ANONYMIZED' });
+ 
+     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
+     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
+   });
+ 
++  // C-8.1 (амендмент 2026-09-25): остаточное чередование «гард прочитал до
++  // коммита свипа, INSERT после» — детерминированно, без sleep'ов (барьеры на
++  // промисах). tx-«свип» — подмножество GuestSweepService: анонимизирует гостя
++  // и ДЕРЖИТ блокировку FOR NO KEY UPDATE на строке identity до разрешения
++  // барьера. Контакт с гардой ловит tx-прокси: неблокирующий findUnique
++  // сигналит ПОСЛЕ чтения (stale-чтение deletedAt NULL захвачено, пока «свип»
++  // на барьере, — на таком коде тест обязан быть КРАСНЫМ: дальше путь award
++  // ни с чем не конфликтует и коммитится), блокирующий $queryRaw …
++  // FOR NO KEY UPDATE сигналит ДО вызова (дальше чтение реально ждёт коммита
++  // «свипа» в Postgres и перечитывает строку — READ COMMITTED, EPQ).
++  it('гонка: «свип» держит блокировку identity — гард ждёт его коммита и отклоняет award; фонд не тронут (C-8.1)', async () => {
++    const { room, prize } = await seedPrize(1);
++    const winner = await guest();
++
++    let markAnonymized!: () => void;
++    const anonymizedInTx = new Promise<void>((res) => (markAnonymized = res));
++    let releaseSweep!: () => void;
++    const sweepBarrier = new Promise<void>((res) => (releaseSweep = res));
++    const sweepTx = db.prisma.$transaction(async (tx) => {
++      await tx.identity.update({ where: { id: winner.id }, data: { deletedAt: new Date() } });
++      markAnonymized();
++      await sweepBarrier;
++    });
++    await anonymizedInTx;
++
++    let markGuardContact!: () => void;
++    const guardContact = new Promise<void>((res) => (markGuardContact = res));
++    let releaseGuard!: () => void;
++    const guardGate = new Promise<void>((res) => (releaseGuard = res));
++    const gateTx = (tx: Prisma.TransactionClient): Prisma.TransactionClient =>
++      new Proxy(tx, {
++        get(target, prop) {
++          if (prop === 'identity') {
++            return new Proxy(target.identity, {
++              get(t, p) {
++                const orig = Reflect.get(t, p) as (...a: unknown[]) => Promise<unknown>;
++                if (p !== 'findUnique') return orig;
++                return async (...args: unknown[]) => {
++                  const row = await orig.call(t, ...args);
++                  markGuardContact();
++                  await guardGate;
++                  return row;
++                };
++              },
++            });
++          }
++          if (prop === '$queryRaw') {
++            const orig = Reflect.get(target, prop) as (...a: unknown[]) => Promise<unknown>;
++            return (...args: unknown[]) => {
++              markGuardContact();
++              return orig.call(target, ...args);
++            };
++          }
++          return Reflect.get(target, prop);
++        },
++      });
++
++    const awardRun = outbox.run((tx) =>
++      rewards.executeEffects(gateTx(tx), room.id, 'lottery', [prizeEffect(prize.id, winner.id)]),
++    );
++    await guardContact; // гард вступил в контакт со строкой identity, «свип» ещё на барьере
++    releaseGuard();
++    releaseSweep(); // «свип» коммитится; блокирующий гард перечитывает строку (EPQ)
++
++    await expect(awardRun).rejects.toMatchObject({ code: 'IDENTITY_ANONYMIZED' });
++    await sweepTx;
++    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++  });
++
+   it('K > quantity конкурентных награждений разным identity → ровно quantity успехов, без минуса (REQ-RWD-010)', async () => {
+     const { room, prize } = await seedPrize(2);
+     const winners = await Promise.all(Array.from({ length: 5 }, () => guest()));
+     const results = await Promise.allSettled(
+       winners.map((w) => outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, w.id)]))),
+     );
+     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+     for (const r of results.filter((x) => x.status === 'rejected')) {
+       expect((r as PromiseRejectedResult).reason).toBeInstanceOf(PrizeFundExhaustedError);
+     }
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+index 84129a0..b111248 100644
+--- a/packages/core/src/rewards/rewards.service.ts
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -64,27 +64,32 @@ export class RewardsService implements AwardEffectHandler {
+   // декремента откатывает insert вместе со всей транзакцией (REQ-RWD-010).
+   private async awardPrize(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     sourceAppId: string,
+     prizeId: string,
+     winnerId: string,
+   ): Promise<void> {
+     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
+     if (!prize) throw new PrizeUnknownError(prizeId);
+-    // C-8.1 (ф.4): победитель не должен быть анонимизирован/отсутствовать. Чтение
+-    // в той же tx; FK-проверка Award ниже берёт FOR KEY SHARE на identity и
+-    // конфликтует с updateMany свипа (FOR NO KEY UPDATE) — пути сериализуются,
+-    // и проигравший гонку видит финальное состояние этой проверкой. Отказ —
+-    // типизированный, откатывает tx без списания фонда (организатор перерозыгрышит).
+-    const winner = await tx.identity.findUnique({ where: { id: winnerId }, select: { deletedAt: true } });
+-    if (winner === null || winner.deletedAt !== null) {
++    // C-8.1 (ф.4, амендмент 2026-09-25): победитель не должен быть
++    // анонимизирован/отсутствовать. Чтение БЛОКИРУЮЩЕЕ (FOR NO KEY UPDATE), в той
++    // же tx, до INSERT: режим конфликтует сам с собой — в том числе с updateMany
++    // свипа на строке identity — пути сериализуются, кто первым взял блокировку,
++    // тот выиграл. Если строку держит свип, гард ждёт его коммита и перечитывает
++    // последнюю закоммиченную версию (READ COMMITTED, EPQ) → видит deletedAt.
++    // FK-проверка Award (FOR KEY SHARE) в механизме не участвует: с FOR NO KEY
++    // UPDATE она не конфликтует. Отказ — типизированный, откатывает tx без
++    // списания фонда (организатор перерозыгрышит).
++    const winnerRows = await tx.$queryRaw<{ deletedAt: Date | null }[]>`
++      SELECT "deletedAt" FROM identity."Identity" WHERE id = ${winnerId} FOR NO KEY UPDATE`;
++    if (winnerRows.length === 0 || winnerRows[0].deletedAt !== null) {
+       throw new IdentityAnonymizedError(winnerId);
+     }
+     // НЕ try/catch P2002: unique-violation абортит Postgres-транзакцию (25P02 на
+     // каждый следующий statement, COMMIT молча откатывает) — в батче эффектов это
+     // убило бы sibling-эффекты и коммиты событий. Дубль — не-возбуждающим
+     // INSERT ... ON CONFLICT DO NOTHING по частичному индексу (REQ-RWD-003).
+     // Не-nullable колонок без DB-дефолта, кроме перечисленных, в модели нет.
+     const inserted = await tx.$executeRaw`
+       INSERT INTO rewards."Award" (id, "roomId", "prizeId", "winnerId", "sourceAppId")
+       VALUES (gen_random_uuid(), ${roomId}::uuid, ${prizeId}::uuid, ${winnerId}::uuid, ${sourceAppId})

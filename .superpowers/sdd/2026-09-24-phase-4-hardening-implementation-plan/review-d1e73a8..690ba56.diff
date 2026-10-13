@@ -1,0 +1,432 @@
+# Review package: d1e73a8..690ba56
+
+## Commits
+690ba56 feat(core): LOG_LEVEL config + PinoLoggerModule (nestjs-pino, requestId, redact) — REQ-OPS-004
+
+## Files changed
+ packages/core/package.json                         |  3 +
+ packages/core/src/config/config.schema.ts          |  2 +
+ .../core/src/observability/pino-logger.module.ts   | 60 +++++++++++++++++++
+ .../core/src/observability/pino-options.spec.ts    | 21 +++++++
+ packages/core/src/testing/test-config.ts           |  1 +
+ pnpm-lock.yaml                                     | 67 ++++++++++++++++++++++
+ 6 files changed, 154 insertions(+)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 093c091..2c8c962 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -17,21 +17,24 @@
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-socket.io": "^11.1.28",
+     "@nestjs/schedule": "^6.1.3",
+     "@nestjs/websockets": "^11.1.28",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "ajv": "^8.20.0",
+     "ajv-formats": "^3.0.1",
+     "jsonwebtoken": "^9.0.3",
++    "nestjs-pino": "^4.6.1",
+     "pg": "^8.13.0",
++    "pino": "^9.14.0",
++    "pino-http": "^10.5.0",
+     "prom-client": "^15.1.3",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "socket.io": "^4.8.3",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/platform-fastify": "^11.0.0",
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index 17858f9..d4b0897 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -66,20 +66,22 @@ export const configSchema = z.object({
+       s
+         .split(',')
+         .map((o) => o.trim())
+         .filter(Boolean),
+     )
+     .pipe(z.array(z.url())),
+   // TTL state/PKCE/redirect кук OAuth-флоу (секунды).
+   OAUTH_STATE_TTL: z.coerce.number().int().min(60).max(1800).default(600),
+   // REQ-SEC-007 (§4 login_rate_limit): /auth/google и /auth/google/callback, 10/мин на IP.
+   OAUTH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
++  // REQ-OPS-004 (ф.4): уровень структурных логов (pino levels).
++  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+ })
+   .superRefine((cfg, ctx) => {
+     if (cfg.NODE_ENV === 'production' && cfg.CORS_ORIGINS.includes('*')) {
+       ctx.addIssue({
+         code: 'custom',
+         path: ['CORS_ORIGINS'],
+         message: 'CORS wildcard is forbidden in production (REQ-SEC-008)',
+       });
+     }
+     const googleSet = [cfg.GOOGLE_CLIENT_ID, cfg.GOOGLE_CLIENT_SECRET, cfg.OAUTH_REDIRECT_URI];
+diff --git a/packages/core/src/observability/pino-logger.module.ts b/packages/core/src/observability/pino-logger.module.ts
+new file mode 100644
+index 0000000..f4d1ec9
+--- /dev/null
++++ b/packages/core/src/observability/pino-logger.module.ts
+@@ -0,0 +1,60 @@
++import { randomUUID } from 'node:crypto';
++import { LoggerModule } from 'nestjs-pino';
++import type { DestinationStream } from 'pino';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++
++// REQ-OPS-004 (ф.4, дизайн §2): структурные JSON-логи поверх nestjs-pino.
++// Корреляция requestId — из genReqId (pino-http кладёт его в req.id и в каждую
++// строку лога запроса); roomId/actorId привязываются потребителями через
++// logger.assign/поля в операционных точках (Task 8), не middleware-магией.
++
++// Опциональное назначение логов: прод — stdout (pino default); тесты подставляют
++// буферный Writable и читают фактические JSON-строки (observability.int-spec).
++export const PINO_STREAM = Symbol('PINO_STREAM');
++
++interface GenReqIdReq {
++  headers: Record<string, unknown>;
++}
++interface GenReqIdRes {
++  setHeader(name: string, value: string): void;
++}
++
++// Чистая фабрика опций pino-http — юнит-тестируема без Nest (pino-options.spec).
++export function buildPinoHttpOptions(config: AppConfig): {
++  level: string;
++  genReqId: (req: GenReqIdReq, res: GenReqIdRes) => string;
++  redact: { paths: string[]; censor: string };
++} {
++  return {
++    level: config.LOG_LEVEL,
++    // requestId — uuid; отражаем в ответ для разбора инцидентов с игроками.
++    genReqId: (_req: GenReqIdReq, res: GenReqIdRes): string => {
++      const id = randomUUID();
++      res.setHeader('x-request-id', id);
++      return id;
++    },
++    // Тела и payload'ы не логируются нормой дизайна; секретные заголовки маскируем.
++    redact: {
++      paths: ['req.headers.authorization', 'req.headers.cookie'],
++      censor: '[redacted]',
++    },
++  };
++}
++
++// Dynamic module определён ОДИН раз и импортируется только по ссылке — Nest
++// дедуплицирует его по метаданным, повторный импорт в дереве не порождает
++// дубль-регистрацию провайдеров. LoggerModule nestjs-pino — @Global: после
++// включения в дерево PinoLogger резолвится в любом модуле этого дерева.
++export const PinoLoggerModule = LoggerModule.forRootAsync({
++  imports: [ConfigModule],
++  inject: [APP_CONFIG, { token: PINO_STREAM, optional: true }],
++  useFactory: (config: AppConfig, stream?: DestinationStream) => ({
++    pinoHttp: stream === undefined ? buildPinoHttpOptions(config) : { ...buildPinoHttpOptions(config), stream },
++  }),
++});
++
++// Boundary observability-libs-contained: потребители импортируют PinoLogger
++// ОТСЮДА, не из nestjs-pino напрямую (Task 8 опирается на этот реэкспорт).
++export { PinoLogger } from 'nestjs-pino';
+diff --git a/packages/core/src/observability/pino-options.spec.ts b/packages/core/src/observability/pino-options.spec.ts
+new file mode 100644
+index 0000000..dd888ab
+--- /dev/null
++++ b/packages/core/src/observability/pino-options.spec.ts
+@@ -0,0 +1,21 @@
++import { TEST_CONFIG } from '../testing/test-config';
++import { buildPinoHttpOptions } from './pino-logger.module';
++
++// REQ-OPS-004 (ф.4, дизайн §2): опции pino-http — чистая фабрика, юнит-гейты.
++describe('buildPinoHttpOptions (REQ-OPS-004)', () => {
++  it('уровень — из конфига', () => {
++    expect(buildPinoHttpOptions({ ...TEST_CONFIG, LOG_LEVEL: 'debug' }).level).toBe('debug');
++  });
++
++  it('redact маскирует authorization и cookie (Review Focus 5)', () => {
++    const opts = buildPinoHttpOptions(TEST_CONFIG);
++    expect(opts.redact.paths).toEqual(['req.headers.authorization', 'req.headers.cookie']);
++  });
++
++  it('genReqId генерирует uuid и отражает его в заголовок x-request-id', () => {
++    const setHeader = jest.fn();
++    const id = buildPinoHttpOptions(TEST_CONFIG).genReqId({ headers: {} }, { setHeader });
++    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
++    expect(setHeader).toHaveBeenCalledWith('x-request-id', id);
++  });
++});
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index 6c7bd41..2d4655f 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -19,11 +19,12 @@ export const TEST_CONFIG: AppConfig = {
+   REFRESH_RATE_LIMIT: 10,
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
+   MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   RECONNECT_RATE_LIMIT_PER_MIN: 10,
+   TRUST_PROXY: false,
+   CORS_ORIGINS: [],
+   // Google-секция опциональна (all-or-none) — в тестовом конфиге отсутствует.
+   OAUTH_STATE_TTL: 600,
+   OAUTH_RATE_LIMIT: 10,
+   OAUTH_REDIRECT_ALLOWLIST: [],
++  LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
+ };
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index fc21323..a4cb6c5 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -239,23 +239,32 @@ importers:
+         version: 7.8.0(prisma@7.8.0(@types/react-dom@18.3.7(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(typescript@5.9.3))(typescript@5.9.3)
+       ajv:
+         specifier: ^8.20.0
+         version: 8.20.0
+       ajv-formats:
+         specifier: ^3.0.1
+         version: 3.0.1(ajv@8.20.0)
+       jsonwebtoken:
+         specifier: ^9.0.3
+         version: 9.0.3
++      nestjs-pino:
++        specifier: ^4.6.1
++        version: 4.6.1(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@10.5.0)(pino@9.14.0)(rxjs@7.8.2)
+       pg:
+         specifier: ^8.13.0
+         version: 8.22.0
++      pino:
++        specifier: ^9.14.0
++        version: 9.14.0
++      pino-http:
++        specifier: ^10.5.0
++        version: 10.5.0
+       prom-client:
+         specifier: ^15.1.3
+         version: 15.1.3
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+       socket.io:
+@@ -2791,20 +2800,29 @@ packages:
+   natural-compare@1.4.0:
+     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+ 
+   negotiator@0.6.3:
+     resolution: {integrity: sha512-+EUsqGPLsM+j/zdChZjsnX51g4XrHFOIXwfnCVPGlQk/k5giakcKsuxCObBRu6DSm9opw/O6slWbJdghQM4bBg==}
+     engines: {node: '>= 0.6'}
+ 
+   neo-async@2.6.2:
+     resolution: {integrity: sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==}
+ 
++  nestjs-pino@4.6.1:
++    resolution: {integrity: sha512-nuARXa0xpdJ1lY2+fgycIQr6H3g0VgqAWNK3xMYjOFcj2DoPETNXj0lV3Y86nRuI7BUfQp5PGiVoZvT4dTWbpQ==}
++    engines: {node: '>= 14'}
++    peerDependencies:
++      '@nestjs/common': ^8.0.0 || ^9.0.0 || ^10.0.0 || ^11.0.0
++      pino: ^7.5.0 || ^8.0.0 || ^9.0.0 || ^10.0.0
++      pino-http: ^6.4.0 || ^7.0.0 || ^8.0.0 || ^9.0.0 || ^10.0.0 || ^11.0.0
++      rxjs: ^7.1.0
++
+   node-int64@0.4.0:
+     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
+ 
+   node-releases@2.0.51:
+     resolution: {integrity: sha512-wRNIrw4DmVLKQlbgOMdkMx27Wrpzes2hh5Jtbi2bjPd+4wJstWIqP5A+lscnqbm0xxmT5Bpg8Lec5ItEBwx6BQ==}
+     engines: {node: '>=18'}
+ 
+   normalize-path@3.0.0:
+     resolution: {integrity: sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==}
+     engines: {node: '>=0.10.0'}
+@@ -2948,30 +2966,40 @@ packages:
+     engines: {node: '>=8.6'}
+ 
+   picomatch@4.0.5:
+     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
+     engines: {node: '>=12'}
+ 
+   picomatch@4.0.7:
+     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
+     engines: {node: '>=12'}
+ 
++  pino-abstract-transport@2.0.0:
++    resolution: {integrity: sha512-F63x5tizV6WCh4R6RHyi2Ml+M70DNRXt/+HANowMflpgGFMAym/VKm6G7ZOQRjqN7XbGxK1Lg9t6ZrtzOaivMw==}
++
+   pino-abstract-transport@3.0.0:
+     resolution: {integrity: sha512-wlfUczU+n7Hy/Ha5j9a/gZNy7We5+cXp8YL+X+PG8S0KXxw7n/JXA3c46Y0zQznIJ83URJiwy7Lh56WLokNuxg==}
+ 
++  pino-http@10.5.0:
++    resolution: {integrity: sha512-hD91XjgaKkSsdn8P7LaebrNzhGTdB086W3pyPihX0EzGPjq5uBJBXo4N5guqNaK6mUjg9aubMF7wDViYek9dRA==}
++
+   pino-std-serializers@7.1.0:
+     resolution: {integrity: sha512-BndPH67/JxGExRgiX1dX0w1FvZck5Wa4aal9198SrRhZjH3GxKQUKIBnYJTdj2HDN3UQAS06HlfcSbQj2OHmaw==}
+ 
+   pino@10.3.1:
+     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
+     hasBin: true
+ 
++  pino@9.14.0:
++    resolution: {integrity: sha512-8OEwKp5juEvb/MjpIc4hjqfgCNysrS94RIOMXYvpYCdm/jglrKEiAYmiumbmGhCvs+IcInsphYDFwqrjr7398w==}
++    hasBin: true
++
+   pirates@4.0.7:
+     resolution: {integrity: sha512-TfySrs/5nm8fQJDcBDuUng3VOUKsd7S+zqvbOTiGXHfxX4wK31ard+hoNuvkicM/2YFzlpDgABOevKSsB4G/FA==}
+     engines: {node: '>= 6'}
+ 
+   pkg-dir@4.2.0:
+     resolution: {integrity: sha512-HRDzbaKjC+AOWVXxAU/x54COGeIv9eb+6CkDSQoNTt4XyWoIJvuPsXizxu/Fr23EiekbtZwmh1IcIG/l/a10GQ==}
+     engines: {node: '>=8'}
+ 
+   pkg-types@2.3.1:
+     resolution: {integrity: sha512-y+ichcgc2LrADuhLNAx8DFjVfgz91pRxfZdI3UDhxHvcVEZsenLO+7XaU5vOp0u/7V/wZ+plyuQxtrDlZJ+yeg==}
+@@ -3438,20 +3466,23 @@ packages:
+   test-exclude@6.0.0:
+     resolution: {integrity: sha512-cAGWPIyOHU6zlmg88jwm7VRyXnMN7iV68OGAbYDk/Mh/xC/pzVPlQtY6ngoIH/5/tciuhGfvESU8GrHrcxD56w==}
+     engines: {node: '>=8'}
+ 
+   testcontainers@12.0.4:
+     resolution: {integrity: sha512-QIR/8xF1+F/26cIM+9B4yyxNTbKJxAv3hygZyhPRgZ8Q2AhlPZjDdpXRuk16V37X4bgJRI3hXFhoEICMBA7Adg==}
+ 
+   text-decoder@1.2.7:
+     resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
+ 
++  thread-stream@3.2.0:
++    resolution: {integrity: sha512-zLBvqpwr4Esa0kRjcrzGU6zL25lePWaCLMx0RQFrmteozIfeNdaMLpG5U7PeHzvlFkAWaRKA9/KVW4F60iB+qw==}
++
+   thread-stream@4.2.0:
+     resolution: {integrity: sha512-e2zZ96wSChazBsbENf/Pcm/4swHt2cEKQ92rhUjkL9GCKiTDJIaTBenjE/m9DXi0QBmTMDkFDdOomUy20A1tDQ==}
+     engines: {node: '>=20'}
+ 
+   tinybench@6.1.4:
+     resolution: {integrity: sha512-9APumHG7r4yOk4X4WlkmE71aZcv1gvin1czO3OQ1U9iJcFA5Ja/ygyb0vPOVHTthFozUYs8CLoLUlM8grb2lTQ==}
+     engines: {node: '>=20.0.0'}
+ 
+   tinyexec@1.3.0:
+     resolution: {integrity: sha512-QKAl9m8gWWGHV8jZcPeym6j+XULi6tOf1mT83WYJ4Lk2ytW/uwAWkrP0uFsdoYMdueVJ0qs26wZ+23xeB4ibNQ==}
+@@ -6557,20 +6588,27 @@ snapshots:
+     optional: true
+ 
+   nanoid@3.3.19: {}
+ 
+   natural-compare@1.4.0: {}
+ 
+   negotiator@0.6.3: {}
+ 
+   neo-async@2.6.2: {}
+ 
++  nestjs-pino@4.6.1(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@10.5.0)(pino@9.14.0)(rxjs@7.8.2):
++    dependencies:
++      '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
++      pino: 9.14.0
++      pino-http: 10.5.0
++      rxjs: 7.8.2
++
+   node-int64@0.4.0: {}
+ 
+   node-releases@2.0.51: {}
+ 
+   normalize-path@3.0.0: {}
+ 
+   npm-run-path@4.0.1:
+     dependencies:
+       path-key: 3.1.1
+ 
+@@ -6692,40 +6730,65 @@ snapshots:
+       split2: 4.2.0
+ 
+   picocolors@1.1.1: {}
+ 
+   picomatch@2.3.2: {}
+ 
+   picomatch@4.0.5: {}
+ 
+   picomatch@4.0.7: {}
+ 
++  pino-abstract-transport@2.0.0:
++    dependencies:
++      split2: 4.2.0
++
+   pino-abstract-transport@3.0.0:
+     dependencies:
+       split2: 4.2.0
+ 
++  pino-http@10.5.0:
++    dependencies:
++      get-caller-file: 2.0.5
++      pino: 9.14.0
++      pino-std-serializers: 7.1.0
++      process-warning: 5.0.0
++
+   pino-std-serializers@7.1.0: {}
+ 
+   pino@10.3.1:
+     dependencies:
+       '@pinojs/redact': 0.4.0
+       atomic-sleep: 1.0.0
+       on-exit-leak-free: 2.1.2
+       pino-abstract-transport: 3.0.0
+       pino-std-serializers: 7.1.0
+       process-warning: 5.0.0
+       quick-format-unescaped: 4.0.4
+       real-require: 0.2.0
+       safe-stable-stringify: 2.5.0
+       sonic-boom: 4.2.1
+       thread-stream: 4.2.0
+ 
++  pino@9.14.0:
++    dependencies:
++      '@pinojs/redact': 0.4.0
++      atomic-sleep: 1.0.0
++      on-exit-leak-free: 2.1.2
++      pino-abstract-transport: 2.0.0
++      pino-std-serializers: 7.1.0
++      process-warning: 5.0.0
++      quick-format-unescaped: 4.0.4
++      real-require: 0.2.0
++      safe-stable-stringify: 2.5.0
++      sonic-boom: 4.2.1
++      thread-stream: 3.2.0
++
+   pirates@4.0.7: {}
+ 
+   pkg-dir@4.2.0:
+     dependencies:
+       find-up: 4.1.0
+ 
+   pkg-types@2.3.1:
+     dependencies:
+       confbox: 0.2.4
+       exsolve: 1.1.0
+@@ -7254,20 +7317,24 @@ snapshots:
+       - bare-buffer
+       - react-native-b4a
+       - supports-color
+ 
+   text-decoder@1.2.7:
+     dependencies:
+       b4a: 1.8.1
+     transitivePeerDependencies:
+       - react-native-b4a
+ 
++  thread-stream@3.2.0:
++    dependencies:
++      real-require: 0.2.0
++
+   thread-stream@4.2.0:
+     dependencies:
+       real-require: 1.0.0
+ 
+   tinybench@6.1.4: {}
+ 
+   tinyexec@1.3.0: {}
+ 
+   tinyglobby@0.2.17:
+     dependencies:

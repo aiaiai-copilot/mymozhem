@@ -1,0 +1,82 @@
+# Review package: 7112534..HEAD
+
+## Commits
+eafee47 feat(sdk): join-request — необязательная роль participant|spectator (REQ-ID-011)
+
+## Files changed
+ packages/sdk/src/auth/join-request.contract.spec.ts | 16 ++++++++++++++++
+ packages/sdk/src/auth/join-request.fixtures.ts      |  2 ++
+ packages/sdk/src/auth/join-request.ts               |  3 +++
+ 3 files changed, 21 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/auth/join-request.contract.spec.ts b/packages/sdk/src/auth/join-request.contract.spec.ts
+index b7726af..8500f46 100644
+--- a/packages/sdk/src/auth/join-request.contract.spec.ts
++++ b/packages/sdk/src/auth/join-request.contract.spec.ts
+@@ -4,11 +4,27 @@ import { validJoinRequests, invalidJoinRequests } from './join-request.fixtures'
+ describe('joinRequest contract (REQ-ID-003)', () => {
+   it.each(validJoinRequests.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
+     expect(joinRequestSchema.safeParse(v).success).toBe(true);
+   });
+   it.each(invalidJoinRequests.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
+     expect(joinRequestSchema.safeParse(v).success).toBe(false);
+   });
+   it('trims displayName via the shared displayNameSchema', () => {
+     expect(joinRequestSchema.parse({ code: 'ABCDEFGH', displayName: '  Alex  ' }).displayName).toBe('Alex');
+   });
++
++  it('accepts explicit spectator role', () => {
++    expect(joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' }).success).toBe(true);
++  });
++
++  it('defaults to participant semantics: role is optional', () => {
++    const parsed = joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'Игрок' });
++    expect(parsed.success).toBe(true);
++    expect(parsed.success && parsed.data.role).toBeUndefined();
++  });
++
++  it('refuses privileged roles through the join flag', () => {
++    for (const role of ['organizer', 'moderator', 'ORGANIZER', 'SPECTATOR']) {
++      expect(joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'x', role }).success).toBe(false);
++    }
++  });
+ });
+diff --git a/packages/sdk/src/auth/join-request.fixtures.ts b/packages/sdk/src/auth/join-request.fixtures.ts
+index b017cd4..f4d516f 100644
+--- a/packages/sdk/src/auth/join-request.fixtures.ts
++++ b/packages/sdk/src/auth/join-request.fixtures.ts
+@@ -1,14 +1,16 @@
+ export const validJoinRequests: unknown[] = [
+   { code: 'ABCDEFGH', displayName: 'Alex' },
+   { code: 'x', displayName: '  Аня  ' },
++  { code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' },
+ ];
+ export const invalidJoinRequests: unknown[] = [
+   {},
+   { code: 'ABCDEFGH' },
+   { displayName: 'Alex' },
+   { code: '', displayName: 'Alex' },
+   { code: 'ABCDEFGH', displayName: '' },
+   { code: 'ABCDEFGH', displayName: 'x'.repeat(41) },
+   { code: 'ABCDEFGH', displayName: 'Alex', extra: true }, // strictObject
++  { code: 'ABCDEFGH', displayName: 'Alex', role: 'organizer' }, // привилегированные роли через флаг не назначаются (REQ-ID-011)
+   'not-an-object',
+ ];
+diff --git a/packages/sdk/src/auth/join-request.ts b/packages/sdk/src/auth/join-request.ts
+index 1d29eab..b4c93e2 100644
+--- a/packages/sdk/src/auth/join-request.ts
++++ b/packages/sdk/src/auth/join-request.ts
+@@ -1,9 +1,12 @@
+ import { z } from 'zod';
+ import { displayNameSchema } from '../identity/display-name';
+ 
+ // POST /rooms/join request body (REQ-ID-003). strict: лишние ключи не проходят границу.
++// role (фаза 2, REQ-ID-011): самоназначение зрителем при входе. Только два значения —
++// ORGANIZER/MODERATOR через флаг не получить структурно. Отсутствие = participant.
+ export const joinRequestSchema = z.strictObject({
+   code: z.string().trim().min(1),
+   displayName: displayNameSchema,
++  role: z.enum(['participant', 'spectator']).optional(),
+ });
+ export type JoinRequest = z.infer<typeof joinRequestSchema>;

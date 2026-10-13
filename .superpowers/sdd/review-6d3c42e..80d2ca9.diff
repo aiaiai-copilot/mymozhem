@@ -1,0 +1,150 @@
+# Review package: 6d3c42e..80d2ca9
+
+## Commits
+80d2ca9 fix(sdk): admit length_equals, derive the allowlist by trace test (ADR-008)
+
+## Files changed
+ .../sdk/src/manifest/define-app.contract.spec.ts   |  1 +
+ packages/sdk/src/manifest/define-app.fixtures.ts   |  2 ++
+ packages/sdk/src/manifest/define-app.ts            | 31 +++++++++++++++++-----
+ 3 files changed, 28 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/src/manifest/define-app.contract.spec.ts b/packages/sdk/src/manifest/define-app.contract.spec.ts
+index a5d1c56..1a558e6 100644
+--- a/packages/sdk/src/manifest/define-app.contract.spec.ts
++++ b/packages/sdk/src/manifest/define-app.contract.spec.ts
+@@ -30,20 +30,21 @@ describe('conversion guard', () => {
+     (_name, schema) => {
+       expect(() => toRegisteredSchema(schema)).not.toThrow();
+     },
+   );
+ 
+   // Design §6: the loss is SILENT, which is the ADR-008 class of defect — the app
+   // believes the core enforces a rule the core never received. Reject instead.
+   it.each(unrepresentableSchemas.map((c) => [c.name, c.schema] as const))(
+     'refuses a schema that would not survive conversion: %s',
+     (_name, schema) => {
++      expect(() => toRegisteredSchema(schema)).toThrow(ContractError);
+       expect(() => toRegisteredSchema(schema)).toThrow(
+         expect.objectContaining({ code: 'SCHEMA_NOT_REPRESENTABLE' }),
+       );
+     },
+   );
+ 
+   // This is the fixture that guards the guard (design §6). It rests on a zod
+   // internal (_zod.def.checks); a zod upgrade that breaks detection must fail CI
+   // loudly rather than quietly open the gate. Do not silence it — fix the detector.
+   //
+diff --git a/packages/sdk/src/manifest/define-app.fixtures.ts b/packages/sdk/src/manifest/define-app.fixtures.ts
+index a6872b5..64db5d9 100644
+--- a/packages/sdk/src/manifest/define-app.fixtures.ts
++++ b/packages/sdk/src/manifest/define-app.fixtures.ts
+@@ -1,19 +1,21 @@
+ import { z } from 'zod';
+ 
+ // Schemas an app may legally author: everything here survives conversion intact.
+ export const representableSchemas: { name: string; schema: z.ZodType }[] = [
+   { name: 'string bounds and regex', schema: z.object({ nick: z.string().min(1).max(32), code: z.string().regex(/^[A-Z]+$/) }) },
+   { name: 'integer bounds', schema: z.object({ choice: z.number().int().min(0).max(3) }) },
+   { name: 'enum and optional', schema: z.object({ kind: z.enum(['a', 'b']), note: z.string().optional() }) },
+   { name: 'nested object and array', schema: z.object({ rounds: z.array(z.object({ id: z.string() })) }) },
+   { name: 'visibility annotation', schema: z.object({ title: z.string().meta({ 'x-visibility': 'public' }) }) },
++  { name: 'string .length() (fixed-length code, e.g. a room code)', schema: z.object({ code: z.string().length(6) }) },
++  { name: 'array .length() (fixed-size answer array)', schema: z.object({ answers: z.array(z.string()).length(3) }) },
+ ];
+ 
+ // Schemas that must be refused: each would either vanish silently or fail to convert.
+ export const unrepresentableSchemas: { name: string; schema: z.ZodType }[] = [
+   { name: 'top-level .refine()', schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) },
+   { name: 'nested .refine()', schema: z.object({ inner: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) }) },
+   { name: '.refine() inside an array', schema: z.object({ xs: z.array(z.string().refine((s) => s.length > 2)) }) },
+   { name: '.superRefine()', schema: z.object({ s: z.string() }).superRefine(() => {}) },
+   { name: 'z.date()', schema: z.object({ at: z.date() }) },
+   { name: 'z.bigint()', schema: z.object({ n: z.bigint() }) },
+diff --git a/packages/sdk/src/manifest/define-app.ts b/packages/sdk/src/manifest/define-app.ts
+index 0656ef4..e6add5a 100644
+--- a/packages/sdk/src/manifest/define-app.ts
++++ b/packages/sdk/src/manifest/define-app.ts
+@@ -28,56 +28,75 @@ type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
+ type CheckInternals = { _zod?: { def?: { check?: string } } };
+ 
+ // The allowlist of check kinds known to survive z.toJSONSchema intact. Ordinary
+ // bounds ('min_length', 'greater_than', …) convert fine — testing for a non-empty
+ // checks array would reject legal schemas like .min(1). Everything NOT on this list
+ // is refused, not just 'custom' (.refine()/.superRefine()): zod also has 'overwrite'
+ // checks (.trim(), .toLowerCase(), …) that convert with NO trace in the JSON Schema
+ // output, same silent-loss defect as a refinement. A denylist of the kinds known
+ // today would miss the next one zod adds; an allowlist is fail-closed by
+ // construction, so an unrecognised kind is refused rather than let through.
++//
++// This list is DERIVED, not enumerated by hand: for each zod check kind, convert a
++// base schema with the check applied and the same base without it, and compare the
++// two z.toJSONSchema outputs. A check that leaves a trace (the outputs differ) is
++// representable and belongs on the list; a check that leaves no trace (the outputs
++// are identical, e.g. 'custom' from .refine()/.superRefine(), 'overwrite' from
++// .trim()/.toLowerCase()) is a silent loss and must stay refused. Re-run that trace
++// test against the installed zod version before adding or removing a kind — this
++// comment records the method, not a substitute for running it.
+ const REPRESENTABLE_CHECK_KINDS = new Set([
+   'min_length',
+   'max_length',
++  'length_equals',
+   'string_format',
+   'number_format',
+   'greater_than',
+   'less_than',
+   'multiple_of',
+ ]);
+ 
+-const hasUnrepresentableCheck = (schema: unknown): boolean =>
+-  ((schema as ZodInternals)?._zod?.def?.checks ?? []).some(
+-    (check) => !REPRESENTABLE_CHECK_KINDS.has((check as CheckInternals)?._zod?.def?.check ?? ''),
+-  );
++// Returns the offending check kind (so the refusal message can name it) or
++// `undefined` if every check on this schema is on the allowlist.
++const findUnrepresentableCheckKind = (schema: unknown): string | undefined => {
++  const checks = (schema as ZodInternals)?._zod?.def?.checks ?? [];
++  for (const check of checks) {
++    const kind = (check as CheckInternals)?._zod?.def?.check;
++    if (!REPRESENTABLE_CHECK_KINDS.has(kind ?? '')) {
++      return kind ?? '(unknown check kind)';
++    }
++  }
++  return undefined;
++};
+ 
+ // The conversion guard (design §6).
+ //
+ // z.toJSONSchema drops .refine()/.superRefine() and 'overwrite' checks (.trim(),
+ // .toLowerCase(), …) SILENTLY while throwing on date/bigint/transform. Silent loss
+ // is the defect class ADR-008 exists to prevent: the app is convinced the core
+ // enforces its rule, and the core never received it. So a manifest carrying one is
+ // refused outright.
+ //
+ // This reads a zod internal (_zod.def.checks) on purpose. The cure is the project's
+ // own principle: the guard is covered by a fixture, so a zod upgrade that breaks
+ // detection turns CI red instead of quietly opening the gate.
+ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
+   try {
+     // `override` is invoked for every subschema, so it walks the tree for us —
+     // nested refinements and refinements inside arrays included.
+     const json = z.toJSONSchema(schema, {
+       override: (ctx) => {
+-        if (hasUnrepresentableCheck(ctx.zodSchema)) {
++        const unrepresentableKind = findUnrepresentableCheckKind(ctx.zodSchema);
++        if (unrepresentableKind !== undefined) {
+           throw new ContractError(
+             'SCHEMA_NOT_REPRESENTABLE',
+-            'check cannot be represented in JSON Schema and would be dropped silently (e.g. .refine/.superRefine, or an overwrite check such as .trim()/.toLowerCase())',
++            `check kind '${unrepresentableKind}' cannot be represented in JSON Schema and would be dropped silently (not in the allowlist of check kinds known to convert intact, e.g. .refine/.superRefine ('custom'), or an overwrite check such as .trim()/.toLowerCase() ('overwrite'))`,
+           );
+         }
+       },
+     });
+     return json as JsonSchemaObject;
+   } catch (err) {
+     if (err instanceof ContractError) {
+       throw err;
+     }
+     // date / bigint / transform: zod throws by itself — re-wrap as a typed code so

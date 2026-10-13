@@ -1,0 +1,158 @@
+# Review package: eb3db5f..f3ad6ef
+
+## Commits
+f3ad6ef feat(core): app-registry manifest registration logic (REQ-CTR-004, REQ-CORE-004)
+
+## Files changed
+ .../core/src/app-registry/app-registry.spec.ts     | 87 ++++++++++++++++++++++
+ packages/core/src/app-registry/app-registry.ts     | 48 ++++++++++++
+ 2 files changed, 135 insertions(+)
+
+## Diff
+diff --git a/packages/core/src/app-registry/app-registry.spec.ts b/packages/core/src/app-registry/app-registry.spec.ts
+new file mode 100644
+index 0000000..de5e34a
+--- /dev/null
++++ b/packages/core/src/app-registry/app-registry.spec.ts
+@@ -0,0 +1,87 @@
++import {
++  ContractError,
++  validManifests,
++  invalidManifestCases,
++  CONTRACT_VERSION,
++} from '@mymozhem/sdk';
++import { registerManifest, buildAppRegistry } from './app-registry';
++
++// Returns the thrown ContractError's `code`, or the raw error for a non-ContractError,
++// or undefined if nothing threw. Keeps the error-code assertions terse.
++const catchCode = (fn: () => unknown): unknown => {
++  try {
++    fn();
++  } catch (err) {
++    return err instanceof ContractError ? err.code : err;
++  }
++  return undefined;
++};
++
++describe('registerManifest', () => {
++  it('returns the parsed manifest for a valid input', () => {
++    const manifest = validManifests[0];
++    expect(registerManifest(manifest)).toEqual(manifest);
++  });
++
++  it.each(invalidManifestCases)(
++    'rejects a structurally invalid manifest as MANIFEST_INVALID: $name',
++    ({ value }) => {
++      expect(catchCode(() => registerManifest(value))).toBe('MANIFEST_INVALID');
++    },
++  );
++
++  it('rejects an unbounded-above contract range as MANIFEST_INVALID', () => {
++    const manifest = { ...validManifests[0], contractRange: '>=1.0.0' };
++    expect(catchCode(() => registerManifest(manifest))).toBe('MANIFEST_INVALID');
++  });
++
++  it('rejects a range excluding the running version as CONTRACT_VERSION_INCOMPATIBLE', () => {
++    const manifest = { ...validManifests[0], contractRange: '^2.0.0' };
++    expect(catchCode(() => registerManifest(manifest))).toBe('CONTRACT_VERSION_INCOMPATIBLE');
++  });
++
++  it('accepts a bounded range that includes the running version', () => {
++    const manifest = { ...validManifests[0], contractRange: `^${CONTRACT_VERSION}` };
++    expect(registerManifest(manifest).contractRange).toBe(`^${CONTRACT_VERSION}`);
++  });
++});
++
++describe('buildAppRegistry', () => {
++  it('resolves every registered manifest by (appId, manifestVersion)', () => {
++    const v1 = validManifests[0];
++    const v2 = { ...v1, manifestVersion: v1.manifestVersion + 1 };
++    const registry = buildAppRegistry([v1, v2]);
++    expect(registry.getManifest(v1.appId, v1.manifestVersion)).toEqual(v1);
++    expect(registry.getManifest(v2.appId, v2.manifestVersion)).toEqual(v2);
++  });
++
++  it('returns undefined for an unknown key', () => {
++    const registry = buildAppRegistry([validManifests[0]]);
++    expect(registry.getManifest('no-such-app', 999)).toBeUndefined();
++  });
++
++  it('builds an empty registry from an empty list', () => {
++    const registry = buildAppRegistry([]);
++    const { appId, manifestVersion } = validManifests[0];
++    expect(registry.getManifest(appId, manifestVersion)).toBeUndefined();
++  });
++
++  it('throws a fatal plain Error (not a ContractError) on a duplicate key', () => {
++    const dup = [validManifests[0], { ...validManifests[0] }];
++    let caught: unknown;
++    try {
++      buildAppRegistry(dup);
++    } catch (err) {
++      caught = err;
++    }
++    expect(caught).toBeInstanceOf(Error);
++    expect(caught).not.toBeInstanceOf(ContractError);
++    expect((caught as Error).message).toMatch(/duplicate manifest registration/);
++  });
++
++  it('propagates a per-manifest ContractError when a manifest in the list is invalid', () => {
++    expect(catchCode(() => buildAppRegistry([invalidManifestCases[0].value]))).toBe(
++      'MANIFEST_INVALID',
++    );
++  });
++});
+diff --git a/packages/core/src/app-registry/app-registry.ts b/packages/core/src/app-registry/app-registry.ts
+new file mode 100644
+index 0000000..8378a5e
+--- /dev/null
++++ b/packages/core/src/app-registry/app-registry.ts
+@@ -0,0 +1,48 @@
++import {
++  appManifestSchema,
++  assertContractRangeSatisfied,
++  ContractError,
++  type AppManifest,
++} from '@mymozhem/sdk';
++
++// Validate a manifest crossing the SDK boundary and return the trusted snapshot.
++// The manifest arrives already converted to JSON Schema by the app's defineApp call,
++// so the core re-validates its FORM (defense-in-depth) and checks that the RUNNING
++// contract version satisfies the declared range (REQ-CTR-004). It does NOT re-run the
++// conversion guard — there is no zod left to convert (design §3).
++export const registerManifest = (input: unknown): AppManifest => {
++  const parsed = appManifestSchema.safeParse(input);
++  if (!parsed.success) {
++    throw new ContractError('MANIFEST_INVALID', parsed.error.message);
++  }
++  assertContractRangeSatisfied(parsed.data.contractRange);
++  return parsed.data;
++};
++
++export type AppRegistry = {
++  getManifest(appId: string, manifestVersion: number): AppManifest | undefined;
++};
++
++const registryKey = (appId: string, manifestVersion: number): string =>
++  `${appId}@${manifestVersion}`;
++
++// Build the immutable registry once, from the manifests compiled into this artifact.
++// REQ-CORE-004: constructed once and frozen — no mutable module-level state. A bad
++// manifest throws (fail-closed). A duplicate (appId, manifestVersion) is a compiled-in
++// misconfiguration, so it crashes assembly with a plain Error rather than a typed
++// ContractError (design §4, micro-decision 1).
++export const buildAppRegistry = (manifests: readonly unknown[]): AppRegistry => {
++  const byKey = new Map<string, AppManifest>();
++  for (const input of manifests) {
++    const manifest = registerManifest(input);
++    const key = registryKey(manifest.appId, manifest.manifestVersion);
++    if (byKey.has(key)) {
++      throw new Error(`App registry: duplicate manifest registration for ${key}`);
++    }
++    byKey.set(key, manifest);
++  }
++  return Object.freeze({
++    getManifest: (appId: string, manifestVersion: number): AppManifest | undefined =>
++      byKey.get(registryKey(appId, manifestVersion)),
++  });
++};

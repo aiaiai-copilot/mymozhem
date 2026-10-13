@@ -1,0 +1,132 @@
+# Review package: a6d53b8c88cd855dfdd2b7fa059f6473a134b5ad..HEAD
+
+## Commits
+3279301 feat(sdk): room join policy + displayName contract schemas (REQ-ID-002, REQ-ID-003)
+
+## Files changed
+ .../sdk/src/identity/display-name.contract.spec.ts  | 21 +++++++++++++++++++++
+ packages/sdk/src/identity/display-name.fixtures.ts  |  4 ++++
+ packages/sdk/src/identity/display-name.ts           |  7 +++++++
+ packages/sdk/src/index.ts                           |  4 ++++
+ .../membership/room-join-policy.contract.spec.ts    | 16 ++++++++++++++++
+ .../sdk/src/membership/room-join-policy.fixtures.ts |  6 ++++++
+ packages/sdk/src/membership/room-join-policy.ts     |  7 +++++++
+ 7 files changed, 65 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/identity/display-name.contract.spec.ts b/packages/sdk/src/identity/display-name.contract.spec.ts
+new file mode 100644
+index 0000000..041ef94
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.contract.spec.ts
+@@ -0,0 +1,21 @@
++import { DISPLAY_NAME_MAX_LENGTH, displayNameSchema } from './display-name';
++import { validDisplayNames, invalidDisplayNames } from './display-name.fixtures';
++
++describe('displayName contract (REQ-ID-003)', () => {
++  it.each(validDisplayNames)('accepts %s', (name) => {
++    expect(displayNameSchema.safeParse(name).success).toBe(true);
++  });
++
++  it.each(invalidDisplayNames.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(displayNameSchema.safeParse(v).success).toBe(false);
++  });
++
++  it('trims surrounding whitespace', () => {
++    expect(displayNameSchema.parse('  Alex  ')).toBe('Alex');
++  });
++
++  it('accepts exactly DISPLAY_NAME_MAX_LENGTH chars and rejects one more', () => {
++    expect(displayNameSchema.safeParse('x'.repeat(DISPLAY_NAME_MAX_LENGTH)).success).toBe(true);
++    expect(displayNameSchema.safeParse('x'.repeat(DISPLAY_NAME_MAX_LENGTH + 1)).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/identity/display-name.fixtures.ts b/packages/sdk/src/identity/display-name.fixtures.ts
+new file mode 100644
+index 0000000..816a932
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.fixtures.ts
+@@ -0,0 +1,4 @@
++export const validDisplayNames: string[] = ['Саша', 'A', '  Alex  '];
++
++// Empty, whitespace-only (trims to empty), over the cap, non-strings — all rejected.
++export const invalidDisplayNames: unknown[] = ['', '   ', 'x'.repeat(41), null, 42];
+diff --git a/packages/sdk/src/identity/display-name.ts b/packages/sdk/src/identity/display-name.ts
+new file mode 100644
+index 0000000..536e783
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.ts
+@@ -0,0 +1,7 @@
++import { z } from 'zod';
++
++// Guest display name (REQ-ID-003): trimmed, 1..40 chars. PII-adjacent: it lives on the
++// Identity row only and never enters event-log payloads (REQ-SEC-009).
++export const DISPLAY_NAME_MAX_LENGTH = 40;
++export const displayNameSchema = z.string().trim().min(1).max(DISPLAY_NAME_MAX_LENGTH);
++export type DisplayName = z.infer<typeof displayNameSchema>;
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index ac2ac9f..4296f0e 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -10,10 +10,14 @@ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+ export * from './manifest/manifest.schema';
+ export * from './manifest/manifest.fixtures';
+ export * from './manifest/app-settings-visibility';
+ export * from './manifest/define-app';
+ export * from './manifest/define-app.fixtures';
+ export * from './identity/identity-kind';
+ export * from './identity/identity-kind.fixtures';
+ export * from './membership/member-role';
+ export * from './membership/member-role.fixtures';
++export * from './identity/display-name';
++export * from './identity/display-name.fixtures';
++export * from './membership/room-join-policy';
++export * from './membership/room-join-policy.fixtures';
+diff --git a/packages/sdk/src/membership/room-join-policy.contract.spec.ts b/packages/sdk/src/membership/room-join-policy.contract.spec.ts
+new file mode 100644
+index 0000000..a547162
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { ROOM_JOIN_POLICIES, roomJoinPolicySchema } from './room-join-policy';
++import { validJoinPolicies, invalidJoinPolicies } from './room-join-policy.fixtures';
++
++describe('roomJoinPolicy contract (REQ-ID-002)', () => {
++  it('declares exactly the three policies of REQ-ID-002', () => {
++    expect([...ROOM_JOIN_POLICIES]).toEqual(['guests', 'registered', 'invite_only']);
++  });
++
++  it.each(validJoinPolicies)('accepts %s', (policy) => {
++    expect(roomJoinPolicySchema.safeParse(policy).success).toBe(true);
++  });
++
++  it.each(invalidJoinPolicies.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(roomJoinPolicySchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/membership/room-join-policy.fixtures.ts b/packages/sdk/src/membership/room-join-policy.fixtures.ts
+new file mode 100644
+index 0000000..7de65bb
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { RoomJoinPolicy } from './room-join-policy';
++
++export const validJoinPolicies: RoomJoinPolicy[] = ['guests', 'registered', 'invite_only'];
++
++// Wrong case, unknown values, empty, non-strings — all rejected.
++export const invalidJoinPolicies: unknown[] = ['GUESTS', 'Guests', 'public', '', null, 42];
+diff --git a/packages/sdk/src/membership/room-join-policy.ts b/packages/sdk/src/membership/room-join-policy.ts
+new file mode 100644
+index 0000000..06bb943
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.ts
+@@ -0,0 +1,7 @@
++import { z } from 'zod';
++
++// REQ-ID-002: join policy is a room attribute, default 'guests' (ADR-004). Values are
++// the lowercase spec strings; the DB enum maps to them via @map (design §2).
++export const ROOM_JOIN_POLICIES = ['guests', 'registered', 'invite_only'] as const;
++export const roomJoinPolicySchema = z.enum(ROOM_JOIN_POLICIES);
++export type RoomJoinPolicy = z.infer<typeof roomJoinPolicySchema>;

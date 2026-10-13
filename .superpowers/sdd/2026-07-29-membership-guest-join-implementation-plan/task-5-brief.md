@@ -1,0 +1,518 @@
+### Task 5: JoinRateLimiter + MembershipService.join
+
+**Files:**
+- Create: `packages/core/src/membership/membership.errors.ts`
+- Create: `packages/core/src/membership/join-rate-limiter.ts`
+- Create: `packages/core/src/membership/join-rate-limiter.spec.ts`
+- Modify: `packages/core/src/membership/membership.service.ts` (join + новый конструктор)
+- Modify: `packages/core/src/membership/membership.module.ts` (IdentityModule, фабрика лимитера, ConfigModule)
+- Test: `packages/core/src/membership/membership.service.int-spec.ts` (новый)
+
+**Interfaces:**
+- Consumes: `IdentityService.createGuest(name, tx)` (Task 4), `AppConfig`/`APP_CONFIG`/`ConfigModule` (Task 2), `RoomService.create(organizerId, policy?)` (Task 3–4), `displayNameSchema` (Task 1).
+- Produces: `MembershipService.join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult>` (`JoinResult = { membership: Membership; identity: Identity }`); `JoinRateLimiter` с `tryAcquire(ip: string): boolean` (конструктор `(limit: number, windowMs?: number, now?: () => number)`); ошибки `RoomJoinDeniedError`/`JoinRateLimitedError`/`RoomParticipantLimitReachedError` с кодами `ROOM_JOIN_DENIED`/`JOIN_RATE_LIMITED`/`ROOM_PARTICIPANT_LIMIT_REACHED`.
+
+- [ ] **Step 1: Написать failing unit-тесты лимитера**
+
+`packages/core/src/membership/join-rate-limiter.spec.ts`:
+
+```ts
+import { JoinRateLimiter } from './join-rate-limiter';
+
+describe('JoinRateLimiter (REQ-ID-006)', () => {
+  it('allows up to the limit within a window, then refuses', () => {
+    const now = { t: 1_000_000 };
+    const limiter = new JoinRateLimiter(2, 60_000, () => now.t);
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(false);
+  });
+
+  it('tracks IPs independently', () => {
+    const limiter = new JoinRateLimiter(1, 60_000);
+    expect(limiter.tryAcquire('1.1.1.1')).toBe(true);
+    expect(limiter.tryAcquire('2.2.2.2')).toBe(true);
+    expect(limiter.tryAcquire('1.1.1.1')).toBe(false);
+  });
+
+  it('resets after the window elapses', () => {
+    const now = { t: 1_000_000 };
+    const limiter = new JoinRateLimiter(1, 60_000, () => now.t);
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(false);
+    now.t += 60_001;
+    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
+  });
+});
+```
+
+Run: `pnpm --filter @mymozhem/core test -t "JoinRateLimiter"`
+Expected: FAIL — модуль не существует.
+
+- [ ] **Step 2: Реализовать лимитер**
+
+`packages/core/src/membership/join-rate-limiter.ts`:
+
+```ts
+// Per-IP fixed-window limiter for room-join attempts (REQ-ID-006, join_rate_limit_ip).
+// State lives in the provider instance field, NOT module-level (REQ-CORE-004's eslint
+// gate passes); a single replica (REQ-OPS-005) makes in-memory correct; a restart
+// resets the 60s window — acceptable (design §4). The phase-4 global backoff layer
+// (REQ-ID-019, amendment v1.3) will sit behind this same interface.
+// Map growth: one entry per distinct IP per process lifetime — negligible at MVP scale.
+export class JoinRateLimiter {
+  private readonly attempts = new Map<string, { windowStart: number; count: number }>();
+
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number = 60_000,
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  // Records the attempt and returns whether it is allowed. Called BEFORE any room
+  // lookup (design §3): brute-force attempts against wrong codes accumulate too.
+  tryAcquire(ip: string): boolean {
+    const now = this.now();
+    const entry = this.attempts.get(ip);
+    if (!entry || now - entry.windowStart >= this.windowMs) {
+      this.attempts.set(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (entry.count >= this.limit) {
+      return false;
+    }
+    entry.count += 1;
+    return true;
+  }
+}
+```
+
+Run: `pnpm --filter @mymozhem/core test -t "JoinRateLimiter"`
+Expected: PASS (3 теста).
+
+- [ ] **Step 3: Написать failing интеграционные тесты join**
+
+Новый `packages/core/src/membership/membership.service.int-spec.ts`:
+
+```ts
+import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+import { seedIdentity } from '../testing/seed-identity';
+import type { AppConfig } from '../config/config.schema';
+import { EventLogService } from '../realtime/event-log.service';
+import { AppRegistryService } from '../app-registry/app-registry.service';
+import { RoomService } from '../room/room.service';
+import { IdentityService } from '../identity/identity.service';
+import { MembershipService } from './membership.service';
+import { JoinRateLimiter } from './join-rate-limiter';
+import {
+  JoinRateLimitedError,
+  RoomJoinDeniedError,
+  RoomParticipantLimitReachedError,
+} from './membership.errors';
+
+const ORG = '00000000-0000-0000-0000-000000000001';
+const IP = '203.0.113.7';
+const IP2 = '198.51.100.9';
+
+const TEST_CONFIG: AppConfig = {
+  NODE_ENV: 'test',
+  PORT: 3000,
+  DATABASE_URL: 'postgresql://unused',
+  ROOM_CODE_MIN_LEN: 8,
+  ROOM_PARTICIPANT_LIMIT: 500,
+  JOIN_RATE_LIMIT_IP: 20,
+};
+
+describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+  let db: TestDb;
+  let roomService: RoomService;
+
+  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
+    new MembershipService(
+      db.prisma,
+      new IdentityService(db.prisma),
+      new JoinRateLimiter(overrides.rateLimit ?? 1000),
+      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? 500 },
+    );
+
+  beforeAll(async () => {
+    db = await startTestDb();
+    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    roomService = new RoomService(
+      db.prisma,
+      new EventLogService(),
+      new AppRegistryService([]),
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+      ),
+      TEST_CONFIG,
+    );
+  }, 120000);
+
+  afterAll(async () => {
+    await db.stop();
+  });
+
+  afterEach(async () => {
+    await db.prisma.$executeRawUnsafe(
+      'TRUNCATE TABLE membership."Membership", room."Room" CASCADE',
+    );
+  });
+
+  it('joins a DRAFT room by code + name (REQ-ID-003)', async () => {
+    const room = await roomService.create(ORG);
+    const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+    expect(result.identity.kind).toBe('GUEST');
+    expect(result.identity.displayName).toBe('Саша');
+    expect(result.membership.roomId).toBe(room.id);
+    expect(result.membership.identityId).toBe(result.identity.id);
+    expect(result.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('joins an ACTIVE room (late-join, ADR-005)', async () => {
+    const room = await roomService.create(ORG);
+    await db.prisma.room.update({ where: { id: room.id }, data: { status: 'ACTIVE' } });
+    const result = await makeMembership().join({ code: room.code, displayName: 'A', ip: IP });
+    expect(result.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('rejects an invalid display name before any write', async () => {
+    const room = await roomService.create(ORG);
+    await expect(
+      makeMembership().join({ code: room.code, displayName: '', ip: IP }),
+    ).rejects.toThrow();
+    // Только ORGANIZER-membership от create; гостевая запись не появилась.
+    expect(await db.prisma.membership.count({ where: { roomId: room.id } })).toBe(1);
+  });
+
+  // REQ-ID-013 exit criterion: all branches below collapse into the same typed refusal.
+  it.each([
+    'unknown code',
+    'registered policy',
+    'invite_only policy',
+    'COMPLETED room',
+    'CANCELLED room',
+    'soft-deleted room',
+  ])('refuses %s with the same ROOM_JOIN_DENIED', async (scenario) => {
+    const room = await roomService.create(ORG);
+    let code = room.code;
+    switch (scenario) {
+      case 'unknown code':
+        code = 'zzzzzzzz';
+        break;
+      case 'registered policy':
+        await db.prisma.room.update({ where: { id: room.id }, data: { joinPolicy: 'REGISTERED' } });
+        break;
+      case 'invite_only policy':
+        await db.prisma.room.update({ where: { id: room.id }, data: { joinPolicy: 'INVITE_ONLY' } });
+        break;
+      case 'COMPLETED room':
+        await db.prisma.room.update({ where: { id: room.id }, data: { status: 'COMPLETED' } });
+        break;
+      case 'CANCELLED room':
+        await db.prisma.room.update({ where: { id: room.id }, data: { status: 'CANCELLED' } });
+        break;
+      case 'soft-deleted room':
+        await db.prisma.room.update({ where: { id: room.id }, data: { deletedAt: new Date() } });
+        break;
+    }
+    const err = await makeMembership()
+      .join({ code, displayName: 'A', ip: IP })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomJoinDeniedError);
+    expect((err as RoomJoinDeniedError).code).toBe('ROOM_JOIN_DENIED');
+  });
+
+  it('writes nothing on denial', async () => {
+    const guestsBefore = await db.prisma.identity.count({ where: { kind: 'GUEST' } });
+    await expect(
+      makeMembership().join({ code: 'zzzzzzzz', displayName: 'A', ip: IP }),
+    ).rejects.toThrow(RoomJoinDeniedError);
+    expect(await db.prisma.identity.count({ where: { kind: 'GUEST' } })).toBe(guestsBefore);
+    expect(await db.prisma.membership.count()).toBe(0);
+  });
+
+  it('refuses a join at the participant limit with ROOM_PARTICIPANT_LIMIT_REACHED', async () => {
+    const room = await roomService.create(ORG);
+    const service = makeMembership({ participantLimit: 1 });
+    await service.join({ code: room.code, displayName: 'A', ip: IP });
+    const err = await service
+      .join({ code: room.code, displayName: 'B', ip: IP2 })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoomParticipantLimitReachedError);
+    expect((err as RoomParticipantLimitReachedError).code).toBe(
+      'ROOM_PARTICIPANT_LIMIT_REACHED',
+    );
+  });
+
+  it('does not count the ORGANIZER membership toward the participant limit', async () => {
+    const room = await roomService.create(ORG); // создаёт ORGANIZER-membership
+    const result = await makeMembership({ participantLimit: 1 }).join({
+      code: room.code,
+      displayName: 'A',
+      ip: IP,
+    });
+    expect(result.membership.role).toBe('PARTICIPANT');
+  });
+
+  it('refuses the (limit+1)-th attempt from one IP with JOIN_RATE_LIMITED', async () => {
+    const room = await roomService.create(ORG);
+    const service = makeMembership({ rateLimit: 2 });
+    await service.join({ code: room.code, displayName: 'A', ip: IP });
+    await service.join({ code: room.code, displayName: 'B', ip: IP });
+    const err = await service
+      .join({ code: room.code, displayName: 'C', ip: IP })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JoinRateLimitedError);
+    expect((err as JoinRateLimitedError).code).toBe('JOIN_RATE_LIMITED');
+  });
+
+  it('counts attempts BEFORE the room lookup (brute force accumulates)', async () => {
+    const service = makeMembership({ rateLimit: 2 });
+    await expect(service.join({ code: 'zzzzzzzz', displayName: 'A', ip: IP })).rejects.toThrow(
+      RoomJoinDeniedError,
+    );
+    await expect(service.join({ code: 'yyyyyyyy', displayName: 'A', ip: IP })).rejects.toThrow(
+      RoomJoinDeniedError,
+    );
+    const err = await service
+      .join({ code: 'xxxxxxxx', displayName: 'A', ip: IP })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JoinRateLimitedError);
+  });
+
+  it('does not throttle other IPs', async () => {
+    const room = await roomService.create(ORG);
+    const service = makeMembership({ rateLimit: 1 });
+    await service.join({ code: room.code, displayName: 'A', ip: IP });
+    const other = await service.join({ code: room.code, displayName: 'B', ip: IP2 });
+    expect(other.membership.role).toBe('PARTICIPANT');
+  });
+});
+```
+
+- [ ] **Step 4: Прогнать — подтвердить RED**
+
+Run: `pnpm --filter @mymozhem/core test:int -t "MembershipService.join"`
+Expected: FAIL — `./membership.errors` не существует / `join` не функция.
+
+- [ ] **Step 5: Реализовать ошибки, join, модуль**
+
+`packages/core/src/membership/membership.errors.ts`:
+
+```ts
+// Core-internal typed domain errors for membership. NOT part of the SDK contract.
+// The first transport maps them to typed responses without stack traces (REQ-SEC-006).
+export const MEMBERSHIP_ERROR_CODES = {
+  ROOM_JOIN_DENIED: 'ROOM_JOIN_DENIED',
+  JOIN_RATE_LIMITED: 'JOIN_RATE_LIMITED',
+  ROOM_PARTICIPANT_LIMIT_REACHED: 'ROOM_PARTICIPANT_LIMIT_REACHED',
+} as const;
+
+export type MembershipErrorCode =
+  (typeof MEMBERSHIP_ERROR_CODES)[keyof typeof MEMBERSHIP_ERROR_CODES];
+
+export class MembershipError extends Error {
+  constructor(
+    readonly code: MembershipErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+// Единообразный отказ входа (REQ-ID-013): ветки «неверный код», «комната удалена»,
+// «терминальный статус», «закрытая политика» свёрнуты в один код — до установления
+// членства ответ не раскрывает ни существование комнаты, ни её политику, ни статус
+// (design §3). Server-side message может быть точным — наружу он не уходит.
+export class RoomJoinDeniedError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.ROOM_JOIN_DENIED, message);
+  }
+}
+
+// Превышен per-IP лимит попыток входа (REQ-ID-006). Отдельный код: он про IP, не про
+// комнату — существование комнаты не раскрывает (design §3).
+export class JoinRateLimitedError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.JOIN_RATE_LIMITED, message);
+  }
+}
+
+// Комната заполнена (REQ-ID-006, room_participant_limit). Отдельный код — решение
+// владельца (design §1, развилка (а)): «комната заполнена» actionable для организатора.
+export class RoomParticipantLimitReachedError extends MembershipError {
+  constructor(message: string) {
+    super(MEMBERSHIP_ERROR_CODES.ROOM_PARTICIPANT_LIMIT_REACHED, message);
+  }
+}
+```
+
+`packages/core/src/membership/membership.service.ts` — полная замена:
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import type { Identity, Membership, Prisma } from '@prisma/client';
+import { displayNameSchema } from '@mymozhem/sdk';
+import { PrismaService } from '../prisma/prisma.service';
+import { IdentityService } from '../identity/identity.service';
+import { APP_CONFIG } from '../config/config.tokens';
+import type { AppConfig } from '../config/config.schema';
+import { JoinRateLimiter } from './join-rate-limiter';
+import {
+  JoinRateLimitedError,
+  RoomJoinDeniedError,
+  RoomParticipantLimitReachedError,
+} from './membership.errors';
+
+export interface JoinResult {
+  membership: Membership;
+  identity: Identity;
+}
+
+@Injectable()
+export class MembershipService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly identity: IdentityService,
+    private readonly joinRateLimiter: JoinRateLimiter,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+  ) {}
+
+  // Called by RoomService.create inside its transaction: the organizer becomes the
+  // room's first member (design §1). A violation of the partial unique index
+  // "Membership_single_organizer_key" rolls the room insert back too.
+  async createOrganizerMembership(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    identityId: string,
+  ): Promise<Membership> {
+    return tx.membership.create({
+      data: { roomId, identityId, role: 'ORGANIZER' },
+    });
+  }
+
+  // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
+  // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
+  // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
+  // в один ROOM_JOIN_DENIED (REQ-ID-013).
+  async join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult> {
+    if (!this.joinRateLimiter.tryAcquire(params.ip)) {
+      throw new JoinRateLimitedError('Join rate limit exceeded');
+    }
+    // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
+    const name = displayNameSchema.parse(params.displayName);
+
+    const room = await this.prisma.room.findUnique({ where: { code: params.code } });
+    if (!room) {
+      throw new RoomJoinDeniedError('no room for code');
+    }
+    if (room.deletedAt !== null) {
+      throw new RoomJoinDeniedError(`room ${room.id} deleted`);
+    }
+    if (room.status === 'COMPLETED' || room.status === 'CANCELLED') {
+      throw new RoomJoinDeniedError(`room ${room.id} status ${room.status}`);
+    }
+    if (room.joinPolicy !== 'GUESTS') {
+      throw new RoomJoinDeniedError(`room ${room.id} policy ${room.joinPolicy}`);
+    }
+
+    // Гонка count-then-insert принята (design §1, развилка (б)): лимит анти-накруточный,
+    // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
+    const participantCount = await this.prisma.membership.count({
+      where: { roomId: room.id, role: 'PARTICIPANT' },
+    });
+    if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
+      throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const identity = await this.identity.createGuest(name, tx);
+      const membership = await tx.membership.create({
+        data: { roomId: room.id, identityId: identity.id, role: 'PARTICIPANT' },
+      });
+      return { membership, identity };
+    });
+  }
+}
+```
+
+Обновить call-site одноаргументного `new MembershipService(db.prisma)` в
+`packages/core/src/room/room.service.int-spec.ts` (makeService из Task 4) — конструктор
+теперь четырёхаргументный:
+
+```ts
+const makeService = (db: TestDb) =>
+  new RoomService(
+    db.prisma,
+    new EventLogService(),
+    new AppRegistryService([validManifests[0]]),
+    new MembershipService(
+      db.prisma,
+      new IdentityService(db.prisma),
+      new JoinRateLimiter(1000),
+      TEST_CONFIG,
+    ),
+    TEST_CONFIG,
+  );
+```
+
+(плюс импорты `IdentityService`, `JoinRateLimiter` в этот файл; `JoinRateLimiter(1000)` —
+лимитер RoomService не использует, значение произвольное). Другие call-site'ы найти:
+`grep -rn "new MembershipService(" packages apps`.
+
+`packages/core/src/membership/membership.module.ts` — полная замена:
+
+```ts
+import { Module } from '@nestjs/common';
+import { PrismaModule } from '../prisma/prisma.module';
+import { ConfigModule } from '../config/config.module';
+import { IdentityModule } from '../identity/identity.module';
+import { APP_CONFIG } from '../config/config.tokens';
+import type { AppConfig } from '../config/config.schema';
+import { MembershipService } from './membership.service';
+import { JoinRateLimiter } from './join-rate-limiter';
+
+@Module({
+  imports: [PrismaModule, ConfigModule, IdentityModule],
+  providers: [
+    {
+      provide: JoinRateLimiter,
+      useFactory: (config: AppConfig) => new JoinRateLimiter(config.JOIN_RATE_LIMIT_IP),
+      inject: [APP_CONFIG],
+    },
+    MembershipService,
+  ],
+  exports: [MembershipService],
+})
+export class MembershipModule {}
+```
+
+- [ ] **Step 6: Прогнать — GREEN**
+
+Run:
+
+```bash
+pnpm --filter @mymozhem/core test:int -t "MembershipService.join"
+pnpm --filter @mymozhem/core test:int
+pnpm --filter @mymozhem/core test
+```
+
+Expected: зелёные, включая полную лану.
+
+- [ ] **Step 7: Гейты + commit**
+
+Run: `pnpm --filter @mymozhem/core lint && pnpm --filter @mymozhem/core typecheck`
+Expected: зелёные.
+
+```bash
+git add packages/core/src
+git commit -m "feat(core): guest join flow with entry limits (REQ-ID-002, REQ-ID-003, REQ-ID-006, REQ-ID-013)"
+```
+
+---
+

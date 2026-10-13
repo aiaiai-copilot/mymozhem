@@ -1,0 +1,107 @@
+# Review package: 5e3609d13e866cc134c5ebb7fbf6155749b95116..HEAD
+
+## Commits
+7503459 feat(core): identity.Session table for refresh token families (REQ-ID-007)
+
+## Files changed
+ .../20260730101037_auth_sessions/migration.sql     | 19 +++++++++++++++++++
+ packages/core/prisma/schema.prisma                 | 17 +++++++++++++++++
+ packages/core/src/auth/session-schema.int-spec.ts  | 22 ++++++++++++++++++++++
+ 3 files changed, 58 insertions(+)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260730101037_auth_sessions/migration.sql b/packages/core/prisma/migrations/20260730101037_auth_sessions/migration.sql
+new file mode 100644
+index 0000000..4b6a157
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260730101037_auth_sessions/migration.sql
+@@ -0,0 +1,19 @@
++-- CreateTable
++CREATE TABLE "identity"."Session" (
++    "id" UUID NOT NULL,
++    "identityId" UUID NOT NULL,
++    "refreshTokenHash" TEXT NOT NULL,
++    "familyId" UUID NOT NULL,
++    "replacedById" UUID,
++    "revokedAt" TIMESTAMP(3),
++    "expiresAt" TIMESTAMP(3) NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "Session_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "Session_refreshTokenHash_key" ON "identity"."Session"("refreshTokenHash");
++
++-- AddForeignKey
++ALTER TABLE "identity"."Session" ADD CONSTRAINT "Session_identityId_fkey" FOREIGN KEY ("identityId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index 4f8c6d1..581d009 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -69,20 +69,37 @@ model Identity {
+   id          String       @id @default(uuid()) @db.Uuid
+   kind        IdentityKind
+   email       String?
+   displayName String?
+   deletedAt   DateTime?
+   createdAt   DateTime     @default(now())
+   updatedAt   DateTime     @updatedAt
+   rooms       Room[]
+   logEvents   LogEvent[]
+   memberships Membership[]
++  sessions    Session[]
++
++  @@schema("identity")
++}
++
++// Session — семейство refresh-токенов (REQ-ID-007: хранится только хэш токена,
++// ротация связывает replacedById, отзыв — revokedAt; REQ-ID-016: expiresAt).
++model Session {
++  id               String    @id @default(uuid()) @db.Uuid
++  identity         Identity  @relation(fields: [identityId], references: [id])
++  identityId       String    @db.Uuid
++  refreshTokenHash String    @unique
++  familyId         String    @db.Uuid
++  replacedById     String?   @db.Uuid
++  revokedAt        DateTime?
++  expiresAt        DateTime
++  createdAt        DateTime  @default(now())
+ 
+   @@schema("identity")
+ }
+ 
+ enum EventVisibility {
+   PUBLIC         @map("public")
+   ORGANIZER      @map("organizer")
+   MODULE_PRIVATE @map("module-private")
+ 
+   @@schema("realtime")
+diff --git a/packages/core/src/auth/session-schema.int-spec.ts b/packages/core/src/auth/session-schema.int-spec.ts
+new file mode 100644
+index 0000000..b86cd7d
+--- /dev/null
++++ b/packages/core/src/auth/session-schema.int-spec.ts
+@@ -0,0 +1,22 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++describe('identity."Session" schema (REQ-ID-007)', () => {
++  let db: TestDb;
++  beforeAll(async () => { db = await startTestDb(); }, 120000);
++  afterAll(async () => { await db.stop(); });
++
++  it('table exists in the identity schema', async () => {
++    const rows = await db.prisma.$queryRaw<{ count: bigint }[]>`
++      SELECT count(*)::bigint AS count FROM information_schema.tables
++      WHERE table_schema = 'identity' AND table_name = 'Session'`;
++    expect(Number(rows[0].count)).toBe(1);
++  });
++
++  it('refreshTokenHash is unique', async () => {
++    const rows = await db.prisma.$queryRaw<{ count: bigint }[]>`
++      SELECT count(*)::bigint AS count FROM pg_indexes
++      WHERE schemaname = 'identity' AND tablename = 'Session'
++        AND indexdef ILIKE '%UNIQUE%' AND indexdef ILIKE '%refreshTokenHash%'`;
++    expect(Number(rows[0].count)).toBeGreaterThanOrEqual(1);
++  });
++});

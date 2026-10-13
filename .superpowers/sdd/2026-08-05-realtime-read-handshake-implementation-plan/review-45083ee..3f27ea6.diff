@@ -1,0 +1,245 @@
+# Review package: 45083ee..HEAD
+
+## Commits
+3f27ea6 feat(core): SubscriptionRegistry + findActiveMembership + токен reconnect-лимитера (REQ-SEC-003, REQ-RT-015)
+
+## Files changed
+ .../src/membership/membership.service.int-spec.ts  | 27 ++++++++++++
+ packages/core/src/membership/membership.service.ts | 13 ++++++
+ packages/core/src/realtime/realtime.tokens.ts      |  4 ++
+ .../src/realtime/subscription-registry.spec.ts     | 40 ++++++++++++++++++
+ .../core/src/realtime/subscription-registry.ts     | 49 ++++++++++++++++++++++
+ 5 files changed, 133 insertions(+)
+
+## Diff
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 126df29..da1314c 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -10,38 +10,40 @@ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from './membership.service';
+ import { JoinRateLimiter } from './join-rate-limiter';
+ import {
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+ } from './membership.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
++const P1 = '00000000-0000-0000-0000-000000000002';
+ const IP = '203.0.113.7';
+ const IP2 = '198.51.100.9';
+ 
+ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   let db: TestDb;
+   let roomService: RoomService;
+ 
+   const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
+     new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+     );
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    await seedIdentity(db.prisma, { id: P1, email: 'p1@example.test' });
+     const outbox = new EventOutbox(db.prisma, new RealtimeBus());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+@@ -188,11 +190,36 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+     expect(err).toBeInstanceOf(JoinRateLimitedError);
+   });
+ 
+   it('does not throttle other IPs', async () => {
+     const room = await roomService.create(ORG);
+     const service = makeMembership({ rateLimit: 1 });
+     await service.join({ code: room.code, displayName: 'A', ip: IP });
+     const other = await service.join({ code: room.code, displayName: 'B', ip: IP2 });
+     expect(other.membership.role).toBe('PARTICIPANT');
+   });
++
++  describe('findActiveMembership', () => {
++    it('returns the membership of a live member in a live room', async () => {
++      const room = await roomService.create(ORG);
++      await db.prisma.membership.create({
++        data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' },
++      });
++      const found = await makeMembership().findActiveMembership(room.id, P1);
++      expect(found?.role).toBe('PARTICIPANT');
++    });
++
++    it('returns null for a non-member', async () => {
++      const room = await roomService.create(ORG);
++      expect(await makeMembership().findActiveMembership(room.id, P1)).toBeNull();
++    });
++
++    it('returns null when the room is soft-deleted (REQ-SEC-003)', async () => {
++      const room = await roomService.create(ORG);
++      await db.prisma.membership.create({
++        data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' },
++      });
++      await roomService.softDelete(room.id);
++      expect(await makeMembership().findActiveMembership(room.id, P1)).toBeNull();
++    });
++  });
+ });
+diff --git a/packages/core/src/membership/membership.service.ts b/packages/core/src/membership/membership.service.ts
+index 5e78e33..12e8f3b 100644
+--- a/packages/core/src/membership/membership.service.ts
++++ b/packages/core/src/membership/membership.service.ts
+@@ -32,20 +32,33 @@ export class MembershipService {
+   async createOrganizerMembership(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     identityId: string,
+   ): Promise<Membership> {
+     return tx.membership.create({
+       data: { roomId, identityId, role: 'ORGANIZER' },
+     });
+   }
+ 
++  // Read-path realtime-среза (REQ-SEC-003): живое членство в живой комнате.
++  // Мягкое удаление комнаты гасит членство для чтения; мягкого удаления самой
++  // membership в схеме пока нет — появится со срезом исключения (там же hook
++  // SubscriptionRegistry.revokeRoomAccess получит вызывающего).
++  async findActiveMembership(roomId: string, identityId: string): Promise<Membership | null> {
++    const membership = await this.prisma.membership.findUnique({
++      where: { roomId_identityId: { roomId, identityId } },
++      include: { room: true },
++    });
++    if (!membership || membership.room.deletedAt !== null) return null;
++    return membership;
++  }
++
+   // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
+   // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
+   // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
+   // в один ROOM_JOIN_DENIED (REQ-ID-013).
+   async join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult> {
+     if (!this.joinRateLimiter.tryAcquire(params.ip)) {
+       throw new JoinRateLimitedError('Join rate limit exceeded');
+     }
+     // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
+     const name = displayNameSchema.parse(params.displayName);
+diff --git a/packages/core/src/realtime/realtime.tokens.ts b/packages/core/src/realtime/realtime.tokens.ts
+new file mode 100644
+index 0000000..bed8f6f
+--- /dev/null
++++ b/packages/core/src/realtime/realtime.tokens.ts
+@@ -0,0 +1,4 @@
++// DI-токен per-identity лимитера reconnect/replay (REQ-RT-015, объём v1.3).
++// Отдельный инстанс JoinRateLimiter — состояние не делится с join/refresh
++// лимитерами (конвенция REFRESH_RATE_LIMITER транспортного среза).
++export const RECONNECT_RATE_LIMITER = Symbol('RECONNECT_RATE_LIMITER');
+diff --git a/packages/core/src/realtime/subscription-registry.spec.ts b/packages/core/src/realtime/subscription-registry.spec.ts
+new file mode 100644
+index 0000000..6bd7b38
+--- /dev/null
++++ b/packages/core/src/realtime/subscription-registry.spec.ts
+@@ -0,0 +1,40 @@
++import { SubscriptionRegistry } from './subscription-registry';
++
++const SUB_A = { socketId: 's1', identityId: 'u1', roomId: 'r1', level: 'public' as const };
++const SUB_B = { socketId: 's2', identityId: 'u1', roomId: 'r1', level: 'organizer' as const };
++const SUB_C = { socketId: 's3', identityId: 'u2', roomId: 'r1', level: 'public' as const };
++
++describe('SubscriptionRegistry', () => {
++  it('add/get/remove round-trip', () => {
++    const registry = new SubscriptionRegistry();
++    registry.add(SUB_A);
++    expect(registry.get('s1')).toEqual(SUB_A);
++    registry.remove('s1');
++    expect(registry.get('s1')).toBeUndefined();
++  });
++
++  it('socketsOf groups by (identityId, roomId) for the revoke hook', () => {
++    const registry = new SubscriptionRegistry();
++    registry.add(SUB_A);
++    registry.add(SUB_B);
++    registry.add(SUB_C);
++    expect([...registry.socketsOf('u1', 'r1')].sort()).toEqual(['s1', 's2']);
++    expect(registry.socketsOf('u2', 'r1')).toEqual(['s3']);
++    expect(registry.socketsOf('u1', 'r2')).toEqual([]);
++  });
++
++  it('remove cleans the membership index; empty sets are dropped', () => {
++    const registry = new SubscriptionRegistry();
++    registry.add(SUB_A);
++    registry.add(SUB_B);
++    registry.remove('s1');
++    expect(registry.socketsOf('u1', 'r1')).toEqual(['s2']);
++    registry.remove('s2');
++    expect(registry.socketsOf('u1', 'r1')).toEqual([]);
++  });
++
++  it('removing an unknown socket is a no-op', () => {
++    const registry = new SubscriptionRegistry();
++    expect(() => registry.remove('nope')).not.toThrow();
++  });
++});
+diff --git a/packages/core/src/realtime/subscription-registry.ts b/packages/core/src/realtime/subscription-registry.ts
+new file mode 100644
+index 0000000..00f5db6
+--- /dev/null
++++ b/packages/core/src/realtime/subscription-registry.ts
+@@ -0,0 +1,49 @@
++import { Injectable } from '@nestjs/common';
++import type { OutwardLevel } from './projection.service';
++
++export interface Subscription {
++  readonly socketId: string;
++  readonly identityId: string;
++  readonly roomId: string;
++  readonly level: OutwardLevel;
++}
++
++// Реестр подписок (design §2): источник «кто что слушает» для fan-out и hook'а
++// разрыва (REQ-SEC-003). In-memory легален при одной реплике (REQ-OPS-005);
++// состояние — поле экземпляра (REQ-CORE-004). Индекс по (identityId, roomId)
++// поддерживается синхронно с bySocket — менять только вместе.
++@Injectable()
++export class SubscriptionRegistry {
++  private readonly bySocket = new Map<string, Subscription>();
++  private readonly socketsByMembership = new Map<string, Set<string>>();
++
++  private static key(identityId: string, roomId: string): string {
++    return `${identityId}:${roomId}`;
++  }
++
++  add(sub: Subscription): void {
++    this.bySocket.set(sub.socketId, sub);
++    const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
++    const set = this.socketsByMembership.get(key) ?? new Set<string>();
++    set.add(sub.socketId);
++    this.socketsByMembership.set(key, set);
++  }
++
++  get(socketId: string): Subscription | undefined {
++    return this.bySocket.get(socketId);
++  }
++
++  remove(socketId: string): void {
++    const sub = this.bySocket.get(socketId);
++    if (sub === undefined) return;
++    this.bySocket.delete(socketId);
++    const key = SubscriptionRegistry.key(sub.identityId, sub.roomId);
++    const set = this.socketsByMembership.get(key);
++    set?.delete(socketId);
++    if (set?.size === 0) this.socketsByMembership.delete(key);
++  }
++
++  socketsOf(identityId: string, roomId: string): readonly string[] {
++    return [...(this.socketsByMembership.get(SubscriptionRegistry.key(identityId, roomId)) ?? [])];
++  }
++}

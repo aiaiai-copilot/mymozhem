@@ -1,0 +1,282 @@
+# Review package: 64d2447..HEAD
+
+## Commits
+aefe96d fix(core): post-lock status re-check (TOCTOU, REQ-RT-016) + typed error on unstringifiable payload
+
+## Files changed
+ .../core/src/realtime/event-commit.int-spec.ts     | 97 +++++++++++++++++++++-
+ packages/core/src/realtime/event-log.service.ts    | 42 +++++++++-
+ 2 files changed, 137 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+index 3eda7a3..369110c 100644
+--- a/packages/core/src/realtime/event-commit.int-spec.ts
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -168,20 +168,49 @@ describe('EventLogService.commitAppEvent', () => {
+     const big = { n: 1, blob: 'x'.repeat(TEST_CONFIG.MAX_EVENT_PAYLOAD_BYTES) };
+     const err = await db.prisma
+       .$transaction((tx) =>
+         eventLog.commitAppEvent(tx, room.id, 'note.posted', big, 'public', null),
+       )
+       .catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(EventPayloadTooLargeError);
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
+   });
+ 
++  it('rejects an undefined payload with the typed error (EVENT_PAYLOAD_INVALID)', async () => {
++    // JSON.stringify(undefined) === undefined: без safe-stringify шаг размера падал
++    // бы сырым TypeError из Buffer.byteLength вне typed-таксономии (design §6).
++    const room = await activeRoom();
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', undefined, 'public', null),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventPayloadInvalidError);
++    expect((err as EventPayloadInvalidError).code).toBe('EVENT_PAYLOAD_INVALID');
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
++  });
++
++  it('rejects a circular payload with the typed error (EVENT_PAYLOAD_INVALID)', async () => {
++    // JSON.stringify бросает TypeError на циклической ссылке — маппим в typed error.
++    const room = await activeRoom();
++    const circular: Record<string, unknown> = { n: 1 };
++    circular.self = circular;
++    const err = await db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', circular, 'public', null),
++      )
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventPayloadInvalidError);
++    expect((err as EventPayloadInvalidError).code).toBe('EVENT_PAYLOAD_INVALID');
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
++  });
++
+   it('rejects an unknown event type (REQ-CTR-008)', async () => {
+     const room = await activeRoom();
+     const err = await db.prisma
+       .$transaction((tx) =>
+         eventLog.commitAppEvent(tx, room.id, 'note.v2', { n: 1 }, 'public', null),
+       )
+       .catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(EventTypeUnknownError);
+   });
+ 
+@@ -403,17 +432,83 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
+         );
+       const smallEmit = () =>
+         db.prisma.$transaction((tx) =>
+           eventLog.commitAppEvent(tx, room.id, 'note.posted', small, 'public', P2),
+         );
+       // Чередуем порядок СТАРТА (создания промисов): bigFirst либо smallFirst.
+       const first = bigFirst ? bigEmit : smallEmit;
+       const second = bigFirst ? smallEmit : bigEmit;
+       const [firstEv, secondEv] = await Promise.all([first(), second()]);
+       expect(firstEv.seq).not.toBe(secondEv.seq);
++      // Payload round-trip под гонкой: повреждённая запись (обрезанный/перепутанный
++      // payload) должна провалить тест, а не пройти по одним seq.
++      const bigEv = bigFirst ? firstEv : secondEv;
++      const smallEv = bigFirst ? secondEv : firstEv;
++      expect(bigEv.payload).toEqual(big);
++      expect(smallEv.payload).toEqual(small);
+     }
+ 
+     const log = await readRoomLog(db.prisma, room.id);
+     expect(log.map((e) => e.seq)).toEqual(Array.from({ length: 1 + ROUNDS * 2 }, (_, i) => i + 1));
+-    expect(log.filter((e) => e.type === 'test-app.note.posted')).toHaveLength(ROUNDS * 2);
++    const appEvents = log.filter((e) => e.type === 'test-app.note.posted');
++    expect(appEvents).toHaveLength(ROUNDS * 2);
++    // Каждый big payload доехал до storage целиком.
++    const bigEvents = appEvents.filter((e) => (e.payload as { blob?: string }).blob !== undefined);
++    expect(bigEvents).toHaveLength(ROUNDS);
++    for (const e of bigEvents) {
++      expect((e.payload as { blob: string }).blob).toHaveLength(8000);
++    }
++  });
++
++  it('rejects an emit that loses the race to a terminal transition (TOCTOU, REQ-RT-016)', async () => {
++    // Детерминированная гонка без sleep'ов: держим advisory lock комнаты в сырой
++    // транзакции на deferred; эмит проходит status-гейт по ACTIVE строке и встаёт
++    // за lock; пока он ждёт, статус коммитится в CANCELLED напрямую SQL'ем (симулируем
++    // закоммиченный терминальный переход — сознательно БЕЗ lock'а и БЕЗ log-события);
++    // отпускаем lock. С post-lock re-check эмит обязан отказаться ROOM_NOT_ACTIVE,
++    // и лог не должен ничего приобрести.
++    const room = await activeRoomWithP1P2();
++
++    let lockAcquired!: () => void;
++    let releaseLock!: () => void;
++    const acquired = new Promise<void>((resolve) => (lockAcquired = resolve));
++    const released = new Promise<void>((resolve) => (releaseLock = resolve));
++    const holdTx = db.prisma.$transaction(async (tx) => {
++      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${room.id}, 0))`;
++      lockAcquired();
++      await released; // транзакция (и lock) открыты до сигнала
++    });
++    await acquired;
++
++    // Эмит: status-гейт пройдёт по ACTIVE, дальше — блокировка на advisory lock.
++    const emit = db.prisma
++      .$transaction((tx) =>
++        eventLog.commitAppEvent(tx, room.id, 'note.posted', { n: 1 }, 'public', P1),
++      )
++      .catch((e: unknown) => e);
++
++    // Детерминированно ждём, пока эмит реально встанет в очередь за lock:
++    // в pg_locks появляется не-granted advisory-запрос (condition-poll, не sleep).
++    for (let i = 0; ; i++) {
++      const rows = await db.prisma.$queryRaw<{ n: number }[]>`
++        SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
++      if (rows[0].n > 0) break;
++      if (i > 1000) throw new Error('emit never queued on the room advisory lock');
++      await new Promise((r) => setImmediate(r));
++    }
++
++    // Терминальный переход коммитится, пока эмит ждёт lock (статус пишется ДО lock'а
++    // по конвенции порядка блокировок — здесь симулируем его закоммиченный результат).
++    await db.prisma.$executeRaw`
++      UPDATE room."Room" SET status = 'CANCELLED' WHERE id = ${room.id}::uuid`;
++
++    releaseLock();
++    await holdTx;
++
++    const err = await emit;
++    expect(err).toBeInstanceOf(RoomNotActiveError);
++    expect((err as RoomNotActiveError).code).toBe('ROOM_NOT_ACTIVE');
++    // Лог запечатан: попытка эмита после терминального перехода ничего не добавила
++    // (seq 1 — core.room.activated).
++    expect(await readRoomLog(db.prisma, room.id)).toHaveLength(1);
+   });
+ });
+diff --git a/packages/core/src/realtime/event-log.service.ts b/packages/core/src/realtime/event-log.service.ts
+index 1ff9183..9a33c72 100644
+--- a/packages/core/src/realtime/event-log.service.ts
++++ b/packages/core/src/realtime/event-log.service.ts
+@@ -15,20 +15,37 @@ import { EventEmitLimiter } from './event-emit-limiter';
+ import {
+   ActorNotMemberError,
+   EventEmitRateLimitedError,
+   EventPayloadInvalidError,
+   EventPayloadTooLargeError,
+   EventTypeUnknownError,
+   EventVisibilityExceededError,
+   RoomNotActiveError,
+ } from './realtime.errors';
+ 
++// JSON-сериализация app-payload (шаг размера REQ-RT-012 и append). Несериализуемый
++// payload (undefined, BigInt, циклические ссылки) — typed EVENT_PAYLOAD_INVALID,
++// не сырой TypeError: отказ должен жить в таксономии design §6, а не утекать
++// из цепочки как необработанное исключение рантайма.
++function stringifyAppPayload(payload: unknown, eventType: string): string {
++  let serialized: string | undefined;
++  try {
++    serialized = JSON.stringify(payload);
++  } catch {
++    throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
++  }
++  if (serialized === undefined) {
++    throw new EventPayloadInvalidError(`payload of ${eventType} is not JSON-serializable`);
++  }
++  return serialized;
++}
++
+ // Append-only commit-примитив для событий комнаты. ЕДИНСТВЕННЫЙ путь записи в
+ // realtime."LogEvent" — оба публичных метода (core и app) сходятся в appendLocked.
+ // Критическая секция контрактуальна (SDK-дизайн §7, REQ-RT-007): вся валидация —
+ // ДО advisory lock, размер payload не влияет на исход гонки за seq.
+ // Конвенция порядка блокировок (HANDOFF «Долгоживущие ограничения»): advisory lock
+ // комнаты — всегда leaf-most; транзакция, захватившая его, после этого НЕ пишет
+ // в room."Room".
+ @Injectable()
+ export class EventLogService {
+   constructor(
+@@ -92,21 +109,22 @@ export class EventLogService {
+     }
+     const appId = room.appId;
+     const manifestVersion = room.manifestVersion;
+     // 2. Per-actor rate-limit (REQ-RT-014): считаются попытки, не только успехи.
+     if (actorId !== null && !this.emitLimiter.tryAcquire(`${roomId}:${actorId}`)) {
+       throw new EventEmitRateLimitedError(
+         `Event emission rate limit exceeded for actor ${actorId} in room ${roomId}`,
+       );
+     }
+     // 3. Размер (REQ-RT-012) — до реестра: дешевле и не требует manifest lookup.
+-    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
++    const serialized = stringifyAppPayload(payload, `${appId}.${name}`);
++    if (Buffer.byteLength(serialized, 'utf8') > this.config.MAX_EVENT_PAYLOAD_BYTES) {
+       throw new EventPayloadTooLargeError(
+         `payload of ${appId}.${name} exceeds MAX_EVENT_PAYLOAD_BYTES (${this.config.MAX_EVENT_PAYLOAD_BYTES})`,
+       );
+     }
+     // 4. Реестр (REQ-CTR-008): тип обязан существовать в пиннутом манифесте.
+     const definition = this.appRegistry.getEventDefinition(appId, manifestVersion, name);
+     if (!definition) {
+       throw new EventTypeUnknownError(`No event type ${name} in manifest ${appId}@${manifestVersion}`);
+     }
+     // 5. Схема владельца типа (REQ-CTR-008) — verdict-only, без коэрсии (REQ-CORE-007).
+@@ -125,43 +143,65 @@ export class EventLogService {
+     // 7. Membership-гейт (design §0): актор — член комнаты.
+     if (actorId !== null) {
+       const member = await tx.membership.findUnique({
+         where: { roomId_identityId: { roomId, identityId: actorId } },
+       });
+       if (!member) {
+         throw new ActorNotMemberError(`Identity ${actorId} is not a member of room ${roomId}`);
+       }
+     }
+     // 8. Append: schemaVersion = пиннутый manifestVersion — версия схемы app-события.
++    // recheckRoomActive: post-lock перепроверка статуса (см. appendLocked).
+     return this.appendLocked(
+       tx,
+       roomId,
+       `${appId}.${name}`,
+       payload,
+       actorId,
+       visibility,
+       manifestVersion,
++      true,
+     );
+   }
+ 
+   private async appendLocked(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     type: string,
+     payload: unknown,
+     actorId: string | null,
+     visibility: Visibility,
+     schemaVersion: number,
++    recheckRoomActive = false,
+   ): Promise<LogEvent> {
+     // $executeRaw, не $queryRaw: pg_advisory_xact_lock возвращает void, а $queryRaw
+     // пытается десериализовать колонку результата и падает на типе 'void'.
+     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roomId}, 0))`;
++    if (recheckRoomActive) {
++      // REQ-RT-016, TOCTOU: pre-lock status-гейт (шаг 1) мог отработать по ещё
++      // ACTIVE строке, пока конкурентный терминальный переход коммитил CANCELLED/
++      // COMPLETED и освобождал этот lock — без перепроверки app-событие легло бы
++      // в лог ПОСЛЕ запечатывания. Re-check внутри критической секции:
++      // payload-независимый O(1), поэтому контракт нейтральности REQ-RT-007
++      // (size-dependent валидация строго ДО lock) не нарушен — санкционированное
++      // отступление от буквы design §2 («все проверки ДО lock»), решение владельца.
++      // Отказ бросает до INSERT → tx откатывается, лог остаётся запечатанным.
++      // Core-путь (commitCoreEvent) флаг не ставит: lifecycle-эмит сам держит
++      // row-lock на room."Room" и проверку статуса ему добавлять нельзя — он
++      // эмитит именно переходы ИЗ ACTIVE.
++      const room = await tx.room.findUnique({ where: { id: roomId }, select: { status: true } });
++      if (room?.status !== 'ACTIVE') {
++        throw new RoomNotActiveError(
++          `Room ${roomId} left ACTIVE while this commit waited for the room lock (sealed by a terminal transition)`,
++        );
++      }
++    }
+     const rows = await tx.$queryRaw<LogEvent[]>`
+       INSERT INTO realtime."LogEvent"
+         ("roomId", "seq", "type", "payload", "actorId", "visibility", "schemaVersion")
+       SELECT ${roomId}::uuid,
+              COALESCE(MAX("seq"), 0) + 1,
+              ${type},
+              ${JSON.stringify(payload)}::jsonb,
+              ${actorId}::uuid,
+              ${visibility}::realtime."EventVisibility",
+              ${schemaVersion}

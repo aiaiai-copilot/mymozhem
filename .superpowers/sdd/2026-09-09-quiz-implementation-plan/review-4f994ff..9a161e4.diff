@@ -1,0 +1,182 @@
+# Review package: 4f994ff..HEAD
+
+## Commits
+9a161e4 refactor(core): APP_MANIFESTS-seam в composition root — AppRegistryModule.register, global (design 2026-09-09 §2)
+
+## Files changed
+ apps/server/src/app.module.ts                      |  2 +-
+ .../src/app-registry/app-registry.module.spec.ts   | 16 +++++++++++++
+ .../core/src/app-registry/app-registry.module.ts   | 26 +++++++++++++---------
+ .../src/app-registry/app-registry.service.spec.ts  |  4 ++--
+ packages/core/src/realtime/realtime.module.ts      |  3 +--
+ packages/core/src/room/room.module.ts              |  3 +--
+ 6 files changed, 37 insertions(+), 17 deletions(-)
+
+## Diff
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 183905e..d5ad59c 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -7,19 +7,19 @@ import {
+   PrismaModule,
+   RealtimeModule,
+   RoomModule,
+   TransportModule,
+ } from '@mymozhem/core';
+ 
+ @Module({
+   imports: [
+     PrismaModule,
+     HealthModule,
+-    AppRegistryModule,
++    AppRegistryModule.register([]),
+     RoomModule,
+     IdentityModule,
+     MembershipModule,
+     RealtimeModule,
+     TransportModule,
+   ],
+ })
+ export class AppModule {}
+diff --git a/packages/core/src/app-registry/app-registry.module.spec.ts b/packages/core/src/app-registry/app-registry.module.spec.ts
+new file mode 100644
+index 0000000..920112c
+--- /dev/null
++++ b/packages/core/src/app-registry/app-registry.module.spec.ts
+@@ -0,0 +1,16 @@
++import { Test } from '@nestjs/testing';
++import { AppRegistryModule } from './app-registry.module';
++import { AppRegistryService } from './app-registry.service';
++
++describe('AppRegistryModule.register', () => {
++  it('provides the registry from composition-root manifests', async () => {
++    const moduleRef = await Test.createTestingModule({ imports: [AppRegistryModule.register([])] }).compile();
++    expect(moduleRef.get(AppRegistryService)).toBeInstanceOf(AppRegistryService);
++  });
++
++  it('fails closed on an invalid manifest at boot', async () => {
++    await expect(
++      Test.createTestingModule({ imports: [AppRegistryModule.register([{ appId: 'core' }])] }).compile(),
++    ).rejects.toThrow();
++  });
++});
+diff --git a/packages/core/src/app-registry/app-registry.module.ts b/packages/core/src/app-registry/app-registry.module.ts
+index 30eb4f1..1a0fc4e 100644
+--- a/packages/core/src/app-registry/app-registry.module.ts
++++ b/packages/core/src/app-registry/app-registry.module.ts
+@@ -1,13 +1,19 @@
+-import { Module } from '@nestjs/common';
++import { Module, type DynamicModule } from '@nestjs/common';
+ import { AppRegistryService } from './app-registry.service';
+ import { APP_MANIFESTS } from './app-registry.tokens';
+ 
+-@Module({
+-  providers: [
+-    // Empty seam: phase-2 app-modules replace this with their manifests (design §5).
+-    { provide: APP_MANIFESTS, useValue: [] },
+-    AppRegistryService,
+-  ],
+-  exports: [AppRegistryService],
+-})
+-export class AppRegistryModule {}
++// Seam фазы 2 (design 2026-09-09 §2): манифесты задаёт composition root, модуль —
++// global, чтобы Room/Realtime не импортировали сконфигурированный инстанс повторно.
++// Статический импорт AppRegistryModule (без register) — ошибка сборки DI: провайдера
++// APP_MANIFESTS в нём больше нет.
++@Module({})
++export class AppRegistryModule {
++  static register(manifests: readonly unknown[]): DynamicModule {
++    return {
++      module: AppRegistryModule,
++      global: true,
++      providers: [{ provide: APP_MANIFESTS, useValue: manifests }, AppRegistryService],
++      exports: [AppRegistryService],
++    };
++  }
++}
+diff --git a/packages/core/src/app-registry/app-registry.service.spec.ts b/packages/core/src/app-registry/app-registry.service.spec.ts
+index 49041d8..2f2170f 100644
+--- a/packages/core/src/app-registry/app-registry.service.spec.ts
++++ b/packages/core/src/app-registry/app-registry.service.spec.ts
+@@ -98,19 +98,19 @@ describe('event-commit read-path (REQ-CTR-008/009)', () => {
+     const svc = new AppRegistryService([validManifests[0]]);
+     const def = svc.getEventDefinition('quiz', 1, 'answer.submitted');
+     if (!def) throw new Error('fixture must define answer.submitted');
+     const v = svc.eventValidatorFor('quiz', 1, 'answer.submitted', def.schema);
+     expect(v({})).toBe(false);
+     expect(svc.describeEventErrors(v)).toMatch(/roundId|required/);
+   });
+ });
+ 
+ describe('AppRegistryModule', () => {
+-  it('provides AppRegistryService with an empty registry by default', async () => {
++  it('provides AppRegistryService with an empty registry when composition root registers none', async () => {
+     const moduleRef = await Test.createTestingModule({
+-      imports: [AppRegistryModule],
++      imports: [AppRegistryModule.register([])],
+     }).compile();
+     const svc = moduleRef.get(AppRegistryService);
+     const { appId, manifestVersion } = validManifests[0];
+     expect(svc.getManifest(appId, manifestVersion)).toBeUndefined();
+   });
+ });
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+index 603faf5..21230a3 100644
+--- a/packages/core/src/realtime/realtime.module.ts
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -1,34 +1,33 @@
+ import { Module } from '@nestjs/common';
+ import { ConfigModule } from '../config/config.module';
+ import { PrismaModule } from '../prisma/prisma.module';
+-import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { EventLogService } from './event-log.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { RealtimeBus } from './realtime-bus';
+ import { EventOutbox } from './event-outbox';
+ import { ProjectionService } from './projection.service';
+ import { SubscriptionRegistry } from './subscription-registry';
+ import { RealtimeGateway } from './realtime.gateway';
+ import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+ 
+ // PrismaModule нужен EventOutbox'у (runner владеет транзакцией); сам примитив
+ // записи по-прежнему работает на транзакционном клиенте вызывающего — атомарность
+ // «действие + лог» (REQ-DEV-008) не меняется. Единственный модуль ядра, импортирующий
+ // socket.io (REQ-RT-006 + boundary-правило).
+ @Module({
+-  imports: [ConfigModule, AppRegistryModule, PrismaModule, AuthModule, MembershipModule],
++  imports: [ConfigModule, PrismaModule, AuthModule, MembershipModule],
+   providers: [
+     {
+       provide: EventEmitLimiter,
+       useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
+       inject: [APP_CONFIG],
+     },
+     {
+       // REQ-RT-015 (объём v1.3): отдельный инстанс — состояние не делится с
+       // join/refresh лимитерами; бэкофф/режимы — ф.4.
+       provide: RECONNECT_RATE_LIMITER,
+diff --git a/packages/core/src/room/room.module.ts b/packages/core/src/room/room.module.ts
+index 2e4e794..627c92f 100644
+--- a/packages/core/src/room/room.module.ts
++++ b/packages/core/src/room/room.module.ts
+@@ -1,14 +1,13 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+-import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { ConfigModule } from '../config/config.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { RoomService } from './room.service';
+ 
+ @Module({
+-  imports: [PrismaModule, RealtimeModule, AppRegistryModule, ConfigModule, MembershipModule],
++  imports: [PrismaModule, RealtimeModule, ConfigModule, MembershipModule],
+   providers: [RoomService],
+   exports: [RoomService],
+ })
+ export class RoomModule {}

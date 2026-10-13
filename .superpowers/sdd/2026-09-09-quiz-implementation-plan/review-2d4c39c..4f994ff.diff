@@ -1,0 +1,190 @@
+# Review package: 2d4c39c..HEAD
+
+## Commits
+4f994ff feat(sdk): рантайм-контракт app-модуля — AppRuntimeModule/AppCommit/AppHostContext/AppRejection (REQ-CTR-002/003)
+
+## Files changed
+ .../src/app-runtime/app-commit.contract.spec.ts    | 24 ++++++++++++++++++++++
+ .../sdk/src/app-runtime/app-commit.fixtures.ts     | 18 ++++++++++++++++
+ packages/sdk/src/app-runtime/app-commit.ts         | 15 ++++++++++++++
+ packages/sdk/src/app-runtime/app-host-context.ts   | 13 ++++++++++++
+ packages/sdk/src/app-runtime/app-log-event.ts      | 10 +++++++++
+ packages/sdk/src/app-runtime/app-rejection.ts      | 10 +++++++++
+ packages/sdk/src/app-runtime/app-runtime-module.ts | 20 ++++++++++++++++++
+ packages/sdk/src/index.ts                          |  6 ++++++
+ 8 files changed, 116 insertions(+)
+
+## Diff
+diff --git a/packages/sdk/src/app-runtime/app-commit.contract.spec.ts b/packages/sdk/src/app-runtime/app-commit.contract.spec.ts
+new file mode 100644
+index 0000000..8d42a33
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-commit.contract.spec.ts
+@@ -0,0 +1,24 @@
++import { appCommitSchema, appCommitActorSchema } from './app-commit';
++import { validAppCommits, invalidAppCommits } from './app-commit.fixtures';
++
++describe('appCommit contract (REQ-CTR-002/003)', () => {
++  it.each(validAppCommits.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
++    expect(appCommitSchema.safeParse(v).success).toBe(true);
++  });
++
++  it.each(invalidAppCommits.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
++    expect(appCommitSchema.safeParse(v).success).toBe(false);
++  });
++
++  it('actor enum is exactly publisher | server', () => {
++    expect([...appCommitActorSchema.options]).toEqual(['publisher', 'server']);
++  });
++
++  it('shortName stays lowercase: uppercase letters cannot slip a namespace lookalike in', () => {
++    for (const shortName of ['Quiz.x', 'Answer.Submitted']) {
++      expect(
++        appCommitSchema.safeParse({ shortName, payload: {}, visibility: 'public', actor: 'server' }).success,
++      ).toBe(false);
++    }
++  });
++});
+diff --git a/packages/sdk/src/app-runtime/app-commit.fixtures.ts b/packages/sdk/src/app-runtime/app-commit.fixtures.ts
+new file mode 100644
+index 0000000..e0011fc
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-commit.fixtures.ts
+@@ -0,0 +1,18 @@
++// Пары valid/invalid для appCommitSchema (REQ-CTR-002/003): то, что модуль просит
++// ядро зафиксировать. actor 'publisher' — атрибуция клиенту (гейты применяются),
++// 'server' — эмиссия модуля (actorId=null, гейты не применяются).
++export const validAppCommits: unknown[] = [
++  { shortName: 'answer.submitted', payload: { optionId: 'a' }, visibility: 'public', actor: 'publisher' },
++  { shortName: 'round.opened', payload: {}, visibility: 'module-private', actor: 'server' },
++  { shortName: 'tick', payload: { remainingMs: 5000, seq: 3 }, visibility: 'organizer', actor: 'server' },
++];
++
++export const invalidAppCommits: unknown[] = [
++  {}, // нет обязательных полей
++  { shortName: 'answer.submitted', payload: {}, visibility: 'public' }, // нет actor
++  { shortName: 'answer.submitted', payload: {}, visibility: 'public', actor: 'publisher', extra: true }, // strictObject
++  { shortName: 'Quiz.x', payload: {}, visibility: 'public', actor: 'publisher' }, // namespace в shortName не пройдёт
++  { shortName: 'answer.submitted', payload: {}, visibility: 'secret', actor: 'publisher' }, // visibility вне перечисления REQ-CORE-005
++  { shortName: 'answer.submitted', payload: {}, visibility: 'public', actor: 'client' }, // actor вне enum
++  'not-an-object',
++];
+diff --git a/packages/sdk/src/app-runtime/app-commit.ts b/packages/sdk/src/app-runtime/app-commit.ts
+new file mode 100644
+index 0000000..a8e2ccb
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-commit.ts
+@@ -0,0 +1,15 @@
++import { z } from 'zod';
++import { shortEventNameSchema } from '../events/event-type';
++import { visibilitySchema } from '../visibility/visibility';
++
++// Что модуль просит ядро зафиксировать. actor: 'publisher' —
++// событие атрибутируется клиенту (membership-гейт и per-actor rate-limit применяются);
++// 'server' — эмиссия модуля (actorId=null, гейты не применяются, как в commitAppEvent).
++export const appCommitActorSchema = z.enum(['publisher', 'server']);
++export const appCommitSchema = z.strictObject({
++  shortName: shortEventNameSchema,
++  payload: z.record(z.string(), z.unknown()),
++  visibility: visibilitySchema,
++  actor: appCommitActorSchema,
++});
++export type AppCommit = z.infer<typeof appCommitSchema>;
+diff --git a/packages/sdk/src/app-runtime/app-host-context.ts b/packages/sdk/src/app-runtime/app-host-context.ts
+new file mode 100644
+index 0000000..6e5a8d4
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-host-context.ts
+@@ -0,0 +1,13 @@
++import type { MemberRole } from '../membership/member-role';
++
++// Контекст вызова handlePublish. now тоже ISO-строка (та же причина, что у
++// AppLogEvent.recordedAt — через границу только JSON-сериализуемые значения,
++// REQ-CTR-002).
++export interface AppHostContext<S> {
++  readonly roomId: string;
++  readonly actorId: string;
++  readonly actorRole: MemberRole;
++  readonly settings: unknown;
++  readonly state: S;
++  readonly now: string;
++}
+diff --git a/packages/sdk/src/app-runtime/app-log-event.ts b/packages/sdk/src/app-runtime/app-log-event.ts
+new file mode 100644
+index 0000000..9e62b97
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-log-event.ts
+@@ -0,0 +1,10 @@
++// Событие лога как его видит модуль при replay. recordedAt —
++// ISO-строка, не Date: через границу ходят только JSON-сериализуемые значения
++// (REQ-CTR-002); модуль делает Date.parse сам.
++export interface AppLogEvent {
++  readonly shortName: string;
++  readonly payload: Record<string, unknown>;
++  readonly actorId: string | null;
++  readonly seq: number;
++  readonly recordedAt: string;
++}
+diff --git a/packages/sdk/src/app-runtime/app-rejection.ts b/packages/sdk/src/app-runtime/app-rejection.ts
+new file mode 100644
+index 0000000..3e7de34
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-rejection.ts
+@@ -0,0 +1,10 @@
++import { ContractError } from '../errors/error-codes';
++import type { ContractErrorCode } from '../errors/error-codes';
++
++// Типизированный отказ модуля; код обязан быть в CONTRACT_ERROR_CODES.
++export class AppRejection extends ContractError {
++  constructor(code: ContractErrorCode, message: string) {
++    super(code, message);
++    this.name = 'AppRejection';
++  }
++}
+diff --git a/packages/sdk/src/app-runtime/app-runtime-module.ts b/packages/sdk/src/app-runtime/app-runtime-module.ts
+new file mode 100644
+index 0000000..6a5e53f
+--- /dev/null
++++ b/packages/sdk/src/app-runtime/app-runtime-module.ts
+@@ -0,0 +1,20 @@
++import type { AppManifest } from '../manifest/manifest.schema';
++import type { AppCommit } from './app-commit';
++import type { AppHostContext } from './app-host-context';
++import type { AppLogEvent } from './app-log-event';
++
++// Рантайм-контракт app-модуля (фаза 2, командный хост): ядро диспетчит publish
++// через handlePublish, восстанавливает состояние редукцией лога (initialState +
++// reduce), фиксирует только то, что модуль вернул как AppCommit[] (REQ-CTR-003).
++export interface AppRuntimeModule<S = unknown> {
++  readonly appId: string;
++  readonly manifestVersion: number;
++  readonly manifest: AppManifest;
++  initialState(): S;
++  reduce(state: S, event: AppLogEvent): S;
++  handlePublish(
++    ctx: AppHostContext<S>,
++    shortName: string,
++    payload: Record<string, unknown>,
++  ): AppCommit[] | Promise<AppCommit[]>;
++}
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 0184c41..3502fcb 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -26,10 +26,16 @@ export * from './membership/exclude-request.fixtures';
+ export * from './membership/exclude-response';
+ export * from './auth/join-request';
+ export * from './auth/join-request.fixtures';
+ export * from './auth/token-response';
+ export * from './auth/oauth-start-query';
+ export * from './auth/oauth-callback-query';
+ export * from './room/create-room-request';
+ export * from './room/create-room-request.fixtures';
+ export * from './room/create-room-response';
+ export * from './realtime/realtime-messages';
++export * from './app-runtime/app-commit';
++export * from './app-runtime/app-commit.fixtures';
++export * from './app-runtime/app-log-event';
++export * from './app-runtime/app-host-context';
++export * from './app-runtime/app-rejection';
++export * from './app-runtime/app-runtime-module';

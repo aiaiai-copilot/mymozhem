@@ -1,0 +1,1544 @@
+# Review package: 5729fb2..d14d27d
+
+## Commits
+d14d27d feat(core): REST-контур rewards — prizes/rewards/fulfill/revoke, wire-маппинг кодов фазы 3
+1219013 feat(core): RewardsService — эффекты награждения в транзакции коммита, автомат AWARDED→FULFILLED|REVOKED, commitRewardsEvent
+524959a feat(core): схема rewards — Prize/Award/PointsGrant, CHECK фонда, частичный индекс единичности, CLEANUP_INTERVAL
+
+## Files changed
+ packages/core/package.json                         |   1 +
+ .../20260910171833_rewards_schema/migration.sql    |  82 +++++++++
+ packages/core/prisma/schema.prisma                 |  73 +++++++-
+ packages/core/src/config/config.schema.spec.ts     |  13 ++
+ packages/core/src/config/config.schema.ts          |   3 +
+ packages/core/src/index.ts                         |   3 +
+ packages/core/src/realtime/event-log.int-spec.ts   |  40 +++++
+ packages/core/src/realtime/event-log.service.ts    |  34 +++-
+ .../core/src/rewards/rewards-schema.int-spec.ts    |  97 +++++++++++
+ .../src/rewards/rewards.controller.int-spec.ts     | 177 ++++++++++++++++++++
+ packages/core/src/rewards/rewards.controller.ts    |  97 +++++++++++
+ packages/core/src/rewards/rewards.errors.ts        |  27 +++
+ packages/core/src/rewards/rewards.int-spec.ts      | 186 +++++++++++++++++++++
+ packages/core/src/rewards/rewards.module.ts        |  18 ++
+ packages/core/src/rewards/rewards.service.ts       | 168 +++++++++++++++++++
+ packages/core/src/testing/test-config.ts           |   1 +
+ .../src/transport/http-exception.filter.spec.ts    |  18 ++
+ .../core/src/transport/http-exception.filter.ts    |  20 +++
+ pnpm-lock.yaml                                     |   3 +
+ 19 files changed, 1057 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index ede96f1..c619708 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -23,20 +23,21 @@
+     "ajv": "^8.20.0",
+     "ajv-formats": "^3.0.1",
+     "jsonwebtoken": "^9.0.3",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "socket.io": "^4.8.3",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
++    "@nestjs/platform-fastify": "^11.0.0",
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/jsonwebtoken": "^9.0.10",
+     "@types/node": "^24.0.0",
+     "@types/pg": "^8.11.0",
+     "jest": "^29.7.0",
+     "prisma": "^7.6.0",
+     "testcontainers": "^12.0.4",
+     "ts-jest": "^29.2.5",
+diff --git a/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql b/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql
+new file mode 100644
+index 0000000..94b22d0
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260910171833_rewards_schema/migration.sql
+@@ -0,0 +1,82 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "rewards";
++
++-- CreateEnum
++CREATE TYPE "rewards"."AwardStatus" AS ENUM ('AWARDED', 'FULFILLED', 'REVOKED');
++
++-- CreateTable
++CREATE TABLE "rewards"."Prize" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "name" TEXT NOT NULL,
++    "quantityTotal" INTEGER NOT NULL,
++    "quantity" INTEGER NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "Prize_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "rewards"."Award" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "prizeId" UUID,
++    "winnerId" UUID NOT NULL,
++    "status" "rewards"."AwardStatus" NOT NULL DEFAULT 'AWARDED',
++    "sourceAppId" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "fulfilledAt" TIMESTAMP(3),
++    "revokedAt" TIMESTAMP(3),
++
++    CONSTRAINT "Award_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "rewards"."PointsGrant" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "identityId" UUID NOT NULL,
++    "points" INTEGER NOT NULL,
++    "reason" TEXT,
++    "sourceAppId" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "PointsGrant_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE INDEX "Award_roomId_idx" ON "rewards"."Award"("roomId");
++
++-- CreateIndex
++CREATE INDEX "PointsGrant_roomId_identityId_idx" ON "rewards"."PointsGrant"("roomId", "identityId");
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Prize" ADD CONSTRAINT "Prize_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_prizeId_fkey" FOREIGN KEY ("prizeId") REFERENCES "rewards"."Prize"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."Award" ADD CONSTRAINT "Award_winnerId_fkey" FOREIGN KEY ("winnerId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."PointsGrant" ADD CONSTRAINT "PointsGrant_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "rewards"."PointsGrant" ADD CONSTRAINT "PointsGrant_identityId_fkey" FOREIGN KEY ("identityId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- REQ-RWD-010: ограниченность призового фонда — DB-инвариант (рукописной CHECK;
++-- preview-функцию Prisma partialIndexes/checkConstraints НЕ использовать, REQ-DEV-006).
++ALTER TABLE rewards."Prize" ADD CONSTRAINT "Prize_quantity_nonnegative" CHECK (quantity >= 0);
++
++-- REQ-RWD-003 + REQ-DEV-006: единичность победителя по активным записям.
++-- «Активная» = не отозванная: отзыв освобождает место (приз можно переразыграть),
++-- вручённая — нет. Сетевой повтор того же награждения конфликтует по индексу →
++-- типизированный no-op в RewardsService (Task 5).
++CREATE UNIQUE INDEX "Award_single_active_winner_per_prize_key"
++  ON rewards."Award" ("roomId", "prizeId", "winnerId")
++  WHERE "status" IN ('AWARDED', 'FULFILLED');
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index 57c02a8..a1f9307 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,17 +1,17 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["identity", "membership", "realtime", "room"]
++  schemas  = ["identity", "membership", "realtime", "rewards", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+@@ -43,20 +43,23 @@ model Room {
+   joinPolicy      RoomJoinPolicy @default(GUESTS)
+   appId           String?
+   manifestVersion Int?
+   appSettings     Json?
+   deletedAt       DateTime?
+   createdAt       DateTime       @default(now())
+   updatedAt       DateTime       @updatedAt
+   logEvents       LogEvent[]
+   memberships     Membership[]
+   exclusions      Exclusion[]
++  prizes          Prize[]
++  awards          Award[]
++  pointsGrants    PointsGrant[]
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+   REGISTERED
+   GUEST
+ 
+   @@schema("identity")
+ }
+@@ -74,20 +77,22 @@ model Identity {
+   deletedAt   DateTime?
+   createdAt   DateTime     @default(now())
+   updatedAt   DateTime     @updatedAt
+   rooms       Room[]
+   logEvents   LogEvent[]
+   memberships Membership[]
+   sessions    Session[]
+   providers   IdentityProvider[]
+   exclusions  Exclusion[]  @relation("ExclusionTarget")
+   exclusionsMade Exclusion[] @relation("ExclusionActor")
++  awardsWon   Award[]
++  pointsGrants PointsGrant[]
+ 
+   @@schema("identity")
+ }
+ 
+ // Session — семейство refresh-токенов (REQ-ID-007: хранится только хэш токена,
+ // ротация связывает replacedById, отзыв — revokedAt; REQ-ID-016: expiresAt).
+ model Session {
+   id               String    @id @default(uuid()) @db.Uuid
+   identity         Identity  @relation(fields: [identityId], references: [id])
+   identityId       String    @db.Uuid
+@@ -193,10 +198,76 @@ model Exclusion {
+   ip         String
+   excludedByIdentity Identity @relation("ExclusionActor", fields: [excludedBy], references: [id], onDelete: Restrict)
+   excludedBy String   @db.Uuid
+   reason     String?
+   createdAt  DateTime @default(now())
+ 
+   @@unique([roomId, identityId])
+   @@index([roomId, ip])
+   @@schema("membership")
+ }
++
++// === Фаза 3: rewards (design 2026-09-10 §3) ===
++
++model Prize {
++  id            String   @id @default(uuid()) @db.Uuid
++  roomId        String   @db.Uuid
++  name          String
++  quantityTotal Int // исходный фонд, для «раздано X из Y»
++  quantity      Int    // остаток; CHECK (quantity >= 0) — рукописной миграцией (REQ-RWD-010)
++  createdAt     DateTime @default(now())
++  updatedAt     DateTime @updatedAt
++
++  room   Room    @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  awards Award[]
++
++  @@schema("rewards")
++}
++
++// БЕЗ @map: значения в БД uppercase, под дословный SQL частичного индекса
++// (design §3; прецедент MemberRole).
++enum AwardStatus {
++  AWARDED
++  FULFILLED
++  REVOKED
++
++  @@schema("rewards")
++}
++
++model Award {
++  id          String      @id @default(uuid()) @db.Uuid
++  roomId      String      @db.Uuid
++  prizeId     String?     @db.Uuid // REQ-RWD-002b: победитель без сущности приза
++  winnerId    String      @db.Uuid
++  status      AwardStatus @default(AWARDED)
++  sourceAppId String // 'lottery', 'quiz'
++  createdAt   DateTime    @default(now())
++  fulfilledAt DateTime?
++  revokedAt   DateTime?
++
++  room   Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  prize  Prize?   @relation(fields: [prizeId], references: [id], onDelete: Restrict)
++  winner Identity @relation(fields: [winnerId], references: [id], onDelete: Restrict)
++
++  // Единичность победителя по активным записям — частичный уникальный индекс
++  // "Award_single_active_winner_per_prize_key", рукописной миграцией (REQ-RWD-003,
++  // REQ-DEV-006). NULL prizeId не конфликтует (SQL NULLs distinct) — осознанно.
++  @@index([roomId])
++  @@schema("rewards")
++}
++
++model PointsGrant {
++  id          String   @id @default(uuid()) @db.Uuid
++  roomId      String   @db.Uuid
++  identityId  String   @db.Uuid
++  points      Int // только положительные в MVP (принуждается appEffectSchema)
++  reason      String? // 'quiz.round', …
++  sourceAppId String
++  createdAt   DateTime @default(now())
++
++  room     Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  identity Identity @relation(fields: [identityId], references: [id], onDelete: Restrict)
++
++  // Агрегат «баллы участника» — проекция по ledger'у, не хранимый счётчик.
++  @@index([roomId, identityId])
++  @@schema("rewards")
++}
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 183125c..52b8f70 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -163,11 +163,24 @@ describe('loadConfig', () => {
+   it('coerces RECONNECT_RATE_LIMIT_PER_MIN from string and rejects 0', () => {
+     const envBase = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+     expect(
+       configSchema.parse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: '5' })
+         .RECONNECT_RATE_LIMIT_PER_MIN,
+     ).toBe(5);
+     expect(
+       configSchema.safeParse({ ...envBase, RECONNECT_RATE_LIMIT_PER_MIN: 0 }).success,
+     ).toBe(false);
+   });
++
++  it('accepts CLEANUP_INTERVAL within the §4 range and defaults to 1 hour (REQ-ID-010)', () => {
++    expect(
++      loadConfig({ ...base, CLEANUP_INTERVAL: '600' } as NodeJS.ProcessEnv).CLEANUP_INTERVAL,
++    ).toBe(600);
++    expect(loadConfig({ ...base } as NodeJS.ProcessEnv).CLEANUP_INTERVAL).toBe(3600);
++    expect(() =>
++      loadConfig({ ...base, CLEANUP_INTERVAL: '60' } as NodeJS.ProcessEnv),
++    ).toThrow(/CLEANUP_INTERVAL/); // < 5 мин
++    expect(() =>
++      loadConfig({ ...base, CLEANUP_INTERVAL: '90000' } as NodeJS.ProcessEnv),
++    ).toThrow(/CLEANUP_INTERVAL/); // > 24 ч
++  });
+ });
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index 793fecb..a9871f4 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -11,20 +11,23 @@ export const configSchema = z.object({
+   // REQ-ID-006: max PARTICIPANT memberships per room (§4: default 500, 1..100 000).
+   ROOM_PARTICIPANT_LIMIT: z.coerce.number().int().min(1).max(100_000).default(500),
+   // REQ-ID-006: join attempts per minute per IP (§4: default 20, ≥ 1).
+   JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
+   // REQ-SEC-002: обязателен, ≥ 32 байта; дефолта нет — старт без секрета невозможен.
+   JWT_SECRET: z.string().min(32),
+   // §4: access_token_ttl — 15 мин, 1 мин … 1 ч (секунды).
+   ACCESS_TOKEN_TTL: z.coerce.number().int().min(60).max(3600).default(900),
+   // §4: guest_ttl — 24 ч, 1 ч … 30 сут (секунды).
+   GUEST_TTL: z.coerce.number().int().min(3600).max(2_592_000).default(86_400),
++  // §4: cleanup_interval — 1 ч, 5 мин … 24 ч (секунды). Интервал регламентных
++  // джоб (REQ-ID-010); фаза 3 — свип анонимизации гостей (REQ-ID-003/014, Task 8).
++  CLEANUP_INTERVAL: z.coerce.number().int().min(300).max(86_400).default(3_600),
+   // §4: refresh_token_ttl — 30 сут, 1 сут … 90 сут (секунды). Гостевой cap
+   // (≤ guest_ttl, REQ-ID-016) применяется в точках выдачи (TokenService.sessionExpiry,
+   // setRefreshCookie), не здесь: инвариант REQ-ID-016 — про гостевой refresh,
+   // не про глобальный параметр (design 2026-09-02 §5/§8).
+   REFRESH_TOKEN_TTL: z.coerce.number().int().min(86_400).max(7_776_000).default(2_592_000),
+   // REQ-SEC-007 (§4 login_rate_limit): refresh-эндпоинт, 10/мин на IP.
+   REFRESH_RATE_LIMIT: z.coerce.number().int().min(1).default(10),
+   // REQ-RT-014 (§4 event_emit_rate_limit): эмиссия app-событий, 30/мин на actor (≥ 1).
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(30),
+   // REQ-RT-015 (§4 reconnect_rate_limit): базовый per-identity потолок на
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 11946bc..0430ddb 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -35,20 +35,23 @@ export * from './realtime/realtime.errors';
+ export { ActorNotMemberError } from './realtime/realtime.errors';
+ export * from './realtime/realtime.module';
+ export * from './realtime/realtime-bus';
+ export * from './realtime/event-outbox';
+ export * from './realtime/projection.service';
+ export * from './realtime/subscription-registry';
+ export * from './realtime/realtime.tokens';
+ export * from './realtime/error-mapping';
+ export * from './realtime/io-adapter';
+ export * from './realtime/realtime.gateway';
++export * from './rewards/rewards.errors';
++export * from './rewards/rewards.service';
++export * from './rewards/rewards.module';
+ export * from './auth/auth.constants';
+ export * from './auth/auth.errors';
+ export * from './auth/token.service';
+ export * from './auth/auth.module';
+ export * from './oauth/oauth.constants';
+ export * from './oauth/oauth.errors';
+ export { OAUTH_PROVIDER_CLIENT } from './oauth/oauth-provider.client';
+ export type { OAuthProviderClient, ProviderProfile } from './oauth/oauth-provider.client';
+ export * from './oauth/oauth.module';
+ export * from './transport/transport.module';
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index df69753..c4613fa 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -1,10 +1,11 @@
++import { randomUUID } from 'node:crypto';
+ import { ContractError, validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+ import { IdentityService } from '../identity/identity.service';
+ import { RoomService } from '../room/room.service';
+@@ -127,11 +128,50 @@ describe('EventLogService.commitCoreEvent', () => {
+ 
+     // Детерминированное свойство, не статистика: все коммиты успешны,
+     // seq — ровно множество {1..N} без дублей.
+     expect(new Set(committed.map((e) => e.seq))).toEqual(
+       new Set(Array.from({ length: N }, (_, i) => i + 1)),
+     );
+     expect((await readRoomLog(db.prisma, room.id)).map((e) => e.seq)).toEqual(
+       Array.from({ length: N }, (_, i) => i + 1),
+     );
+   });
++
++  // commitRewardsEvent — тот же статический путь (commitStaticEvent), реестр
++  // REWARDS_EVENTS (design 2026-09-10 §2).
++  describe('commitRewardsEvent', () => {
++    it('commits reward.awarded with the contract shape', async () => {
++      const room = await rooms.create(ORG);
++      const payload = {
++        awardId: randomUUID(),
++        prizeId: randomUUID(),
++        winnerId: randomUUID(),
++        sourceAppId: 'lottery',
++      };
++      await outbox.run((tx) => eventLog.commitRewardsEvent(tx, room.id, 'reward.awarded', payload));
++
++      const log = await readRoomLog(db.prisma, room.id);
++      expect(log).toHaveLength(1);
++      expect(log[0]).toMatchObject({
++        seq: 1,
++        type: 'rewards.reward.awarded',
++        visibility: 'public',
++        actorId: null,
++        payload,
++        schemaVersion: 1,
++      });
++    });
++
++    it('rejects a payload mismatch with EVENT_PAYLOAD_INVALID and writes nothing', async () => {
++      const room = await rooms.create(ORG);
++      const err = await outbox
++        .run((tx) =>
++          eventLog.commitRewardsEvent(tx, room.id, 'reward.awarded', { awardId: 'not-a-uuid' }),
++        )
++        .catch((e: unknown) => e);
++
++      expect(err).toBeInstanceOf(ContractError);
++      expect((err as ContractError).code).toBe('EVENT_PAYLOAD_INVALID');
++      expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
++    });
++  });
+ });
+diff --git a/packages/core/src/realtime/event-log.service.ts b/packages/core/src/realtime/event-log.service.ts
+index 7ec3e2d..63d8e6f 100644
+--- a/packages/core/src/realtime/event-log.service.ts
++++ b/packages/core/src/realtime/event-log.service.ts
+@@ -1,18 +1,22 @@
+ import { Inject, Injectable } from '@nestjs/common';
+ import type { LogEvent, Prisma } from '@prisma/client';
+ import {
+   CORE_EVENTS,
+   ContractError,
+   coreEventType,
+   isWithinCeiling,
++  REWARDS_EVENTS,
++  rewardsEventType,
+   type CoreEventName,
++  type EventTypeDefinition,
++  type RewardsEventName,
+   type Visibility,
+ } from '@mymozhem/sdk';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { EventEmitLimiter } from './event-emit-limiter';
+ import { EventOutbox } from './event-outbox';
+ import {
+   ActorNotMemberError,
+   EventEmitRateLimitedError,
+@@ -73,32 +77,56 @@ export class EventLogService {
+     private readonly outbox: EventOutbox,
+   ) {}
+ 
+   async commitCoreEvent(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     name: CoreEventName,
+     payload: unknown = {},
+     actorId: string | null = null,
+   ): Promise<LogEvent> {
+-    const definition = CORE_EVENTS[name];
++    return this.commitStaticEvent(tx, roomId, coreEventType(name), CORE_EVENTS[name], payload, actorId);
++  }
++
++  // События контура rewards (design 2026-09-10 §2): тот же статический путь, что
++  // core.*, — реестр REWARDS_EVENTS core-owned, клиентский publish закрыт в gateway
++  // (namespace 'rewards' не зарегистрирован как appId → EVENT_UNKNOWN_TYPE).
++  async commitRewardsEvent(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    name: RewardsEventName,
++    payload: unknown = {},
++    actorId: string | null = null,
++  ): Promise<LogEvent> {
++    return this.commitStaticEvent(tx, roomId, rewardsEventType(name), REWARDS_EVENTS[name], payload, actorId);
++  }
++
++  // Общий статический путь core/rewards событий: схема реестра → appendLocked.
++  private async commitStaticEvent(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    type: string,
++    definition: EventTypeDefinition,
++    payload: unknown,
++    actorId: string | null,
++  ): Promise<LogEvent> {
+     const parsed = definition.schema.safeParse(payload);
+     if (!parsed.success) {
+       throw new ContractError(
+         'EVENT_PAYLOAD_INVALID',
+-        `payload of ${coreEventType(name)} does not match its core schema`,
++        `payload of ${type} does not match its core schema`,
+       );
+     }
+     return this.appendLocked(
+       tx,
+       roomId,
+-      coreEventType(name),
++      type,
+       parsed.data,
+       actorId,
+       definition.visibility,
+       definition.version,
+     );
+   }
+ 
+   // Commit-цепочка app-событий (design §2): ВСЕ проверки до advisory lock —
+   // payload-нейтральность гонки за seq контрактуальна (REQ-RT-007). Порядок шагов:
+   // status-гейт → rate-limit → размер → реестр → схема → видимость → membership →
+diff --git a/packages/core/src/rewards/rewards-schema.int-spec.ts b/packages/core/src/rewards/rewards-schema.int-spec.ts
+new file mode 100644
+index 0000000..a46fe79
+--- /dev/null
++++ b/packages/core/src/rewards/rewards-schema.int-spec.ts
+@@ -0,0 +1,97 @@
++import { randomUUID } from 'node:crypto';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++
++// REQ-DEV-006 (автотест наличия рукописных частей миграции), REQ-RWD-003
++// (частичный уникальный индекс единичности победителя), REQ-RWD-010 (CHECK
++// неотрицательности призового фонда + ограниченный декремент).
++describe('rewards schema (REQ-DEV-006, REQ-RWD-003/010)', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('has the partial unique index on active awards (REQ-RWD-003)', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'rewards' AND indexname = 'Award_single_active_winner_per_prize_key'
++    `;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
++    expect(rows[0].indexdef).toContain('"roomId"');
++    expect(rows[0].indexdef).toContain('"prizeId"');
++    expect(rows[0].indexdef).toContain('"winnerId"');
++    expect(rows[0].indexdef).toContain("'AWARDED'");
++    expect(rows[0].indexdef).toContain("'FULFILLED'");
++  });
++
++  it('has the CHECK quantity >= 0 on Prize (REQ-RWD-010)', async () => {
++    const rows = await db.prisma.$queryRaw<{ conname: string }[]>`
++      SELECT conname FROM pg_constraint
++      WHERE conname = 'Prize_quantity_nonnegative' AND connamespace = 'rewards'::regnamespace
++    `;
++    expect(rows).toHaveLength(1);
++  });
++
++  // Сиды комнаты/приза/победителя. Значения уникальны на вызов: тесты делят одну
++  // testcontainer-БД, фиксированные email/код комнаты конфликтовали бы по P2002.
++  async function seedRoomPrizeWinner() {
++    const org = await seedIdentity(db.prisma, {
++      email: `org-${randomUUID()}@example.test`,
++    });
++    const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: 2, quantity: 2 },
++    });
++    return { room, prize, winner };
++  }
++
++  it('blocks a second active award of the same prize to the same winner; revoke frees the slot; fulfilled does not', async () => {
++    const { room, prize, winner } = await seedRoomPrizeWinner();
++    const first = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++    });
++    // Дубль по активной записи — конфликт индекса.
++    await expect(
++      db.prisma.award.create({
++        data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++      }),
++    ).rejects.toMatchObject({ code: 'P2002' });
++    // Отзыв освобождает место.
++    await db.prisma.award.update({
++      where: { id: first.id },
++      data: { status: 'REVOKED', revokedAt: new Date() },
++    });
++    const second = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++    });
++    // FULFILLED — нет: слот по-прежнему занят.
++    await db.prisma.award.update({
++      where: { id: second.id },
++      data: { status: 'FULFILLED', fulfilledAt: new Date() },
++    });
++    await expect(
++      db.prisma.award.create({
++        data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++      }),
++    ).rejects.toMatchObject({ code: 'P2002' });
++  });
++
++  it('CHECK rejects a negative quantity and the guarded decrement stops at zero', async () => {
++    const { prize } = await seedRoomPrizeWinner();
++    await expect(
++      db.prisma.$executeRaw`UPDATE rewards."Prize" SET quantity = -1 WHERE id = ${prize.id}::uuid`,
++    ).rejects.toMatchObject({ code: 'P2010' }); // SQLSTATE 23514 check_violation (форма adapter-pg — HANDOFF)
++    const zero = await db.prisma.prize.update({ where: { id: prize.id }, data: { quantity: 0 } });
++    const n = await db.prisma.$executeRaw`UPDATE rewards."Prize" SET quantity = quantity - 1 WHERE id = ${zero.id}::uuid AND quantity >= 1`;
++    expect(n).toBe(0);
++  });
++});
+diff --git a/packages/core/src/rewards/rewards.controller.int-spec.ts b/packages/core/src/rewards/rewards.controller.int-spec.ts
+new file mode 100644
+index 0000000..56412f1
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.controller.int-spec.ts
+@@ -0,0 +1,177 @@
++import { Test } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { APP_FILTER } from '@nestjs/core';
++import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
++import { AuthModule } from '../auth/auth.module';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import { MembershipModule } from '../membership/membership.module';
++import { PrismaModule } from '../prisma/prisma.module';
++import { RealtimeModule } from '../realtime/realtime.module';
++import { HttpExceptionFilter } from '../transport/http-exception.filter';
++import { TokenService } from '../auth/token.service';
++import { RoomService } from '../room/room.service';
++import { RoomModule } from '../room/room.module';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import { TEST_CONFIG } from '../testing/test-config';
++import { RewardsModule } from './rewards.module';
++import { RewardsService } from './rewards.service';
++
++// HTTP-путь REST-контура rewards (design 2026-09-10 §2): контроллер → сервис →
++// фильтр, статусы/тела проверяются на границе (REQ-SEC-006: наружу ровно {code}).
++// Комната остаётся DRAFT: createPrize принимает DRAFT, fulfill/revoke/listAwards
++// статус комнаты не гейтят вообще (activate требует configure, REQ-RT-004).
++describe('RewardsController (int)', () => {
++  let db: TestDb;
++  let app: NestFastifyApplication;
++  let tokens: TokenService;
++  let roomService: RoomService;
++  let rewards: RewardsService;
++
++  const ORG = '00000000-0000-4000-8000-000000000001';
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        // RealtimeGateway (провайдер RealtimeModule) разрешает AppRuntimeService
++        // через global-провайдер — без register DI не собирается.
++        AppRuntimeModule.register([]),
++        AuthModule,
++        MembershipModule,
++        RealtimeModule,
++        RoomModule,
++        RewardsModule,
++      ],
++      providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],
++    })
++      // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    await app.init();
++    await app.listen(0, '127.0.0.1');
++    tokens = app.get(TokenService);
++    roomService = app.get(RoomService);
++    rewards = app.get(RewardsService);
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++  }, 120_000);
++
++  afterAll(async () => {
++    await app.close();
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(
++      'TRUNCATE TABLE realtime."LogEvent", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE',
++    );
++  });
++
++  // organizerToken — guest-claims, роль ORGANIZER из membership (прецедент
++  // transport.e2e-spec.ts exclude-сьюта).
++  async function orgRoom() {
++    const room = await roomService.create(ORG);
++    const { accessToken } = await tokens.issueGuestTokens(ORG, room.id);
++    return { room, token: accessToken };
++  }
++  const auth = (token: string) => ({ authorization: `Bearer ${token}` });
++
++  it('POST /rooms/:id/prizes → 201; повтор для PARTICIPANT → 403 ACTOR_NOT_ORGANIZER; невалидное тело → 400 REQUEST_INVALID', async () => {
++    const { room, token } = await orgRoom();
++    const created = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/prizes`,
++      headers: auth(token),
++      payload: { name: 'Приз', quantity: 2 },
++    });
++    expect(created.statusCode).toBe(201);
++    expect(created.json()).toMatchObject({ name: 'Приз', quantity: 2, quantityTotal: 2 });
++
++    const bad = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/prizes`,
++      headers: auth(token),
++      payload: { name: '', quantity: 0 },
++    });
++    expect(bad.statusCode).toBe(400);
++    expect(bad.json()).toEqual({ code: 'REQUEST_INVALID' });
++
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: guest.id, role: 'PARTICIPANT', joinIp: '127.0.0.1' },
++    });
++    const guestToken = (await tokens.issueGuestTokens(guest.id, room.id)).accessToken;
++    const forbidden = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/prizes`,
++      headers: auth(guestToken),
++      payload: { name: 'Приз', quantity: 1 },
++    });
++    expect(forbidden.statusCode).toBe(403);
++    expect(forbidden.json()).toEqual({ code: 'ACTOR_NOT_ORGANIZER' });
++  });
++
++  it('fulfill/revoke по HTTP: no-op повторного вручения → 200, cross-переход → 409 REWARD_ALREADY_RESOLVED, чужая награда → 404', async () => {
++    const { room, token } = await orgRoom();
++    const prize = await rewards.createPrize(room.id, ORG, { name: 'Приз', quantity: 1 });
++    const winner = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    const award = await db.prisma.award.create({
++      data: { roomId: room.id, prizeId: prize.id, winnerId: winner.id, sourceAppId: 'lottery' },
++    });
++
++    const f1 = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/awards/${award.id}/fulfill`,
++      headers: auth(token),
++    });
++    expect(f1.statusCode).toBe(200);
++    expect(f1.json()).toMatchObject({ id: award.id, status: 'FULFILLED' });
++    // Событие вручения закоммичено в лог комнаты (аудит, ADR-005) — прямая проверка.
++    await expect(
++      db.prisma.logEvent.findFirst({ where: { roomId: room.id, type: 'rewards.reward.fulfilled' } }),
++    ).resolves.not.toBeNull();
++
++    const f2 = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/awards/${award.id}/fulfill`,
++      headers: auth(token),
++    });
++    expect(f2.statusCode).toBe(200); // типизированный no-op
++    const cross = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/awards/${award.id}/revoke`,
++      headers: auth(token),
++    });
++    expect(cross.statusCode).toBe(409);
++    expect(cross.json()).toEqual({ code: 'REWARD_ALREADY_RESOLVED' });
++    const missing = await app.inject({
++      method: 'POST',
++      url: `/rooms/${room.id}/awards/${crypto.randomUUID()}/fulfill`,
++      headers: auth(token),
++    });
++    expect(missing.statusCode).toBe(404);
++    expect(missing.json()).toEqual({ code: 'AWARD_UNKNOWN' });
++
++    const list = await app.inject({
++      method: 'GET',
++      url: `/rooms/${room.id}/rewards`,
++      headers: auth(token),
++    });
++    expect(list.statusCode).toBe(200);
++    expect(list.json().awards).toHaveLength(1);
++  });
++
++  it('без токена → 401 SESSION_INVALID', async () => {
++    const { room } = await orgRoom();
++    const res = await app.inject({ method: 'GET', url: `/rooms/${room.id}/rewards` });
++    expect(res.statusCode).toBe(401);
++    expect(res.json()).toEqual({ code: 'SESSION_INVALID' });
++  });
++});
+diff --git a/packages/core/src/rewards/rewards.controller.ts b/packages/core/src/rewards/rewards.controller.ts
+new file mode 100644
+index 0000000..09217d8
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.controller.ts
+@@ -0,0 +1,97 @@
++import { Controller, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
++import { z } from 'zod';
++import {
++  awardResponseSchema,
++  createPrizeRequestSchema,
++  listRewardsResponseSchema,
++  prizeResponseSchema,
++  type AwardResponse,
++  type PrizeResponse,
++} from '@mymozhem/sdk';
++import type { Award, Prize } from '@prisma/client';
++import { authenticate } from '../transport/authenticate';
++import type { RequestLike } from '../transport/http.types';
++import { TokenService } from '../auth/token.service';
++import { RewardsService } from './rewards.service';
++
++// REST-контур управления фондом и наградами (design 2026-09-10 §2): cross-app
++// управляющие действия платформенного контура, не внутриигровые команды механики —
++// поэтому HTTP с существующими гардами, а не realtime-команды. Проверка роли —
++// в домене (RewardsService.assertOrganizer), контроллер статусов не знает.
++// actorId — только из access JWT (REQ-RT-009 по духу HTTP, прецедент ExcludeController);
++// ответная .parse на границе — прецедент RoomsController (createRoomResponseSchema.parse).
++@Controller('rooms')
++export class RewardsController {
++  constructor(
++    private readonly rewards: RewardsService,
++    private readonly tokens: TokenService,
++  ) {}
++
++  @Post(':roomId/prizes')
++  async createPrize(@Req() req: RequestLike, @Param('roomId') roomId: string): Promise<PrizeResponse> {
++    const claims = authenticate(req, this.tokens);
++    const parsedRoomId = z.uuid().parse(roomId);
++    const body = (req as { body?: unknown }).body;
++    const input = createPrizeRequestSchema.parse(body ?? {});
++    const prize = await this.rewards.createPrize(parsedRoomId, claims.sub, input);
++    return prizeResponseSchema.parse(toPrizeResponse(prize));
++  }
++
++  @Get(':roomId/rewards')
++  async listRewards(@Req() req: RequestLike, @Param('roomId') roomId: string) {
++    const claims = authenticate(req, this.tokens);
++    const parsedRoomId = z.uuid().parse(roomId);
++    const awards = await this.rewards.listAwards(parsedRoomId, claims.sub);
++    return listRewardsResponseSchema.parse({ awards: awards.map(toAwardResponse) });
++  }
++
++  @Post(':roomId/awards/:awardId/fulfill')
++  @HttpCode(200)
++  async fulfill(
++    @Req() req: RequestLike,
++    @Param('roomId') roomId: string,
++    @Param('awardId') awardId: string,
++  ): Promise<AwardResponse> {
++    const claims = authenticate(req, this.tokens);
++    const award = await this.rewards.fulfill(z.uuid().parse(roomId), z.uuid().parse(awardId), claims.sub);
++    return awardResponseSchema.parse(toAwardResponse(award));
++  }
++
++  @Post(':roomId/awards/:awardId/revoke')
++  @HttpCode(200)
++  async revoke(
++    @Req() req: RequestLike,
++    @Param('roomId') roomId: string,
++    @Param('awardId') awardId: string,
++  ): Promise<AwardResponse> {
++    const claims = authenticate(req, this.tokens);
++    const award = await this.rewards.revoke(z.uuid().parse(roomId), z.uuid().parse(awardId), claims.sub);
++    return awardResponseSchema.parse(toAwardResponse(award));
++  }
++}
++
++function toPrizeResponse(p: Prize): PrizeResponse {
++  return {
++    id: p.id,
++    roomId: p.roomId,
++    name: p.name,
++    quantityTotal: p.quantityTotal,
++    quantity: p.quantity,
++    createdAt: p.createdAt.toISOString(),
++    updatedAt: p.updatedAt.toISOString(),
++  };
++}
++
++function toAwardResponse(a: Award): AwardResponse {
++  return {
++    id: a.id,
++    roomId: a.roomId,
++    prizeId: a.prizeId,
++    winnerId: a.winnerId,
++    status: a.status,
++    sourceAppId: a.sourceAppId,
++    createdAt: a.createdAt.toISOString(),
++    fulfilledAt: a.fulfilledAt?.toISOString() ?? null,
++    revokedAt: a.revokedAt?.toISOString() ?? null,
++  };
++}
+diff --git a/packages/core/src/rewards/rewards.errors.ts b/packages/core/src/rewards/rewards.errors.ts
+new file mode 100644
+index 0000000..1f305da
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.errors.ts
+@@ -0,0 +1,27 @@
++import { ContractError } from '@mymozhem/sdk';
++
++// Типизированные отказы контура rewards (design 2026-09-10 §3). Wire-маппинг —
++// HttpExceptionFilter (Task 6); над socket — ack с {code} (REQ-SEC-006).
++export class PrizeUnknownError extends ContractError {
++  constructor(prizeId: string) {
++    super('PRIZE_UNKNOWN', `no prize ${prizeId} in this room`);
++  }
++}
++
++export class PrizeFundExhaustedError extends ContractError {
++  constructor(prizeId: string) {
++    super('PRIZE_FUND_EXHAUSTED', `prize fund of ${prizeId} is exhausted`);
++  }
++}
++
++export class AwardUnknownError extends ContractError {
++  constructor(awardId: string) {
++    super('AWARD_UNKNOWN', `no award ${awardId} in this room`);
++  }
++}
++
++export class RewardAlreadyResolvedError extends ContractError {
++  constructor(awardId: string, status: string) {
++    super('REWARD_ALREADY_RESOLVED', `award ${awardId} is already ${status}`);
++  }
++}
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+new file mode 100644
+index 0000000..556c8a2
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -0,0 +1,186 @@
++import { randomUUID } from 'node:crypto';
++import { Test } from '@nestjs/testing';
++import type { AppEffect } from '@mymozhem/sdk';
++import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
++import { PrismaModule } from '../prisma/prisma.module';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import { MembershipModule } from '../membership/membership.module';
++import { RealtimeModule } from '../realtime/realtime.module';
++import { EventOutbox } from '../realtime/event-outbox';
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import { TEST_CONFIG } from '../testing/test-config';
++import { RewardsModule } from './rewards.module';
++import { RewardsService } from './rewards.service';
++import { PrizeFundExhaustedError } from './rewards.errors';
++
++// REQ-RWD-003 (атомарность, идемпотентный no-op по частичному индексу),
++// REQ-RWD-007 (автомат награды, идемпотентные переходы), REQ-RWD-010
++// (ограниченный декремент фонда), REQ-RWD-002b (award.points без приза),
++// REQ-SEC-009 (payload событий — только id).
++// Бутстрап — DI-контейнер (прецедент рулинга Quiz-среза: сервис через контейнер).
++// startTestDb() вызывается ДО compile(): PrismaService читает DATABASE_URL при
++// конструировании — контейнерный клиент должен смотреть в testcontainer.
++describe('RewardsService (int)', () => {
++  let db: TestDb;
++  let rewards: RewardsService;
++  let outbox: EventOutbox;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        // RealtimeGateway (провайдер RealtimeModule) разрешает AppRuntimeService
++        // через global-провайдер — без register DI не собирается.
++        AppRuntimeModule.register([]),
++        MembershipModule,
++        RealtimeModule,
++        RewardsModule,
++      ],
++    })
++      // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    await moduleRef.init();
++    rewards = moduleRef.get(RewardsService);
++    outbox = moduleRef.get(EventOutbox);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(
++      'TRUNCATE TABLE rewards."PointsGrant", rewards."Award", rewards."Prize", identity."Session", membership."Membership", room."Room" CASCADE',
++    );
++  });
++
++  // Хелпер: комната DRAFT с организатором (membership нужен assertOrganizer в
++  // fulfill/revoke) + приз с фондом quantity. Значения уникальны на вызов:
++  // тесты делят одну testcontainer-БД, identity не транкейтится.
++  async function seedPrize(quantity: number) {
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: org.id, role: 'ORGANIZER' },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз', quantityTotal: quantity, quantity },
++    });
++    return { org, room, prize };
++  }
++  const guest = () => seedIdentity(db.prisma, { kind: 'GUEST' });
++  const prizeEffect = (prizeId: string, winnerId: string): AppEffect => ({
++    kind: 'award.prize',
++    prizeId,
++    winnerId,
++  });
++
++  it('award.prize: декремент + insert + событие reward.awarded одной транзакцией', async () => {
++    const { room, prize } = await seedPrize(2);
++    const winner = await guest();
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++    const awards = await db.prisma.award.findMany({ where: { roomId: room.id } });
++    expect(awards).toHaveLength(1);
++    expect(awards[0].status).toBe('AWARDED');
++    const log = await db.prisma.$queryRaw<{ type: string; visibility: string; payload: { winnerId: string } }[]>`
++      SELECT type, "visibility"::text AS visibility, payload FROM realtime."LogEvent" WHERE "roomId" = ${room.id}::uuid ORDER BY seq`;
++    expect(log).toHaveLength(1);
++    expect(log[0].type).toBe('rewards.reward.awarded');
++    expect(log[0].visibility).toBe('public'); // сырое DB-значение lowercase (HANDOFF)
++    expect(log[0].payload.winnerId).toBe(winner.id);
++    expect(log[0].payload).not.toHaveProperty('displayName'); // REQ-SEC-009
++  });
++
++  it('K > quantity конкурентных награждений разным identity → ровно quantity успехов, без минуса (REQ-RWD-010)', async () => {
++    const { room, prize } = await seedPrize(2);
++    const winners = await Promise.all(Array.from({ length: 5 }, () => guest()));
++    const results = await Promise.allSettled(
++      winners.map((w) => outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, w.id)]))),
++    );
++    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
++    for (const r of results.filter((x) => x.status === 'rejected')) {
++      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(PrizeFundExhaustedError);
++    }
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(0);
++    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(2);
++  });
++
++  it('конкурентный дубль одного награждения → один победитель, quantity −1 ровно раз (REQ-RWD-003)', async () => {
++    const { room, prize } = await seedPrize(5);
++    const winner = await guest();
++    const results = await Promise.allSettled([
++      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
++      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
++    ]);
++    // Оба завершились успешно: повтор — типизированный no-op, не отказ.
++    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
++    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(1);
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(4);
++  });
++
++  it('повторное вручение — типизированный no-op; cross-переход (revoke после fulfill) — REWARD_ALREADY_RESOLVED (REQ-RWD-007)', async () => {
++    const { org, room, prize } = await seedPrize(1);
++    const winner = await guest();
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
++    const award = await db.prisma.award.findFirstOrThrow({ where: { roomId: room.id } });
++    const done1 = await rewards.fulfill(room.id, award.id, org.id);
++    const done2 = await rewards.fulfill(room.id, award.id, org.id);
++    expect(done2.status).toBe('FULFILLED');
++    expect(done2.fulfilledAt).toEqual(done1.fulfilledAt);
++    await expect(rewards.revoke(room.id, award.id, org.id)).rejects.toMatchObject({
++      code: 'REWARD_ALREADY_RESOLVED',
++    });
++  });
++
++  it('двойной отзыв возвращает quantity один раз; отозванный приз можно переразыграть тому же победителю (REQ-RWD-007/003)', async () => {
++    const { org, room, prize } = await seedPrize(1);
++    const winner = await guest();
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
++    const award = await db.prisma.award.findFirstOrThrow({ where: { roomId: room.id } });
++    await rewards.revoke(room.id, award.id, org.id);
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++    const again = await rewards.revoke(room.id, award.id, org.id); // no-op
++    expect(again.status).toBe('REVOKED');
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++    // Место освобождено: повторное награждение того же победителя тем же призом проходит.
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
++    expect(await db.prisma.award.count({ where: { prizeId: prize.id, status: 'AWARDED' } })).toBe(1);
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(0);
++  });
++
++  it('award.points: ledger-запись без приза и фонда, события нет (design §5)', async () => {
++    const { room } = await seedPrize(0);
++    const p = await guest();
++    await outbox.run((tx) =>
++      rewards.executeEffects(tx, room.id, 'quiz', [
++        { kind: 'award.points', identityId: p.id, points: 900, reason: 'quiz.round' },
++      ]),
++    );
++    const grants = await db.prisma.pointsGrant.findMany({ where: { roomId: room.id } });
++    expect(grants).toHaveLength(1);
++    expect(grants[0]).toMatchObject({ identityId: p.id, points: 900, reason: 'quiz.round', sourceAppId: 'quiz' });
++  });
++
++  it('отказ эффекта откатывает транзакцию целиком — награды и события нет (подход A)', async () => {
++    const { room } = await seedPrize(1);
++    const winner = await guest();
++    await expect(
++      outbox.run((tx) =>
++        rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(randomUUID(), winner.id)]),
++      ),
++    ).rejects.toMatchObject({ code: 'PRIZE_UNKNOWN' });
++    expect(await db.prisma.award.count({ where: { roomId: room.id } })).toBe(0);
++    expect(await db.prisma.logEvent.count({ where: { roomId: room.id } })).toBe(0);
++  });
++});
+diff --git a/packages/core/src/rewards/rewards.module.ts b/packages/core/src/rewards/rewards.module.ts
+new file mode 100644
+index 0000000..c1d362e
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.module.ts
+@@ -0,0 +1,18 @@
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { MembershipModule } from '../membership/membership.module';
++import { RealtimeModule } from '../realtime/realtime.module';
++import { AuthModule } from '../auth/auth.module';
++import { RewardsService } from './rewards.service';
++import { RewardsController } from './rewards.controller';
++
++// Контур rewards (design 2026-09-10 §2). Handler-провайдер диспетчера эффектов
++// и @Global — Task 11. AuthModule — TokenService для Bearer-аутентификации
++// контроллера (прецедент TransportModule).
++@Module({
++  imports: [PrismaModule, MembershipModule, RealtimeModule, AuthModule],
++  controllers: [RewardsController],
++  providers: [RewardsService],
++  exports: [RewardsService],
++})
++export class RewardsModule {}
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+new file mode 100644
+index 0000000..6731d10
+--- /dev/null
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -0,0 +1,168 @@
++import { Injectable } from '@nestjs/common';
++import { Prisma } from '@prisma/client';
++import type { AppEffect, CreatePrizeRequest } from '@mymozhem/sdk';
++import { PrismaService } from '../prisma/prisma.service';
++import { MembershipService } from '../membership/membership.service';
++import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membership.errors';
++import { EventLogService } from '../realtime/event-log.service';
++import { EventOutbox } from '../realtime/event-outbox';
++import { RoomNotActiveError } from '../realtime/realtime.errors';
++import {
++  AwardUnknownError,
++  PrizeFundExhaustedError,
++  PrizeUnknownError,
++  RewardAlreadyResolvedError,
++} from './rewards.errors';
++
++// Контур rewards (design 2026-09-10 §2/§3). Два входа:
++// 1) executeEffects — из диспетчера app-runtime, ВНУТРИ его outbox.run (вложенный
++//    run запрещён — поэтому tx приходит параметром); отказ → откат всей транзакции.
++// 2) REST-методы (createPrize/listAwards/fulfill/revoke) — свои outbox.run.
++// События rewards.* коммитятся в той же транзакции (лог — нотификация и аудит,
++// ADR-005; таблицы остаются источником состояния).
++@Injectable()
++export class RewardsService {
++  constructor(
++    private readonly prisma: PrismaService,
++    private readonly membership: MembershipService,
++    private readonly eventLog: EventLogService,
++    private readonly outbox: EventOutbox,
++  ) {}
++
++  // --- Вход 1: эффекты из app-runtime (чужая транзакция) ---
++
++  async executeEffects(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    sourceAppId: string,
++    effects: readonly AppEffect[],
++  ): Promise<void> {
++    for (const effect of effects) {
++      if (effect.kind === 'award.prize') {
++        await this.awardPrize(tx, roomId, sourceAppId, effect.prizeId, effect.winnerId);
++      } else {
++        // award.points (REQ-RWD-002b): ledger-запись без приза и фонда, события нет.
++        await tx.pointsGrant.create({
++          data: {
++            roomId,
++            identityId: effect.identityId,
++            points: effect.points,
++            reason: effect.reason ?? null,
++            sourceAppId,
++          },
++        });
++      }
++    }
++  }
++
++  // Порядок «insert Award → декремент» (не наоборот): конфликт частичного индекса
++  // — типизированный no-op (REQ-RWD-003), и он НЕ должен списывать фонд; отказ
++  // декремента откатывает insert вместе со всей транзакцией (REQ-RWD-010).
++  private async awardPrize(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    sourceAppId: string,
++    prizeId: string,
++    winnerId: string,
++  ): Promise<void> {
++    const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
++    if (!prize) throw new PrizeUnknownError(prizeId);
++    let awardId: string;
++    try {
++      const award = await tx.award.create({
++        data: { roomId, prizeId, winnerId, sourceAppId },
++      });
++      awardId = award.id;
++    } catch (err) {
++      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
++        return; // сетевой повтор того же награждения — типизированный no-op
++      }
++      throw err;
++    }
++    const decremented = await tx.$executeRaw`
++      UPDATE rewards."Prize" SET quantity = quantity - 1, "updatedAt" = now()
++      WHERE id = ${prizeId}::uuid AND quantity >= 1`;
++    if (decremented === 0) throw new PrizeFundExhaustedError(prizeId); // откатит insert
++    // REQ-SEC-009: payload — только id.
++    await this.eventLog.commitRewardsEvent(tx, roomId, 'reward.awarded', {
++      awardId,
++      prizeId,
++      winnerId,
++      sourceAppId,
++    });
++  }
++
++  // --- Вход 2: REST-контур организатора ---
++
++  async createPrize(roomId: string, actorId: string, input: CreatePrizeRequest) {
++    await this.assertOrganizer(roomId, actorId);
++    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
++    // Добавление призов — в не-терминальной комнате (design §2: призы добавляют
++    // на ходу; fulfill/revoke при COMPLETED — отдельная норма REQ-RWD-009).
++    if (!room || room.deletedAt !== null || (room.status !== 'DRAFT' && room.status !== 'ACTIVE')) {
++      throw new RoomNotActiveError(`room ${roomId} does not accept new prizes`);
++    }
++    return this.prisma.prize.create({
++      data: { roomId, name: input.name, quantity: input.quantity, quantityTotal: input.quantity },
++    });
++  }
++
++  async listAwards(roomId: string, actorId: string) {
++    await this.assertOrganizer(roomId, actorId);
++    // REQ-RWD-009: организатор видит все награды, включая оставшиеся AWARDED
++    // при COMPLETED — статус комнаты здесь сознательно не гейтится.
++    return this.prisma.award.findMany({ where: { roomId }, orderBy: { createdAt: 'asc' } });
++  }
++
++  async fulfill(roomId: string, awardId: string, actorId: string) {
++    return this.outbox.run(async (tx) => {
++      await this.assertOrganizer(roomId, actorId);
++      const award = await tx.award.findFirst({ where: { id: awardId, roomId } });
++      if (!award) throw new AwardUnknownError(awardId);
++      if (award.status === 'FULFILLED') return award; // типизированный no-op (REQ-RWD-007)
++      if (award.status !== 'AWARDED') throw new RewardAlreadyResolvedError(awardId, award.status);
++      const n = await tx.$executeRaw`
++        UPDATE rewards."Award" SET status = 'FULFILLED', "fulfilledAt" = now()
++        WHERE id = ${awardId}::uuid AND status = 'AWARDED'`;
++      if (n === 0) return tx.award.findUniqueOrThrow({ where: { id: awardId } }); // гонка — перечитать
++      await this.eventLog.commitRewardsEvent(tx, roomId, 'reward.fulfilled', { awardId }, actorId);
++      return tx.award.findUniqueOrThrow({ where: { id: awardId } });
++    });
++  }
++
++  async revoke(roomId: string, awardId: string, actorId: string) {
++    return this.outbox.run(async (tx) => {
++      await this.assertOrganizer(roomId, actorId);
++      const award = await tx.award.findFirst({ where: { id: awardId, roomId } });
++      if (!award) throw new AwardUnknownError(awardId);
++      if (award.status === 'REVOKED') return award; // no-op: quantity НЕ возвращаем повторно
++      if (award.status !== 'AWARDED') throw new RewardAlreadyResolvedError(awardId, award.status);
++      const n = await tx.$executeRaw`
++        UPDATE rewards."Award" SET status = 'REVOKED', "revokedAt" = now()
++        WHERE id = ${awardId}::uuid AND status = 'AWARDED'`;
++      if (n === 0) return tx.award.findUniqueOrThrow({ where: { id: awardId } }); // гонка
++      // Возврат quantity — только если переход состоялся (двойной отзыв не
++      // возвращает quantity дважды, REQ-RWD-007); у беспризовой награды возвращать нечего.
++      if (award.prizeId !== null) {
++        await tx.$executeRaw`
++          UPDATE rewards."Prize" SET quantity = quantity + 1, "updatedAt" = now()
++          WHERE id = ${award.prizeId}::uuid`;
++      }
++      await this.eventLog.commitRewardsEvent(tx, roomId, 'reward.revoked', { awardId }, actorId);
++      return tx.award.findUniqueOrThrow({ where: { id: awardId } });
++    });
++  }
++
++  // Проверка роли — в домене, не в транспорте (прецедент MembershipService.exclude).
++  // Одноклиентная (рулинг контроллера): findActiveMembership не принимает tx и читает
++  // своим клиентом вне транзакции — тот же прецедент, что exclude (проверка вне tx).
++  private async assertOrganizer(roomId: string, actorId: string): Promise<void> {
++    const membership = await this.membership.findActiveMembership(roomId, actorId);
++    if (!membership) {
++      throw new ActorNotMemberError(`identity ${actorId} is not a member of room ${roomId}`);
++    }
++    if (membership.role !== 'ORGANIZER') {
++      throw new ActorNotOrganizerError(`identity ${actorId} is not the organizer of room ${roomId}`);
++    }
++  }
++}
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index 61f0c64..6c7bd41 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -5,20 +5,21 @@ import type { AppConfig } from '../config/config.schema';
+ export const TEST_CONFIG: AppConfig = {
+   NODE_ENV: 'test',
+   PORT: 3000,
+   DATABASE_URL: 'postgresql://unused',
+   ROOM_CODE_MIN_LEN: 8,
+   ROOM_PARTICIPANT_LIMIT: 500,
+   JOIN_RATE_LIMIT_IP: 20,
+   JWT_SECRET: 'test-only-secret-key-32-bytes-long!!',
+   ACCESS_TOKEN_TTL: 900,
+   GUEST_TTL: 86_400,
++  CLEANUP_INTERVAL: 3_600,
+   // REFRESH_TOKEN_TTL — новый дефолт §4 (30 сут): registered-ветки int-спеков должны
+   // видеть TTL > GUEST_TTL (гостевой cap применяется при выдаче, не в конфиге).
+   REFRESH_TOKEN_TTL: 2_592_000,
+   REFRESH_RATE_LIMIT: 10,
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
+   MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   RECONNECT_RATE_LIMIT_PER_MIN: 10,
+   TRUST_PROXY: false,
+   CORS_ORIGINS: [],
+   // Google-секция опциональна (all-or-none) — в тестовом конфиге отсутствует.
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index e8c0690..5566bb4 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -6,20 +6,27 @@ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+   TargetNotExcludableError,
+   TargetNotMemberError,
+ } from '../membership/membership.errors';
+ import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
+ import { RoomOrganizerNotRegisteredError, RoomTransitionError } from '../room/room.errors';
++import { EventTypeUnknownError, RoomNotActiveError } from '../realtime/realtime.errors';
++import {
++  AwardUnknownError,
++  PrizeFundExhaustedError,
++  PrizeUnknownError,
++  RewardAlreadyResolvedError,
++} from '../rewards/rewards.errors';
+ import { HttpExceptionFilter } from './http-exception.filter';
+ 
+ type ReplyMock = { status: jest.Mock; send: jest.Mock };
+ 
+ const makeFilter = () => {
+   const filter = new HttpExceptionFilter();
+   const reply: ReplyMock = { status: jest.fn().mockReturnThis(), send: jest.fn() };
+   return { filter, reply };
+ };
+ 
+@@ -59,20 +66,31 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+     ['oauth redirect invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_REDIRECT_INVALID, 'x'), 400, 'OAUTH_REDIRECT_INVALID'],
+     ['oauth state invalid', new OAuthError(OAUTH_ERROR_CODES.OAUTH_STATE_INVALID, 'x'), 401, 'OAUTH_STATE_INVALID'],
+     ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
+     ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
+     ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
+     ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
+     // POST /rooms (REQ-ID-005): покрытие RoomError частичное (design §11) — по HTTP
+     // достижим только ROOM_ORGANIZER_NOT_REGISTERED; прочие коды → INTERNAL_ERROR.
+     ['room organizer not registered', new RoomOrganizerNotRegisteredError('x'), 403, 'ROOM_ORGANIZER_NOT_REGISTERED'],
+     ['room transition (прочий RoomError)', new RoomTransitionError('x'), 500, 'INTERNAL_ERROR'],
++    // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
++    // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
++    ['prize unknown', new PrizeUnknownError('p'), 404, 'PRIZE_UNKNOWN'],
++    ['award unknown', new AwardUnknownError('a'), 404, 'AWARD_UNKNOWN'],
++    ['prize fund exhausted', new PrizeFundExhaustedError('p'), 409, 'PRIZE_FUND_EXHAUSTED'],
++    ['reward already resolved', new RewardAlreadyResolvedError('a', 'FULFILLED'), 409, 'REWARD_ALREADY_RESOLVED'],
++    // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
++    // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
++    ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],
++    // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE.
++    ['event type unknown (прочий RealtimeError)', new EventTypeUnknownError('x'), 500, 'INTERNAL_ERROR'],
+     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
+     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],
+   ];
+ 
+   it.each(cases)('%s → typed wire error without internals', (_label, err, status, code) => {
+     const { filter, reply } = makeFilter();
+     filter.catch(err, makeHost(reply));
+     expect(reply.status).toHaveBeenCalledWith(status);
+     const body = reply.send.mock.calls[0][0];
+     expect(body).toEqual({ code }); // ровно {code} — ни message, ни stack (REQ-SEC-006)
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index eb5a794..e60f949 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -1,17 +1,19 @@
+ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@nestjs/common';
+ import { Prisma } from '@prisma/client';
+ import { ZodError } from 'zod';
++import { ContractError } from '@mymozhem/sdk';
+ import { MembershipError } from '../membership/membership.errors';
+ import { AuthError } from '../auth/auth.errors';
+ import { OAuthError } from '../oauth/oauth.errors';
+ import { RoomError } from '../room/room.errors';
++import { RealtimeError } from '../realtime/realtime.errors';
+ 
+ // Единственная точка маппинга ошибка → HTTP (design §5): контроллеры статусов не знают.
+ // Наружу — ровно {code} (REQ-SEC-006); полное исключение уходит только в серверный лог.
+ const STATUS_BY_WIRE_CODE = {
+   ROOM_JOIN_DENIED: 403,
+   RATE_LIMITED: 429,
+   ROOM_PARTICIPANT_LIMIT_REACHED: 409,
+   // Срез исключения (REQ-ID-006, design-таблица маппинга): добавлено в Task 4 —
+   // расширение MEMBERSHIP_ERROR_CODES без этих статусов ломает compile-time
+   // exhaustive-маппинг ниже (гейт Task 4); спек-кейсы фильтра — Task 7.
+@@ -24,20 +26,26 @@ const STATUS_BY_WIRE_CODE = {
+   // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
+   OAUTH_NOT_CONFIGURED: 503,
+   OAUTH_REDIRECT_INVALID: 400,
+   OAUTH_STATE_INVALID: 401,
+   OAUTH_ACCESS_DENIED: 403,
+   OAUTH_EXCHANGE_FAILED: 502,
+   OAUTH_EMAIL_UNVERIFIED: 403,
+   OAUTH_EMAIL_CONFLICT: 409,
+   // Первый HTTP-путь RoomError (POST /rooms, REQ-ID-005).
+   ROOM_ORGANIZER_NOT_REGISTERED: 403,
++  // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
++  ROOM_NOT_ACTIVE: 409,
++  PRIZE_UNKNOWN: 404,
++  AWARD_UNKNOWN: 404,
++  PRIZE_FUND_EXHAUSTED: 409,
++  REWARD_ALREADY_RESOLVED: 409,
+   INTERNAL_ERROR: 500,
+ } as const;
+ 
+ type WireCode = keyof typeof STATUS_BY_WIRE_CODE;
+ 
+ // Core не зависит от fastify напрямую (адаптер подключается в apps/server) — фильтру
+ // достаточно структурного минимума ответа; FastifyReply совместим по форме.
+ interface ReplyLike {
+   status(statusCode: number): { send(body: unknown): unknown };
+ }
+@@ -71,20 +79,32 @@ export class HttpExceptionFilter implements ExceptionFilter {
+       // JOIN_RATE_LIMITED (core) → RATE_LIMITED (wire) — решение владельца, design §0.6.
+       return exception.code === 'JOIN_RATE_LIMITED' ? 'RATE_LIMITED' : exception.code;
+     }
+     if (exception instanceof AuthError) return 'SESSION_INVALID';
+     if (exception instanceof OAuthError) return exception.code;
+     if (exception instanceof RoomError) {
+       // Покрытие частичное (design §11): по HTTP в этом срезе достижим только
+       // ROOM_ORGANIZER_NOT_REGISTERED; прочие коды — INTERNAL_ERROR с error-логом.
+       return exception.code === 'ROOM_ORGANIZER_NOT_REGISTERED' ? exception.code : 'INTERNAL_ERROR';
+     }
++    // Ошибки контракта с wire-паритетом кода (rewards ф.3 и далее): класс-
++    // специфичные ветки выше сохраняют свои правила свёртки; сюда попадают
++    // ContractError'ы, коды которых сознательно добавлены в STATUS_BY_WIRE_CODE.
++    if (exception instanceof ContractError && exception.code in STATUS_BY_WIRE_CODE) {
++      return exception.code as WireCode;
++    }
++    // RoomNotActiveError (createPrize, rewards ф.3) — RealtimeError, НЕ ContractError:
++    // симметричная ветка паритета. Blast radius ровно ROOM_NOT_ACTIVE — единственный
++    // realtime-код в STATUS_BY_WIRE_CODE; прочие падают в INTERNAL_ERROR ниже.
++    if (exception instanceof RealtimeError && exception.code in STATUS_BY_WIRE_CODE) {
++      return exception.code as WireCode;
++    }
+     if (exception instanceof ZodError) return 'REQUEST_INVALID';
+     // Prisma-сырьё (включая P2010+SQLSTATE 22P02 uuid-syntax — parked minor): типизируем,
+     // детали не раскрываем. Отнесение всех P-кодов к 400 — решение дизайна §5.
+     if (exception instanceof Prisma.PrismaClientKnownRequestError) return 'REQUEST_INVALID';
+     if (exception instanceof HttpException) {
+       return exception.getStatus() >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_INVALID';
+     }
+     return 'INTERNAL_ERROR';
+   }
+ }
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 2775c79..3b15a76 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -166,20 +166,23 @@ importers:
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+       socket.io:
+         specifier: ^4.8.3
+         version: 4.8.3
+       zod:
+         specifier: ^4.0.0
+         version: 4.4.3
+     devDependencies:
++      '@nestjs/platform-fastify':
++        specifier: ^11.0.0
++        version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@nestjs/testing':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       '@testcontainers/postgresql':
+         specifier: ^12.0.4
+         version: 12.0.4
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/jsonwebtoken':

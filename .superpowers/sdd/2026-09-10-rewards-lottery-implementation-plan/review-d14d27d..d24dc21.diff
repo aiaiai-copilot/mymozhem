@@ -1,0 +1,242 @@
+# Review package: d14d27d..d24dc21
+
+## Commits
+d24dc21 fix(core): no-op дубля награды без отравления транзакции (ON CONFLICT), фильтр-спека на ContractError, пин realtime-ACTOR_NOT_MEMBER
+
+## Files changed
+ packages/core/src/rewards/rewards.int-spec.ts      | 24 ++++++++++++------
+ packages/core/src/rewards/rewards.service.ts       | 29 ++++++++++++----------
+ .../src/transport/http-exception.filter.spec.ts    | 27 ++++++++++++--------
+ .../core/src/transport/http-exception.filter.ts    |  9 ++++---
+ 4 files changed, 55 insertions(+), 34 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+index 556c8a2..7dbfa1b 100644
+--- a/packages/core/src/rewards/rewards.int-spec.ts
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -109,31 +109,41 @@ describe('RewardsService (int)', () => {
+       winners.map((w) => outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, w.id)]))),
+     );
+     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+     for (const r of results.filter((x) => x.status === 'rejected')) {
+       expect((r as PromiseRejectedResult).reason).toBeInstanceOf(PrizeFundExhaustedError);
+     }
+     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(0);
+     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(2);
+   });
+ 
+-  it('конкурентный дубль одного награждения → один победитель, quantity −1 ровно раз (REQ-RWD-003)', async () => {
++  it('конкурентный дубль одного награждения → один победитель, quantity −1 ровно раз, транзакция после no-op жива (REQ-RWD-003)', async () => {
+     const { room, prize } = await seedPrize(5);
+     const winner = await guest();
+-    const results = await Promise.allSettled([
+-      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
+-      outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)])),
+-    ]);
+-    // Оба завершились успешно: повтор — типизированный no-op, не отказ.
+-    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
++    const pointsTarget = await guest();
++    await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
++    // Повтор — в батче с award.points в ОДНОМ executeEffects (дубль первым, до
++    // points), последовательно после первого прогона: no-op дубля не должен
++    // отравлять транзакцию — sibling-эффект обязан закоммититься (unique-violation
++    // в Postgres абортит tx; не-возбуждающий ON CONFLICT DO NOTHING — нет).
++    await outbox.run((tx) =>
++      rewards.executeEffects(tx, room.id, 'lottery', [
++        prizeEffect(prize.id, winner.id), // сетевой повтор — типизированный no-op, не отказ
++        { kind: 'award.points', identityId: pointsTarget.id, points: 10, reason: 'tx-alive' },
++      ]),
++    );
+     expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(1);
+     expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(4);
++    // Транзакция прогона-дубля жила до конца: points-запись закоммичена ровно раз.
++    const grants = await db.prisma.pointsGrant.findMany({ where: { roomId: room.id } });
++    expect(grants).toHaveLength(1);
++    expect(grants[0]).toMatchObject({ identityId: pointsTarget.id, points: 10 });
+   });
+ 
+   it('повторное вручение — типизированный no-op; cross-переход (revoke после fulfill) — REWARD_ALREADY_RESOLVED (REQ-RWD-007)', async () => {
+     const { org, room, prize } = await seedPrize(1);
+     const winner = await guest();
+     await outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, winner.id)]));
+     const award = await db.prisma.award.findFirstOrThrow({ where: { roomId: room.id } });
+     const done1 = await rewards.fulfill(room.id, award.id, org.id);
+     const done2 = await rewards.fulfill(room.id, award.id, org.id);
+     expect(done2.status).toBe('FULFILLED');
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+index 6731d10..7612a9d 100644
+--- a/packages/core/src/rewards/rewards.service.ts
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -60,39 +60,42 @@ export class RewardsService {
+   // декремента откатывает insert вместе со всей транзакцией (REQ-RWD-010).
+   private async awardPrize(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     sourceAppId: string,
+     prizeId: string,
+     winnerId: string,
+   ): Promise<void> {
+     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
+     if (!prize) throw new PrizeUnknownError(prizeId);
+-    let awardId: string;
+-    try {
+-      const award = await tx.award.create({
+-        data: { roomId, prizeId, winnerId, sourceAppId },
+-      });
+-      awardId = award.id;
+-    } catch (err) {
+-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+-        return; // сетевой повтор того же награждения — типизированный no-op
+-      }
+-      throw err;
+-    }
++    // НЕ try/catch P2002: unique-violation абортит Postgres-транзакцию (25P02 на
++    // каждый следующий statement, COMMIT молча откатывает) — в батче эффектов это
++    // убило бы sibling-эффекты и коммиты событий. Дубль — не-возбуждающим
++    // INSERT ... ON CONFLICT DO NOTHING по частичному индексу (REQ-RWD-003).
++    // Не-nullable колонок без DB-дефолта, кроме перечисленных, в модели нет.
++    const inserted = await tx.$executeRaw`
++      INSERT INTO rewards."Award" (id, "roomId", "prizeId", "winnerId", "sourceAppId")
++      VALUES (gen_random_uuid(), ${roomId}::uuid, ${prizeId}::uuid, ${winnerId}::uuid, ${sourceAppId})
++      ON CONFLICT ("roomId", "prizeId", "winnerId") WHERE "status" IN ('AWARDED', 'FULFILLED') DO NOTHING`;
++    if (inserted === 0) return; // сетевой повтор — no-op ДО декремента: фонд не тратим
++    // id вставленной строки — перечиткой по ключу индекса (прецедент re-read —
++    // insertRoom, HANDOFF: adapter-pg + RETURNING из raw INSERT надёжнее обходить).
++    const award = await tx.award.findFirstOrThrow({
++      where: { roomId, prizeId, winnerId, status: { in: ['AWARDED', 'FULFILLED'] } },
++    });
+     const decremented = await tx.$executeRaw`
+       UPDATE rewards."Prize" SET quantity = quantity - 1, "updatedAt" = now()
+       WHERE id = ${prizeId}::uuid AND quantity >= 1`;
+     if (decremented === 0) throw new PrizeFundExhaustedError(prizeId); // откатит insert
+     // REQ-SEC-009: payload — только id.
+     await this.eventLog.commitRewardsEvent(tx, roomId, 'reward.awarded', {
+-      awardId,
++      awardId: award.id,
+       prizeId,
+       winnerId,
+       sourceAppId,
+     });
+   }
+ 
+   // --- Вход 2: REST-контур организатора ---
+ 
+   async createPrize(roomId: string, actorId: string, input: CreatePrizeRequest) {
+     await this.assertOrganizer(roomId, actorId);
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index 5566bb4..0073dc7 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -1,32 +1,31 @@
+ import { ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
+ import { Prisma } from '@prisma/client';
+ import { ZodError } from 'zod';
++import { ContractError } from '@mymozhem/sdk';
+ import { AuthError } from '../auth/auth.errors';
+ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+   TargetNotExcludableError,
+   TargetNotMemberError,
+ } from '../membership/membership.errors';
+ import { OAUTH_ERROR_CODES, OAuthError } from '../oauth/oauth.errors';
+ import { RoomOrganizerNotRegisteredError, RoomTransitionError } from '../room/room.errors';
+-import { EventTypeUnknownError, RoomNotActiveError } from '../realtime/realtime.errors';
+ import {
+-  AwardUnknownError,
+-  PrizeFundExhaustedError,
+-  PrizeUnknownError,
+-  RewardAlreadyResolvedError,
+-} from '../rewards/rewards.errors';
++  ActorNotMemberError as RealtimeActorNotMemberError,
++  EventTypeUnknownError,
++  RoomNotActiveError,
++} from '../realtime/realtime.errors';
+ import { HttpExceptionFilter } from './http-exception.filter';
+ 
+ type ReplyMock = { status: jest.Mock; send: jest.Mock };
+ 
+ const makeFilter = () => {
+   const filter = new HttpExceptionFilter();
+   const reply: ReplyMock = { status: jest.fn().mockReturnThis(), send: jest.fn() };
+   return { filter, reply };
+ };
+ 
+@@ -68,28 +67,34 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+     ['oauth access denied', new OAuthError(OAUTH_ERROR_CODES.OAUTH_ACCESS_DENIED, 'x'), 403, 'OAUTH_ACCESS_DENIED'],
+     ['oauth exchange failed', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EXCHANGE_FAILED, 'x'), 502, 'OAUTH_EXCHANGE_FAILED'],
+     ['oauth email unverified', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_UNVERIFIED, 'x'), 403, 'OAUTH_EMAIL_UNVERIFIED'],
+     ['oauth email conflict', new OAuthError(OAUTH_ERROR_CODES.OAUTH_EMAIL_CONFLICT, 'x'), 409, 'OAUTH_EMAIL_CONFLICT'],
+     // POST /rooms (REQ-ID-005): покрытие RoomError частичное (design §11) — по HTTP
+     // достижим только ROOM_ORGANIZER_NOT_REGISTERED; прочие коды → INTERNAL_ERROR.
+     ['room organizer not registered', new RoomOrganizerNotRegisteredError('x'), 403, 'ROOM_ORGANIZER_NOT_REGISTERED'],
+     ['room transition (прочий RoomError)', new RoomTransitionError('x'), 500, 'INTERNAL_ERROR'],
+     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
+     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
+-    ['prize unknown', new PrizeUnknownError('p'), 404, 'PRIZE_UNKNOWN'],
+-    ['award unknown', new AwardUnknownError('a'), 404, 'AWARD_UNKNOWN'],
+-    ['prize fund exhausted', new PrizeFundExhaustedError('p'), 409, 'PRIZE_FUND_EXHAUSTED'],
+-    ['reward already resolved', new RewardAlreadyResolvedError('a', 'FULFILLED'), 409, 'REWARD_ALREADY_RESOLVED'],
++    // Кейсы кидают голый ContractError (не конкретные классы rewards): остальному
++    // core нельзя импортировать core/rewards (boundary Task 11 круизит и спеки).
++    ['prize unknown', new ContractError('PRIZE_UNKNOWN', 'x'), 404, 'PRIZE_UNKNOWN'],
++    ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
++    ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
++    ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
+     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
+     // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
+     ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],
+-    // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE.
++    // Пин второго realtime-кода ветки: realtime-вариант ActorNotMemberError (гейт
++    // эмита) — тот же wire-код/статус, что membership-вариант выше.
++    ['actor not member (realtime-вариант)', new RealtimeActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
++    // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE
++    // и ACTOR_NOT_MEMBER.
+     ['event type unknown (прочий RealtimeError)', new EventTypeUnknownError('x'), 500, 'INTERNAL_ERROR'],
+     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
+     ['unknown', new Error('boom with sensitive internals'), 500, 'INTERNAL_ERROR'],
+   ];
+ 
+   it.each(cases)('%s → typed wire error without internals', (_label, err, status, code) => {
+     const { filter, reply } = makeFilter();
+     filter.catch(err, makeHost(reply));
+     expect(reply.status).toHaveBeenCalledWith(status);
+     const body = reply.send.mock.calls[0][0];
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index e60f949..742c5a4 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -85,23 +85,26 @@ export class HttpExceptionFilter implements ExceptionFilter {
+       // Покрытие частичное (design §11): по HTTP в этом срезе достижим только
+       // ROOM_ORGANIZER_NOT_REGISTERED; прочие коды — INTERNAL_ERROR с error-логом.
+       return exception.code === 'ROOM_ORGANIZER_NOT_REGISTERED' ? exception.code : 'INTERNAL_ERROR';
+     }
+     // Ошибки контракта с wire-паритетом кода (rewards ф.3 и далее): класс-
+     // специфичные ветки выше сохраняют свои правила свёртки; сюда попадают
+     // ContractError'ы, коды которых сознательно добавлены в STATUS_BY_WIRE_CODE.
+     if (exception instanceof ContractError && exception.code in STATUS_BY_WIRE_CODE) {
+       return exception.code as WireCode;
+     }
+-    // RoomNotActiveError (createPrize, rewards ф.3) — RealtimeError, НЕ ContractError:
+-    // симметричная ветка паритета. Blast radius ровно ROOM_NOT_ACTIVE — единственный
+-    // realtime-код в STATUS_BY_WIRE_CODE; прочие падают в INTERNAL_ERROR ниже.
++    // RoomNotActiveError (createPrize, rewards ф.3) и realtime-вариант
++    // ActorNotMemberError (membership-гейт эмита, realtime-срез) — RealtimeError,
++    // НЕ ContractError: симметричная ветка паритета, охраняемая членством кода в
++    // STATUS_BY_WIRE_CODE. Blast radius ровно два realtime-кода: ROOM_NOT_ACTIVE
++    // (409) и ACTOR_NOT_MEMBER (403 — тот же wire-код и статус, что у
++    // membership-варианта в ветке выше); прочие падают в INTERNAL_ERROR ниже.
+     if (exception instanceof RealtimeError && exception.code in STATUS_BY_WIRE_CODE) {
+       return exception.code as WireCode;
+     }
+     if (exception instanceof ZodError) return 'REQUEST_INVALID';
+     // Prisma-сырьё (включая P2010+SQLSTATE 22P02 uuid-syntax — parked minor): типизируем,
+     // детали не раскрываем. Отнесение всех P-кодов к 400 — решение дизайна §5.
+     if (exception instanceof Prisma.PrismaClientKnownRequestError) return 'REQUEST_INVALID';
+     if (exception instanceof HttpException) {
+       return exception.getStatus() >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_INVALID';
+     }

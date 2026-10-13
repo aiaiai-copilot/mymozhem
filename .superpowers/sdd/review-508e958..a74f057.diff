@@ -1,0 +1,172 @@
+# Review package: 508e958..a74f057
+
+## Commits
+a74f057 feat(core): Identity model + partial unique index migration (REQ-ID-001, REQ-DEV-006)
+
+## Files changed
+ .../20260722151900_identity_seam/migration.sql     | 26 +++++++++
+ packages/core/prisma/schema.prisma                 | 25 ++++++++-
+ .../core/src/identity/identity-schema.int-spec.ts  | 65 ++++++++++++++++++++++
+ 3 files changed, 115 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql b/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql
+new file mode 100644
+index 0000000..e6e18f8
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722151900_identity_seam/migration.sql
+@@ -0,0 +1,26 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "identity";
++
++-- CreateEnum
++CREATE TYPE "identity"."IdentityKind" AS ENUM ('REGISTERED', 'GUEST');
++
++-- CreateTable
++CREATE TABLE "identity"."Identity" (
++    "id" UUID NOT NULL,
++    "kind" "identity"."IdentityKind" NOT NULL,
++    "email" TEXT,
++    "deletedAt" TIMESTAMP(3),
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "Identity_pkey" PRIMARY KEY ("id")
++);
++
++-- REQ-ID-001 + REQ-DEV-006: registered-email uniqueness is a partial unique index,
++-- hand-written (Prisma preview partialIndexes forbidden). lower() because email is
++-- case-insensitive; deletedAt IS NULL frees the email after anonymization
++-- (REQ-ID-014). The predicate "REGISTERED and not anonymized" also lives in the
++-- guarded INSERT of RoomService.create (design §7) — change both or neither.
++CREATE UNIQUE INDEX "Identity_registered_email_key"
++  ON "identity"."Identity" (lower("email"))
++  WHERE "kind" = 'REGISTERED' AND "deletedAt" IS NULL;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index d14053a..934a181 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,17 +1,17 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["room"]
++  schemas  = ["identity", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+@@ -23,10 +23,33 @@ enum RoomStatus {
+ model Room {
+   id          String     @id @default(uuid()) @db.Uuid
+   organizerId String     @db.Uuid
+   status      RoomStatus @default(DRAFT)
+   deletedAt   DateTime?
+   createdAt   DateTime   @default(now())
+   updatedAt   DateTime   @updatedAt
+ 
+   @@schema("room")
+ }
++
++enum IdentityKind {
++  REGISTERED
++  GUEST
++
++  @@schema("identity")
++}
++
++// Identity — core CRUD entity (ADR-004: single table, kind REGISTERED | GUEST).
++// deletedAt marks anonymization (REQ-ID-014: PII zeroed, id kept — never physical
++// delete while FKs reference it). email is nullable; uniqueness among live
++// REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
++// NOT a Prisma preview feature.
++model Identity {
++  id        String       @id @default(uuid()) @db.Uuid
++  kind      IdentityKind
++  email     String?
++  deletedAt DateTime?
++  createdAt DateTime     @default(now())
++  updatedAt DateTime     @updatedAt
++
++  @@schema("identity")
++}
+diff --git a/packages/core/src/identity/identity-schema.int-spec.ts b/packages/core/src/identity/identity-schema.int-spec.ts
+new file mode 100644
+index 0000000..845ccc9
+--- /dev/null
++++ b/packages/core/src/identity/identity-schema.int-spec.ts
+@@ -0,0 +1,65 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++
++// REQ-ID-001 + REQ-DEV-006: the registered-email partial unique index exists and
++// behaves exactly as specified — unique among live REGISTERED rows, case-insensitive,
++// ignoring GUEST rows and anonymized (deletedAt) rows.
++describe('Identity registered-email partial unique index', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity" CASCADE');
++  });
++
++  it('exists in the migrated database (REQ-DEV-006 автотест наличия)', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'identity' AND indexname = 'Identity_registered_email_key'
++    `;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/lower/i);
++    expect(rows[0].indexdef).toContain('REGISTERED');
++    expect(rows[0].indexdef).toMatch(/deletedAt" IS NULL/i);
++  });
++
++  it('rejects a second live REGISTERED row with the same email', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    await expect(
++      db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('is case-insensitive (lower() in the index)', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    await expect(
++      db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'A@B.C' } }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('allows the same email for two GUEST rows', async () => {
++    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
++    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++
++  it('allows re-registering an email whose previous REGISTERED row is anonymized', async () => {
++    await db.prisma.identity.create({
++      data: { kind: 'REGISTERED', email: 'a@b.c', deletedAt: new Date() },
++    });
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++
++  it('allows many rows with NULL email', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++});

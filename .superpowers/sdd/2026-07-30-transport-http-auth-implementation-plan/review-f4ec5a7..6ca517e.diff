@@ -1,0 +1,235 @@
+# Review package: f4ec5a7b2ac1ac09d5c46592bebdb0efb5887648..HEAD
+
+## Commits
+6ca517e feat(sdk): join/token DTO + transport error codes, contract 1.1.0 (REQ-ID-003, REQ-ID-016, REQ-SEC-006)
+
+## Files changed
+ packages/sdk/package.json                             |  2 +-
+ packages/sdk/src/auth/join-request.contract.spec.ts   | 14 ++++++++++++++
+ packages/sdk/src/auth/join-request.fixtures.ts        | 14 ++++++++++++++
+ packages/sdk/src/auth/join-request.ts                 |  9 +++++++++
+ packages/sdk/src/auth/token-response.contract.spec.ts | 15 +++++++++++++++
+ packages/sdk/src/auth/token-response.ts               | 10 ++++++++++
+ packages/sdk/src/contract-version.ts                  |  2 +-
+ packages/sdk/src/errors/error-codes.contract.spec.ts  |  6 ++++++
+ packages/sdk/src/errors/error-codes.ts                |  7 +++++++
+ packages/sdk/src/index.ts                             |  3 +++
+ 10 files changed, 80 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index 75a2a53..3fcfe87 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,13 +1,13 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "1.0.0",
++  "version": "1.1.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+   "dependencies": {
+diff --git a/packages/sdk/src/auth/join-request.contract.spec.ts b/packages/sdk/src/auth/join-request.contract.spec.ts
+new file mode 100644
+index 0000000..b7726af
+--- /dev/null
++++ b/packages/sdk/src/auth/join-request.contract.spec.ts
+@@ -0,0 +1,14 @@
++import { joinRequestSchema } from './join-request';
++import { validJoinRequests, invalidJoinRequests } from './join-request.fixtures';
++
++describe('joinRequest contract (REQ-ID-003)', () => {
++  it.each(validJoinRequests.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
++    expect(joinRequestSchema.safeParse(v).success).toBe(true);
++  });
++  it.each(invalidJoinRequests.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
++    expect(joinRequestSchema.safeParse(v).success).toBe(false);
++  });
++  it('trims displayName via the shared displayNameSchema', () => {
++    expect(joinRequestSchema.parse({ code: 'ABCDEFGH', displayName: '  Alex  ' }).displayName).toBe('Alex');
++  });
++});
+diff --git a/packages/sdk/src/auth/join-request.fixtures.ts b/packages/sdk/src/auth/join-request.fixtures.ts
+new file mode 100644
+index 0000000..b017cd4
+--- /dev/null
++++ b/packages/sdk/src/auth/join-request.fixtures.ts
+@@ -0,0 +1,14 @@
++export const validJoinRequests: unknown[] = [
++  { code: 'ABCDEFGH', displayName: 'Alex' },
++  { code: 'x', displayName: '  Аня  ' },
++];
++export const invalidJoinRequests: unknown[] = [
++  {},
++  { code: 'ABCDEFGH' },
++  { displayName: 'Alex' },
++  { code: '', displayName: 'Alex' },
++  { code: 'ABCDEFGH', displayName: '' },
++  { code: 'ABCDEFGH', displayName: 'x'.repeat(41) },
++  { code: 'ABCDEFGH', displayName: 'Alex', extra: true }, // strictObject
++  'not-an-object',
++];
+diff --git a/packages/sdk/src/auth/join-request.ts b/packages/sdk/src/auth/join-request.ts
+new file mode 100644
+index 0000000..1d29eab
+--- /dev/null
++++ b/packages/sdk/src/auth/join-request.ts
+@@ -0,0 +1,9 @@
++import { z } from 'zod';
++import { displayNameSchema } from '../identity/display-name';
++
++// POST /rooms/join request body (REQ-ID-003). strict: лишние ключи не проходят границу.
++export const joinRequestSchema = z.strictObject({
++  code: z.string().trim().min(1),
++  displayName: displayNameSchema,
++});
++export type JoinRequest = z.infer<typeof joinRequestSchema>;
+diff --git a/packages/sdk/src/auth/token-response.contract.spec.ts b/packages/sdk/src/auth/token-response.contract.spec.ts
+new file mode 100644
+index 0000000..0266529
+--- /dev/null
++++ b/packages/sdk/src/auth/token-response.contract.spec.ts
+@@ -0,0 +1,15 @@
++import { tokenResponseSchema } from './token-response';
++
++describe('tokenResponse contract (REQ-ID-016)', () => {
++  it('accepts a well-formed response', () => {
++    expect(tokenResponseSchema.safeParse({ accessToken: 'a.b.c', tokenType: 'Bearer', expiresIn: 900 }).success).toBe(true);
++  });
++  it.each([
++    { accessToken: '', tokenType: 'Bearer', expiresIn: 900 },
++    { accessToken: 'a.b.c', tokenType: 'bearer', expiresIn: 900 },
++    { accessToken: 'a.b.c', tokenType: 'Bearer', expiresIn: 0 },
++    { accessToken: 'a.b.c', tokenType: 'Bearer', expiresIn: 900, refreshToken: 'x' }, // strict
++  ])('rejects %j', (v) => {
++    expect(tokenResponseSchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/auth/token-response.ts b/packages/sdk/src/auth/token-response.ts
+new file mode 100644
+index 0000000..7062b32
+--- /dev/null
++++ b/packages/sdk/src/auth/token-response.ts
+@@ -0,0 +1,10 @@
++import { z } from 'zod';
++
++// Ответ join/refresh (REQ-ID-016). Refresh никогда не ездит в теле — он httpOnly-cookie
++// (REQ-ID-008), поэтому его здесь нет и быть не может.
++export const tokenResponseSchema = z.strictObject({
++  accessToken: z.string().min(1),
++  tokenType: z.literal('Bearer'),
++  expiresIn: z.number().int().positive(),
++});
++export type TokenResponse = z.infer<typeof tokenResponseSchema>;
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+index 866d2e0..396e807 100644
+--- a/packages/sdk/src/contract-version.ts
++++ b/packages/sdk/src/contract-version.ts
+@@ -1,18 +1,18 @@
+ import { satisfies, validRange } from 'semver';
+ import { ContractError } from './errors/error-codes';
+ 
+ // The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
+ // contract version — packages/sdk/package.json is kept equal to this by a contract
+ // test. Versioning from day one is the enforcement mechanism of the boundary, not
+ // preparation for a future consumer (ADR-002).
+-export const CONTRACT_VERSION = '1.0.0';
++export const CONTRACT_VERSION = '1.1.0';
+ 
+ // A manifest declares the range of contract versions it is compatible with; the
+ // core checks it at registration (REQ-CTR-004). We normalize the range with semver
+ // before judging it, rather than pattern-matching the input spelling: many strings
+ // normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
+ // normalized form catches all of them instead of an incomplete enumeration of
+ // spellings. A range that constrains nothing has not declared compatibility — it has
+ // opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
+ // range that fails to parse at all. It never silently passes as "no constraint".
+ export const isContractRangeSatisfied = (range: string): boolean => {
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+index b51736f..b6a770d 100644
+--- a/packages/sdk/src/errors/error-codes.contract.spec.ts
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -11,20 +11,26 @@ describe('contract errors', () => {
+       'MANIFEST_INVALID',
+       'CONTRACT_VERSION_INCOMPATIBLE',
+       'SCHEMA_NOT_REPRESENTABLE',
+       'EVENT_UNKNOWN_TYPE',
+       'EVENT_PAYLOAD_INVALID',
+       'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+       'EVENT_PAYLOAD_TOO_LARGE',
+       'EVENT_RATE_LIMITED',
+       'ROOM_LOG_SEALED',
+       'ROOM_SETTINGS_FROZEN',
++      'ROOM_JOIN_DENIED',
++      'ROOM_PARTICIPANT_LIMIT_REACHED',
++      'RATE_LIMITED',
++      'REQUEST_INVALID',
++      'SESSION_INVALID',
++      'INTERNAL_ERROR',
+     ]);
+   });
+ 
+   it('rejects an unknown code', () => {
+     expect(contractErrorCodeSchema.safeParse('KABOOM').success).toBe(false);
+   });
+ 
+   it('carries its code and stays a real Error', () => {
+     const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
+     expect(err).toBeInstanceOf(Error);
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index e143668..757ae32 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -6,20 +6,27 @@ export const CONTRACT_ERROR_CODES = [
+   'MANIFEST_INVALID',
+   'CONTRACT_VERSION_INCOMPATIBLE',
+   'SCHEMA_NOT_REPRESENTABLE',
+   'EVENT_UNKNOWN_TYPE',
+   'EVENT_PAYLOAD_INVALID',
+   'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+   'EVENT_PAYLOAD_TOO_LARGE',
+   'EVENT_RATE_LIMITED',
+   'ROOM_LOG_SEALED',
+   'ROOM_SETTINGS_FROZEN',
++  // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
++  'ROOM_JOIN_DENIED',
++  'ROOM_PARTICIPANT_LIMIT_REACHED',
++  'RATE_LIMITED',
++  'REQUEST_INVALID',
++  'SESSION_INVALID',
++  'INTERNAL_ERROR',
+ ] as const;
+ 
+ export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
+ export const contractErrorCodeSchema = z.enum(CONTRACT_ERROR_CODES);
+ 
+ // The wire form of an error: a code, and deliberately nothing else. strictObject so
+ // that a well-meaning `message` field cannot be added without failing this contract
+ // (REQ-SEC-006 bans forwarding raw error.message outward).
+ export const contractErrorPayloadSchema = z.strictObject({
+   code: contractErrorCodeSchema,
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 4296f0e..ad01d2a 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -14,10 +14,13 @@ export * from './manifest/app-settings-visibility';
+ export * from './manifest/define-app';
+ export * from './manifest/define-app.fixtures';
+ export * from './identity/identity-kind';
+ export * from './identity/identity-kind.fixtures';
+ export * from './membership/member-role';
+ export * from './membership/member-role.fixtures';
+ export * from './identity/display-name';
+ export * from './identity/display-name.fixtures';
+ export * from './membership/room-join-policy';
+ export * from './membership/room-join-policy.fixtures';
++export * from './auth/join-request';
++export * from './auth/join-request.fixtures';
++export * from './auth/token-response';

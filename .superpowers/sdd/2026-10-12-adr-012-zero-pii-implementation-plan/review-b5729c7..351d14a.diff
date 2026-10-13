@@ -1,0 +1,488 @@
+# Review package: b5729c72c932b08a17af5c46422a92b7ca03a20f..HEAD
+
+## Commits
+351d14a feat(sdk)!: контракт 2.0.0 — ADR-012: displayName необязателен, join-ответ с displayName, bootstrap-схема, коды PRIZES_DISABLED/ORGANIZER_SETUP_INVALID; удалены oauth-схемы и OAUTH_* коды
+
+## Files changed
+ packages/sdk/package.json                          |  2 +-
+ .../sdk/src/auth/join-request.contract.spec.ts     |  7 ++++
+ packages/sdk/src/auth/join-request.fixtures.ts     |  3 +-
+ packages/sdk/src/auth/join-request.ts              |  3 +-
+ .../sdk/src/auth/join-response.contract.spec.ts    | 12 ++++++
+ packages/sdk/src/auth/join-response.ts             |  9 +++++
+ packages/sdk/src/auth/oauth-callback-query.ts      | 13 -------
+ packages/sdk/src/auth/oauth-query.contract.spec.ts | 45 ----------------------
+ packages/sdk/src/auth/oauth-start-query.ts         |  8 ----
+ .../organizer-bootstrap-request.contract.spec.ts   | 11 ++++++
+ .../sdk/src/auth/organizer-bootstrap-request.ts    |  9 +++++
+ packages/sdk/src/contract-version.contract.spec.ts |  8 ++--
+ packages/sdk/src/contract-version.ts               |  2 +-
+ .../sdk/src/errors/error-codes.contract.spec.ts    | 13 +++----
+ packages/sdk/src/errors/error-codes.ts             | 11 ++----
+ packages/sdk/src/index.ts                          |  4 +-
+ 16 files changed, 69 insertions(+), 91 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index e94881b..e00c8f3 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,13 +1,13 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "1.8.0",
++  "version": "2.0.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+   "dependencies": {
+diff --git a/packages/sdk/src/auth/join-request.contract.spec.ts b/packages/sdk/src/auth/join-request.contract.spec.ts
+index 8500f46..735bbf7 100644
+--- a/packages/sdk/src/auth/join-request.contract.spec.ts
++++ b/packages/sdk/src/auth/join-request.contract.spec.ts
+@@ -5,20 +5,27 @@ describe('joinRequest contract (REQ-ID-003)', () => {
+   it.each(validJoinRequests.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
+     expect(joinRequestSchema.safeParse(v).success).toBe(true);
+   });
+   it.each(invalidJoinRequests.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
+     expect(joinRequestSchema.safeParse(v).success).toBe(false);
+   });
+   it('trims displayName via the shared displayNameSchema', () => {
+     expect(joinRequestSchema.parse({ code: 'ABCDEFGH', displayName: '  Alex  ' }).displayName).toBe('Alex');
+   });
+ 
++  // ADR-012 §3 / REQ-ID-003: имя необязательно — при отсутствии сервер назначает псевдоним.
++  it('accepts join without displayName (сервер назначит псевдоним)', () => {
++    const parsed = joinRequestSchema.safeParse({ code: 'ABCDEFGH' });
++    expect(parsed.success).toBe(true);
++    expect(parsed.success && parsed.data.displayName).toBeUndefined();
++  });
++
+   it('accepts explicit spectator role', () => {
+     expect(joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' }).success).toBe(true);
+   });
+ 
+   it('defaults to participant semantics: role is optional', () => {
+     const parsed = joinRequestSchema.safeParse({ code: 'ABCDEFGH', displayName: 'Игрок' });
+     expect(parsed.success).toBe(true);
+     expect(parsed.success && parsed.data.role).toBeUndefined();
+   });
+ 
+diff --git a/packages/sdk/src/auth/join-request.fixtures.ts b/packages/sdk/src/auth/join-request.fixtures.ts
+index f4d516f..fc18afe 100644
+--- a/packages/sdk/src/auth/join-request.fixtures.ts
++++ b/packages/sdk/src/auth/join-request.fixtures.ts
+@@ -1,16 +1,17 @@
+ export const validJoinRequests: unknown[] = [
+   { code: 'ABCDEFGH', displayName: 'Alex' },
+   { code: 'x', displayName: '  Аня  ' },
+   { code: 'ABCDEFGH', displayName: 'Гляделкин', role: 'spectator' },
++  // ADR-012 §3: имя необязательно — при отсутствии сервер назначает псевдоним.
++  { code: 'ABCDEFGH' },
+ ];
+ export const invalidJoinRequests: unknown[] = [
+   {},
+-  { code: 'ABCDEFGH' },
+   { displayName: 'Alex' },
+   { code: '', displayName: 'Alex' },
+   { code: 'ABCDEFGH', displayName: '' },
+   { code: 'ABCDEFGH', displayName: 'x'.repeat(41) },
+   { code: 'ABCDEFGH', displayName: 'Alex', extra: true }, // strictObject
+   { code: 'ABCDEFGH', displayName: 'Alex', role: 'organizer' }, // привилегированные роли через флаг не назначаются (REQ-ID-011)
+   'not-an-object',
+ ];
+diff --git a/packages/sdk/src/auth/join-request.ts b/packages/sdk/src/auth/join-request.ts
+index b4c93e2..a4d9048 100644
+--- a/packages/sdk/src/auth/join-request.ts
++++ b/packages/sdk/src/auth/join-request.ts
+@@ -1,12 +1,13 @@
+ import { z } from 'zod';
+ import { displayNameSchema } from '../identity/display-name';
+ 
+ // POST /rooms/join request body (REQ-ID-003). strict: лишние ключи не проходят границу.
+ // role (фаза 2, REQ-ID-011): самоназначение зрителем при входе. Только два значения —
+ // ORGANIZER/MODERATOR через флаг не получить структурно. Отсутствие = participant.
+ export const joinRequestSchema = z.strictObject({
+   code: z.string().trim().min(1),
+-  displayName: displayNameSchema,
++  // ADR-012 §3: имя необязательно — при отсутствии сервер назначает псевдоним.
++  displayName: displayNameSchema.optional(),
+   role: z.enum(['participant', 'spectator']).optional(),
+ });
+ export type JoinRequest = z.infer<typeof joinRequestSchema>;
+diff --git a/packages/sdk/src/auth/join-response.contract.spec.ts b/packages/sdk/src/auth/join-response.contract.spec.ts
+new file mode 100644
+index 0000000..dfc9dba
+--- /dev/null
++++ b/packages/sdk/src/auth/join-response.contract.spec.ts
+@@ -0,0 +1,12 @@
++import { joinResponseSchema } from './join-response';
++
++describe('joinResponse contract (ADR-012: серверный псевдоним в ответе)', () => {
++  it('accepts token pair + displayName', () => {
++    expect(
++      joinResponseSchema.safeParse({ accessToken: 'a', tokenType: 'Bearer', expiresIn: 900, displayName: 'Лиса-42' }).success,
++    ).toBe(true);
++  });
++  it('rejects missing displayName (сервер обязан назначить)', () => {
++    expect(joinResponseSchema.safeParse({ accessToken: 'a', tokenType: 'Bearer', expiresIn: 900 }).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/auth/join-response.ts b/packages/sdk/src/auth/join-response.ts
+new file mode 100644
+index 0000000..4267896
+--- /dev/null
++++ b/packages/sdk/src/auth/join-response.ts
+@@ -0,0 +1,9 @@
++import { z } from 'zod';
++import { tokenResponseSchema } from './token-response';
++
++// Ответ POST /rooms/join (ADR-012 §3): фактический displayName (заданный или
++// назначенный сервером псевдоним) — клиент сохраняет его для авто-rejoin.
++export const joinResponseSchema = tokenResponseSchema.extend({
++  displayName: z.string().min(1),
++});
++export type JoinResponse = z.infer<typeof joinResponseSchema>;
+diff --git a/packages/sdk/src/auth/oauth-callback-query.ts b/packages/sdk/src/auth/oauth-callback-query.ts
+deleted file mode 100644
+index 86cc385..0000000
+--- a/packages/sdk/src/auth/oauth-callback-query.ts
++++ /dev/null
+@@ -1,13 +0,0 @@
+-import { z } from 'zod';
+-
+-// GET /auth/google/callback query (REQ-ID-009): code+state при успехе, error при
+-// отказе пользователя — все optional, семантику разбирает OAuthService.
+-// НЕ strictObject: Google дописывает свои query-параметры в callback-URL
+-// (scope/authuser/prompt и т.п.) — strict-отказ давал 400 REQUEST_INVALID на штатном
+-// входе (manual smoke OAuth 2026-09-24). Неизвестные ключи strip'аются.
+-export const oauthCallbackQuerySchema = z.object({
+-  code: z.string().optional(),
+-  state: z.string().optional(),
+-  error: z.string().optional(),
+-});
+-export type OAuthCallbackQuery = z.infer<typeof oauthCallbackQuerySchema>;
+diff --git a/packages/sdk/src/auth/oauth-query.contract.spec.ts b/packages/sdk/src/auth/oauth-query.contract.spec.ts
+deleted file mode 100644
+index e04388a..0000000
+--- a/packages/sdk/src/auth/oauth-query.contract.spec.ts
++++ /dev/null
+@@ -1,45 +0,0 @@
+-import { oauthStartQuerySchema } from './oauth-start-query';
+-import { oauthCallbackQuerySchema } from './oauth-callback-query';
+-
+-describe('oauthStartQuery contract (REQ-ID-009)', () => {
+-  const valid: unknown[] = [{}, { redirect: 'http://localhost:3000/app' }];
+-  const invalid: unknown[] = [
+-    { redirect: 'http://localhost:3000/app', extra: true }, // strictObject
+-    { redirect: 42 },
+-    'not-an-object',
+-  ];
+-  it.each(valid.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
+-    expect(oauthStartQuerySchema.safeParse(v).success).toBe(true);
+-  });
+-  it.each(invalid.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
+-    expect(oauthStartQuerySchema.safeParse(v).success).toBe(false);
+-  });
+-});
+-
+-describe('oauthCallbackQuery contract (REQ-ID-009)', () => {
+-  const valid: unknown[] = [
+-    { code: 'auth-code', state: 'csrf-state' },
+-    { error: 'access_denied' },
+-    {},
+-    // Google дописывает свои параметры в callback-URL (scope/authuser/prompt и т.п.) —
+-    // strict-отказ дал бы 400 REQUEST_INVALID на штатном входе (manual smoke 2026-09-24).
+-    {
+-      code: 'auth-code',
+-      state: 'csrf-state',
+-      scope: 'openid email profile',
+-      authuser: '0',
+-      prompt: 'consent',
+-    },
+-  ];
+-  const invalid: unknown[] = [
+-    // extra-ключи больше не отклоняются: схема strip'ит неизвестное (Google дописывает своё).
+-    { code: 42 },
+-    'not-an-object',
+-  ];
+-  it.each(valid.map((v) => [JSON.stringify(v), v] as const))('accepts %s', (_l, v) => {
+-    expect(oauthCallbackQuerySchema.safeParse(v).success).toBe(true);
+-  });
+-  it.each(invalid.map((v) => [JSON.stringify(v), v] as const))('rejects %s', (_l, v) => {
+-    expect(oauthCallbackQuerySchema.safeParse(v).success).toBe(false);
+-  });
+-});
+diff --git a/packages/sdk/src/auth/oauth-start-query.ts b/packages/sdk/src/auth/oauth-start-query.ts
+deleted file mode 100644
+index b548819..0000000
+--- a/packages/sdk/src/auth/oauth-start-query.ts
++++ /dev/null
+@@ -1,8 +0,0 @@
+-import { z } from 'zod';
+-
+-// GET /auth/google query (REQ-ID-009): redirect валидируется сервером по allowlist,
+-// здесь — только форма. strict: лишние ключи не проходят.
+-export const oauthStartQuerySchema = z.strictObject({
+-  redirect: z.string().optional(),
+-});
+-export type OAuthStartQuery = z.infer<typeof oauthStartQuerySchema>;
+diff --git a/packages/sdk/src/auth/organizer-bootstrap-request.contract.spec.ts b/packages/sdk/src/auth/organizer-bootstrap-request.contract.spec.ts
+new file mode 100644
+index 0000000..f9c96d9
+--- /dev/null
++++ b/packages/sdk/src/auth/organizer-bootstrap-request.contract.spec.ts
+@@ -0,0 +1,11 @@
++import { organizerBootstrapRequestSchema } from './organizer-bootstrap-request';
++
++describe('organizerBootstrapRequest contract (ADR-012)', () => {
++  it('accepts a non-empty setupToken', () => {
++    expect(organizerBootstrapRequestSchema.safeParse({ setupToken: 'x'.repeat(32) }).success).toBe(true);
++  });
++  it.each([[{}], [{ setupToken: '' }], [{ setupToken: 'x', extra: 1 }], ['nope']])(
++    'rejects %j',
++    (v) => expect(organizerBootstrapRequestSchema.safeParse(v).success).toBe(false),
++  );
++});
+diff --git a/packages/sdk/src/auth/organizer-bootstrap-request.ts b/packages/sdk/src/auth/organizer-bootstrap-request.ts
+new file mode 100644
+index 0000000..39c4bf4
+--- /dev/null
++++ b/packages/sdk/src/auth/organizer-bootstrap-request.ts
+@@ -0,0 +1,9 @@
++import { z } from 'zod';
++
++// POST /auth/organizer (ADR-012 §2): bootstrap единственного REGISTERED инстанса
++// по setup-токену из конфигурации. Длина проверяется сервером сравнением с
++// конфигом (timing-safe), здесь — только форма.
++export const organizerBootstrapRequestSchema = z.strictObject({
++  setupToken: z.string().min(1),
++});
++export type OrganizerBootstrapRequest = z.infer<typeof organizerBootstrapRequestSchema>;
+diff --git a/packages/sdk/src/contract-version.contract.spec.ts b/packages/sdk/src/contract-version.contract.spec.ts
+index 3b8d8df..eaf271d 100644
+--- a/packages/sdk/src/contract-version.contract.spec.ts
++++ b/packages/sdk/src/contract-version.contract.spec.ts
+@@ -16,25 +16,25 @@ describe('contract version', () => {
+ 
+   // REQ-CTR-004: "Версия SDK = версия контракта". Two sources of the same truth
+   // drift; this test is what keeps them one.
+   it('equals the SDK package version', () => {
+     const pkg = JSON.parse(
+       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
+     ) as { version: string };
+     expect(pkg.version).toBe(CONTRACT_VERSION);
+   });
+ 
+-  it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
++  it.each(['^2.0.0', '>=2.0.0 <3.0.0', '2.x'])('accepts a compatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(true);
+   });
+ 
+-  it.each(['^2.0.0', '>=2.0.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
++  it.each(['^1.0.0', '>=3.0.0', '1.x'])('rejects an incompatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(false);
+   });
+ 
+   it.each(['garbage!!', '', 'not-a-range', '*'])(
+     'rejects a range that constrains nothing or is malformed: %s',
+     (range) => {
+       expect(isContractRangeSatisfied(range)).toBe(false);
+     },
+   );
+ 
+@@ -55,20 +55,20 @@ describe('contract version', () => {
+     (range) => {
+       expect(admitsUnboundedContractMajor(range)).toBe(true);
+     },
+   );
+ 
+   it('treats a malformed range as admitting no major (validity is a separate check)', () => {
+     expect(admitsUnboundedContractMajor('garbage!!')).toBe(false);
+   });
+ 
+   it('asserts with a typed error the core can return outward', () => {
+-    expect(() => assertContractRangeSatisfied('^1.0.0')).not.toThrow();
++    expect(() => assertContractRangeSatisfied('^2.0.0')).not.toThrow();
+     try {
+-      assertContractRangeSatisfied('^2.0.0');
++      assertContractRangeSatisfied('^1.0.0');
+       throw new Error('should have thrown');
+     } catch (err) {
+       expect(err).toBeInstanceOf(ContractError);
+       expect((err as ContractError).code).toBe('CONTRACT_VERSION_INCOMPATIBLE');
+     }
+   });
+ });
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+index a85c82e..9170c09 100644
+--- a/packages/sdk/src/contract-version.ts
++++ b/packages/sdk/src/contract-version.ts
+@@ -1,18 +1,18 @@
+ import { satisfies, validRange } from 'semver';
+ import { ContractError } from './errors/error-codes';
+ 
+ // The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
+ // contract version — packages/sdk/package.json is kept equal to this by a contract
+ // test. Versioning from day one is the enforcement mechanism of the boundary, not
+ // preparation for a future consumer (ADR-002).
+-export const CONTRACT_VERSION = '1.8.0';
++export const CONTRACT_VERSION = '2.0.0';
+ 
+ // A manifest declares the range of contract versions it is compatible with; the
+ // core checks it at registration (REQ-CTR-004). We normalize the range with semver
+ // before judging it, rather than pattern-matching the input spelling: many strings
+ // normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
+ // normalized form catches all of them instead of an incomplete enumeration of
+ // spellings. A range that constrains nothing has not declared compatibility — it has
+ // opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
+ // range that fails to parse at all. It never silently passes as "no constraint".
+ export const isContractRangeSatisfied = (range: string): boolean => {
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+index 36a137d..23a35eb 100644
+--- a/packages/sdk/src/errors/error-codes.contract.spec.ts
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -13,35 +13,30 @@ describe('contract errors', () => {
+       'SCHEMA_NOT_REPRESENTABLE',
+       'EVENT_UNKNOWN_TYPE',
+       'EVENT_PAYLOAD_INVALID',
+       'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+       'EVENT_PAYLOAD_TOO_LARGE',
+       'EVENT_RATE_LIMITED',
+       'ROOM_LOG_SEALED',
+       'ROOM_SETTINGS_FROZEN',
+       'ROOM_ORGANIZER_NOT_REGISTERED',
+       'ACTOR_NOT_MEMBER',
++      'ORGANIZER_SETUP_INVALID',
++      'PRIZES_DISABLED',
+       'ACTOR_NOT_ORGANIZER',
+       'TARGET_NOT_MEMBER',
+       'TARGET_NOT_EXCLUDABLE',
+       'ROOM_JOIN_DENIED',
+       'ROOM_PARTICIPANT_LIMIT_REACHED',
+       'RATE_LIMITED',
+       'REQUEST_INVALID',
+       'SESSION_INVALID',
+-      'OAUTH_NOT_CONFIGURED',
+-      'OAUTH_REDIRECT_INVALID',
+-      'OAUTH_STATE_INVALID',
+-      'OAUTH_ACCESS_DENIED',
+-      'OAUTH_EXCHANGE_FAILED',
+-      'OAUTH_EMAIL_UNVERIFIED',
+-      'OAUTH_EMAIL_CONFLICT',
+       'MODULE_UNAVAILABLE',
+       'PUBLISH_FORBIDDEN',
+       'ANSWER_TOO_FAST',
+       'ROUND_NOT_OPEN',
+       'ALREADY_ANSWERED',
+       'QUESTION_UNKNOWN',
+       'OPTION_UNKNOWN',
+       'ROOM_NOT_ACTIVE',
+       'CAPABILITY_UNAVAILABLE',
+       'PRIZE_UNKNOWN',
+@@ -75,20 +70,24 @@ describe('contract errors', () => {
+     'AWARD_UNKNOWN',
+     'REWARD_ALREADY_RESOLVED',
+   ] as const)('accepts phase-3 code %s', (code) => {
+     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+   });
+ 
+   it.each(['IDENTITY_ANONYMIZED'] as const)('accepts phase-4 code %s', (code) => {
+     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+   });
+ 
++  it.each(['ORGANIZER_SETUP_INVALID', 'PRIZES_DISABLED'] as const)('accepts ADR-012 code %s', (code) => {
++    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
++  });
++
+   it('rejects an unknown code', () => {
+     expect(contractErrorCodeSchema.safeParse('KABOOM').success).toBe(false);
+   });
+ 
+   it('carries its code and stays a real Error', () => {
+     const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
+     expect(err).toBeInstanceOf(Error);
+     expect(err.code).toBe('EVENT_UNKNOWN_TYPE');
+   });
+ 
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index e9b9ac0..e2b3fe1 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -9,38 +9,33 @@ export const CONTRACT_ERROR_CODES = [
+   'EVENT_UNKNOWN_TYPE',
+   'EVENT_PAYLOAD_INVALID',
+   'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+   'EVENT_PAYLOAD_TOO_LARGE',
+   'EVENT_RATE_LIMITED',
+   'ROOM_LOG_SEALED',
+   'ROOM_SETTINGS_FROZEN',
+   // OAuth-срез (REQ-ID-015): POST /rooms от REGISTERED-комнат без регистрации.
+   'ROOM_ORGANIZER_NOT_REGISTERED',
+   'ACTOR_NOT_MEMBER',
++  // ADR-012 (срез zero-PII): bootstrap организатора и призовой режим.
++  'ORGANIZER_SETUP_INVALID',
++  'PRIZES_DISABLED',
+   // Membership exclusion (срез исключения, REQ-ID-006): отказы endpoint'а exclude.
+   'ACTOR_NOT_ORGANIZER',
+   'TARGET_NOT_MEMBER',
+   'TARGET_NOT_EXCLUDABLE',
+   // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
+   'ROOM_JOIN_DENIED',
+   'ROOM_PARTICIPANT_LIMIT_REACHED',
+   'RATE_LIMITED',
+   'REQUEST_INVALID',
+   'SESSION_INVALID',
+-  // OAuth-срез (REQ-ID-015/009, design 2026-09-02 §7).
+-  'OAUTH_NOT_CONFIGURED',
+-  'OAUTH_REDIRECT_INVALID',
+-  'OAUTH_STATE_INVALID',
+-  'OAUTH_ACCESS_DENIED',
+-  'OAUTH_EXCHANGE_FAILED',
+-  'OAUTH_EMAIL_UNVERIFIED',
+-  'OAUTH_EMAIL_CONFLICT',
+   // Quiz-срез (фаза 2, design 2026-09-09): диспетчер app-runtime и отказы модуля.
+   'MODULE_UNAVAILABLE',
+   'PUBLISH_FORBIDDEN',
+   'ANSWER_TOO_FAST',
+   'ROUND_NOT_OPEN',
+   'ALREADY_ANSWERED',
+   'QUESTION_UNKNOWN',
+   'OPTION_UNKNOWN',
+   // Фаза 3 (design 2026-09-10): rewards/lottery + REST-контур фонда.
+   'ROOM_NOT_ACTIVE',
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 422f2a0..7b1d2b6 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -22,22 +22,22 @@ export * from './identity/display-name';
+ export * from './identity/display-name.fixtures';
+ export * from './membership/room-join-policy';
+ export * from './membership/room-join-policy.fixtures';
+ export * from './membership/exclude-request';
+ export * from './membership/exclude-request.fixtures';
+ export * from './membership/exclude-response';
+ export * from './membership/roster-entry';
+ export * from './auth/join-request';
+ export * from './auth/join-request.fixtures';
+ export * from './auth/token-response';
+-export * from './auth/oauth-start-query';
+-export * from './auth/oauth-callback-query';
++export * from './auth/organizer-bootstrap-request';
++export * from './auth/join-response';
+ export * from './room/create-room-request';
+ export * from './room/create-room-request.fixtures';
+ export * from './room/create-room-response';
+ export * from './room/configure-room-request';
+ export * from './realtime/realtime-messages';
+ export * from './app-runtime/app-commit';
+ export * from './app-runtime/app-commit.fixtures';
+ export * from './app-runtime/app-effect';
+ export * from './app-runtime/app-publish-result';
+ export * from './app-runtime/app-log-event';

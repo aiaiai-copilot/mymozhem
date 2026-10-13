@@ -1,0 +1,320 @@
+# Review package: 7957449..HEAD
+
+## Commits
+23cfa4d feat(sdk): realtime wire-конверты + код ACTOR_NOT_MEMBER, контракт 1.2.0 (REQ-CTR-004/005, REQ-RT-006/009)
+
+## Files changed
+ packages/sdk/package.json                          |  2 +-
+ packages/sdk/src/contract-version.ts               |  2 +-
+ .../sdk/src/errors/error-codes.contract.spec.ts    |  1 +
+ packages/sdk/src/errors/error-codes.ts             |  1 +
+ packages/sdk/src/index.ts                          |  1 +
+ .../realtime/realtime-messages.contract.spec.ts    | 60 ++++++++++++++++++++
+ .../sdk/src/realtime/realtime-messages.fixtures.ts | 64 ++++++++++++++++++++++
+ packages/sdk/src/realtime/realtime-messages.ts     | 50 +++++++++++++++++
+ 8 files changed, 179 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index 3fcfe87..2d0d52c 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,13 +1,13 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "1.1.0",
++  "version": "1.2.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+   "dependencies": {
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+index 396e807..9a647cf 100644
+--- a/packages/sdk/src/contract-version.ts
++++ b/packages/sdk/src/contract-version.ts
+@@ -1,18 +1,18 @@
+ import { satisfies, validRange } from 'semver';
+ import { ContractError } from './errors/error-codes';
+ 
+ // The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
+ // contract version — packages/sdk/package.json is kept equal to this by a contract
+ // test. Versioning from day one is the enforcement mechanism of the boundary, not
+ // preparation for a future consumer (ADR-002).
+-export const CONTRACT_VERSION = '1.1.0';
++export const CONTRACT_VERSION = '1.2.0';
+ 
+ // A manifest declares the range of contract versions it is compatible with; the
+ // core checks it at registration (REQ-CTR-004). We normalize the range with semver
+ // before judging it, rather than pattern-matching the input spelling: many strings
+ // normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
+ // normalized form catches all of them instead of an incomplete enumeration of
+ // spellings. A range that constrains nothing has not declared compatibility — it has
+ // opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
+ // range that fails to parse at all. It never silently passes as "no constraint".
+ export const isContractRangeSatisfied = (range: string): boolean => {
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+index b6a770d..4451c48 100644
+--- a/packages/sdk/src/errors/error-codes.contract.spec.ts
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -11,20 +11,21 @@ describe('contract errors', () => {
+       'MANIFEST_INVALID',
+       'CONTRACT_VERSION_INCOMPATIBLE',
+       'SCHEMA_NOT_REPRESENTABLE',
+       'EVENT_UNKNOWN_TYPE',
+       'EVENT_PAYLOAD_INVALID',
+       'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+       'EVENT_PAYLOAD_TOO_LARGE',
+       'EVENT_RATE_LIMITED',
+       'ROOM_LOG_SEALED',
+       'ROOM_SETTINGS_FROZEN',
++      'ACTOR_NOT_MEMBER',
+       'ROOM_JOIN_DENIED',
+       'ROOM_PARTICIPANT_LIMIT_REACHED',
+       'RATE_LIMITED',
+       'REQUEST_INVALID',
+       'SESSION_INVALID',
+       'INTERNAL_ERROR',
+     ]);
+   });
+ 
+   it('rejects an unknown code', () => {
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index 757ae32..71e9aad 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -6,20 +6,21 @@ export const CONTRACT_ERROR_CODES = [
+   'MANIFEST_INVALID',
+   'CONTRACT_VERSION_INCOMPATIBLE',
+   'SCHEMA_NOT_REPRESENTABLE',
+   'EVENT_UNKNOWN_TYPE',
+   'EVENT_PAYLOAD_INVALID',
+   'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
+   'EVENT_PAYLOAD_TOO_LARGE',
+   'EVENT_RATE_LIMITED',
+   'ROOM_LOG_SEALED',
+   'ROOM_SETTINGS_FROZEN',
++  'ACTOR_NOT_MEMBER',
+   // Transport-facing API errors (first HTTP slice, REQ-SEC-006).
+   'ROOM_JOIN_DENIED',
+   'ROOM_PARTICIPANT_LIMIT_REACHED',
+   'RATE_LIMITED',
+   'REQUEST_INVALID',
+   'SESSION_INVALID',
+   'INTERNAL_ERROR',
+ ] as const;
+ 
+ export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index ad01d2a..a2938a8 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -17,10 +17,11 @@ export * from './identity/identity-kind';
+ export * from './identity/identity-kind.fixtures';
+ export * from './membership/member-role';
+ export * from './membership/member-role.fixtures';
+ export * from './identity/display-name';
+ export * from './identity/display-name.fixtures';
+ export * from './membership/room-join-policy';
+ export * from './membership/room-join-policy.fixtures';
+ export * from './auth/join-request';
+ export * from './auth/join-request.fixtures';
+ export * from './auth/token-response';
++export * from './realtime/realtime-messages';
+diff --git a/packages/sdk/src/realtime/realtime-messages.contract.spec.ts b/packages/sdk/src/realtime/realtime-messages.contract.spec.ts
+new file mode 100644
+index 0000000..ed08808
+--- /dev/null
++++ b/packages/sdk/src/realtime/realtime-messages.contract.spec.ts
+@@ -0,0 +1,60 @@
++import { contractErrorCodeSchema } from '../errors/error-codes';
++import {
++  publishOkAckSchema,
++  publishRequestSchema,
++  roomSnapshotSchema,
++  subscribeOkAckSchema,
++  subscribeRequestSchema,
++} from './realtime-messages';
++import {
++  invalidPublishRequestCases,
++  invalidSnapshotCases,
++  invalidSubscribeRequestCases,
++  validPublishRequests,
++  validSnapshot,
++  validSubscribeRequest,
++} from './realtime-messages.fixtures';
++
++describe('realtime messages contract', () => {
++  it('accepts the valid subscribe request', () => {
++    expect(subscribeRequestSchema.safeParse(validSubscribeRequest).success).toBe(true);
++  });
++
++  it.each(invalidSubscribeRequestCases.map((c) => [c.name, c.value] as const))(
++    'rejects subscribe request: %s',
++    (_name, value) => {
++      expect(subscribeRequestSchema.safeParse(value).success).toBe(false);
++    },
++  );
++
++  it.each(validPublishRequests.map((r, i) => [i, r] as const))(
++    'accepts valid publish request #%i',
++    (_i, request) => {
++      expect(publishRequestSchema.safeParse(request).success).toBe(true);
++    },
++  );
++
++  it.each(invalidPublishRequestCases.map((c) => [c.name, c.value] as const))(
++    'rejects publish request: %s',
++    (_name, value) => {
++      expect(publishRequestSchema.safeParse(value).success).toBe(false);
++    },
++  );
++
++  it('accepts the valid snapshot and the ok acks', () => {
++    expect(roomSnapshotSchema.safeParse(validSnapshot).success).toBe(true);
++    expect(subscribeOkAckSchema.safeParse({ ok: true, snapshot: validSnapshot }).success).toBe(true);
++    expect(publishOkAckSchema.safeParse({ ok: true }).success).toBe(true);
++  });
++
++  it.each(invalidSnapshotCases.map((c) => [c.name, c.value] as const))(
++    'rejects snapshot: %s',
++    (_name, value) => {
++      expect(roomSnapshotSchema.safeParse(value).success).toBe(false);
++    },
++  );
++
++  it('ACTOR_NOT_MEMBER is a contract error code (design §0.5)', () => {
++    expect(contractErrorCodeSchema.safeParse('ACTOR_NOT_MEMBER').success).toBe(true);
++  });
++});
+diff --git a/packages/sdk/src/realtime/realtime-messages.fixtures.ts b/packages/sdk/src/realtime/realtime-messages.fixtures.ts
+new file mode 100644
+index 0000000..2a3bcd3
+--- /dev/null
++++ b/packages/sdk/src/realtime/realtime-messages.fixtures.ts
+@@ -0,0 +1,64 @@
++import type { PublishRequest, RoomSnapshot, SubscribeRequest } from './realtime-messages';
++
++export const validSubscribeRequest: SubscribeRequest = {
++  roomId: '11111111-1111-4111-8111-111111111111',
++};
++
++export const validPublishRequests: PublishRequest[] = [
++  { type: 'quiz.answer.submitted', payload: { roundId: 'r1', choice: 2 } },
++  {
++    type: 'quiz.answer.submitted',
++    payload: { roundId: 'r1', choice: 2 },
++    visibility: 'organizer',
++  },
++];
++
++export const validSnapshot: RoomSnapshot = {
++  events: [
++    {
++      type: 'core.room.activated',
++      payload: { appId: 'quiz', manifestVersion: 1 },
++      actorId: null,
++    },
++    {
++      type: 'quiz.answer.submitted',
++      payload: { roundId: 'r1', choice: 2 },
++      actorId: '22222222-2222-4222-8222-222222222222',
++    },
++  ],
++  appSettings: { roundsCount: 5 },
++};
++
++export const invalidSubscribeRequestCases: { name: string; value: unknown }[] = [
++  { name: 'extra key (strictObject)', value: { ...validSubscribeRequest, since: 'x' } },
++  { name: 'roomId not a uuid', value: { roomId: 'room-1' } },
++];
++
++export const invalidPublishRequestCases: { name: string; value: unknown }[] = [
++  {
++    name: 'type without namespace',
++    value: { type: 'activated', payload: {} },
++  },
++  {
++    name: 'visibility outside the enum',
++    value: { type: 'quiz.answer.submitted', payload: {}, visibility: 'friends-only' },
++  },
++  {
++    name: 'extra key (strictObject)',
++    value: { type: 'quiz.answer.submitted', payload: {}, actorId: 'spoof' },
++  },
++];
++
++export const invalidSnapshotCases: { name: string; value: unknown }[] = [
++  {
++    name: 'event carrying seq outward (REQ-RT-011a)',
++    value: {
++      ...validSnapshot,
++      events: [{ ...validSnapshot.events[0], seq: 7 }],
++    },
++  },
++  {
++    name: 'replay cursor field (no cursor exists in MVP)',
++    value: { ...validSnapshot, cursor: 'eyJzZXEiOjQyfQ==' },
++  },
++];
+diff --git a/packages/sdk/src/realtime/realtime-messages.ts b/packages/sdk/src/realtime/realtime-messages.ts
+new file mode 100644
+index 0000000..5cfcec1
+--- /dev/null
++++ b/packages/sdk/src/realtime/realtime-messages.ts
+@@ -0,0 +1,50 @@
++import { z } from 'zod';
++import { eventTypeSchema } from '../events/event-type';
++import { projectedEventSchema } from '../events/projected-event.schema';
++import { visibilitySchema } from '../visibility/visibility';
++
++// Socket.io message names of the realtime contract (REQ-RT-006, design §3): one
++// source for the core gateway and any client.
++export const REALTIME_MESSAGES = {
++  SUBSCRIBE: 'subscribe',
++  PUBLISH: 'publish',
++  EVENT: 'event',
++} as const;
++
++export const subscribeRequestSchema = z.strictObject({
++  roomId: z.uuid(),
++});
++export type SubscribeRequest = z.infer<typeof subscribeRequestSchema>;
++
++// Full visible projection, no cursor (MVP, design §3): replay returns everything
++// the requester's level may see. Room status is learned from lifecycle events in
++// the same stream (REQ-RT-010) — deliberately no status field. strictObject: an
++// extra key (seq, cursor) is a core bug, and loud rejection beats silent strip.
++export const roomSnapshotSchema = z.strictObject({
++  events: z.array(projectedEventSchema),
++  appSettings: z.record(z.string(), z.unknown()),
++});
++export type RoomSnapshot = z.infer<typeof roomSnapshotSchema>;
++
++export const subscribeOkAckSchema = z.strictObject({
++  ok: z.literal(true),
++  snapshot: roomSnapshotSchema,
++});
++export type SubscribeOkAck = z.infer<typeof subscribeOkAckSchema>;
++
++// visibility is optional: the default is the type's declared ceiling (fail-safe,
++// design §0.6); a weaker-than-declared value is rejected at commit (REQ-CTR-009).
++// Error acks reuse contractErrorPayloadSchema ({code}) — REQ-SEC-006.
++export const publishRequestSchema = z.strictObject({
++  type: eventTypeSchema,
++  payload: z.record(z.string(), z.unknown()),
++  visibility: visibilitySchema.optional(),
++});
++export type PublishRequest = z.infer<typeof publishRequestSchema>;
++
++// The ack carries no seq and no event body: the publisher sees its own event via
++// the same fan-out as every subscriber (design §5).
++export const publishOkAckSchema = z.strictObject({
++  ok: z.literal(true),
++});
++export type PublishOkAck = z.infer<typeof publishOkAckSchema>;

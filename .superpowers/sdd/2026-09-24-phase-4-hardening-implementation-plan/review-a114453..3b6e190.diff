@@ -1,0 +1,660 @@
+# Review package: a114453..3b6e190
+
+## Commits
+3b6e190 fix(rewards): refuse prize award to anonymized identity (C-8.1) — IDENTITY_ANONYMIZED
+6e4a80c fix(identity): close sweep race window C-8.1 — tx-aware guard + re-check rollback
+7e564ef feat(sdk): IDENTITY_ANONYMIZED contract error code (C-8.1), SDK 1.8.0
+
+## Files changed
+ packages/core/src/identity/anonymization-guards.ts |  10 +-
+ packages/core/src/identity/guest-sweep.int-spec.ts | 103 +++++++++++++++++++++
+ packages/core/src/identity/guest-sweep.service.ts  |  88 +++++++++++-------
+ .../src/rewards/rewards-anonymization.guard.ts     |  10 +-
+ packages/core/src/rewards/rewards.errors.ts        |   8 ++
+ packages/core/src/rewards/rewards.int-spec.ts      |  15 +++
+ packages/core/src/rewards/rewards.service.ts       |  10 ++
+ .../src/transport/http-exception.filter.spec.ts    |   2 +
+ .../core/src/transport/http-exception.filter.ts    |   2 +
+ packages/sdk/package.json                          |   2 +-
+ packages/sdk/src/contract-version.contract.spec.ts |   2 +-
+ packages/sdk/src/contract-version.ts               |   2 +-
+ .../sdk/src/errors/error-codes.contract.spec.ts    |   5 +
+ packages/sdk/src/errors/error-codes.ts             |   3 +
+ 14 files changed, 219 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/packages/core/src/identity/anonymization-guards.ts b/packages/core/src/identity/anonymization-guards.ts
+index fe4a0ef..39a2a51 100644
+--- a/packages/core/src/identity/anonymization-guards.ts
++++ b/packages/core/src/identity/anonymization-guards.ts
+@@ -1,10 +1,14 @@
++import type { Prisma } from '@prisma/client';
++
+ // Приостановка TTL гостя через hook, не импортом (design 2026-09-10 §5,
+ // REQ-RWD-001/013): identity объявляет токен; rewards регистрирует guard в
+ // composition root. Паттерн — по прецеденту onAccessRevoked (membership).
+ export interface AnonymizationGuard {
+-  // Возвращает подмножество identityIds, у которых есть нерешённая награда
+-  // (AWARDED). identity про rewards не знает.
+-  hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>>;
++  // Возвращает подмножество identityIds с нерешённой наградой (AWARDED).
++  // tx — транзакция свипа: внетранзакционное чтение создавало окно гонки C-8.1
++  // (award, закоммиченный между гард-чеком и коммитом свипа, оставался невидимым);
++  // обе точки опроса (до анонимизации и re-check после) читают через tx вызывающего.
++  hasOpenAwards(tx: Prisma.TransactionClient, identityIds: readonly string[]): Promise<Set<string>>;
+ }
+ 
+ export const ANONYMIZATION_GUARDS = Symbol('ANONYMIZATION_GUARDS');
+diff --git a/packages/core/src/identity/guest-sweep.int-spec.ts b/packages/core/src/identity/guest-sweep.int-spec.ts
+index 7a25658..c83e88a 100644
+--- a/packages/core/src/identity/guest-sweep.int-spec.ts
++++ b/packages/core/src/identity/guest-sweep.int-spec.ts
+@@ -1,22 +1,24 @@
+ import { randomUUID } from 'node:crypto';
+ import { Global, Module } from '@nestjs/common';
+ import { Test } from '@nestjs/testing';
++import type { Prisma } from '@prisma/client';
+ import type { AppEffect } from '@mymozhem/sdk';
+ import { AppRegistryModule } from '../app-registry/app-registry.module';
+ import { AppRuntimeModule } from '../app-runtime/app-runtime.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { TokenService } from '../auth/token.service';
+ import { ConfigModule } from '../config/config.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import { MembershipModule } from '../membership/membership.module';
+ import { PrismaModule } from '../prisma/prisma.module';
++import { PrismaService } from '../prisma/prisma.service';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { RewardsAnonymizationGuard } from '../rewards/rewards-anonymization.guard';
+ import { RewardsModule } from '../rewards/rewards.module';
+ import { RewardsService } from '../rewards/rewards.service';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { TEST_CONFIG } from '../testing/test-config';
+ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
+ import { GuestSweepService } from './guest-sweep.service';
+@@ -234,10 +236,111 @@ describe('GuestSweepService — приостановка при открытой
+     expect(await sweep.sweepExpiredGuests()).toBe(0);
+     after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
+     expect(after.deletedAt).toBeNull();
+     const award2 = await db.prisma.award.findFirstOrThrow({ where: { winnerId: guest2.id } });
+     await rewards.revoke(room.id, award2.id, org.id);
+     expect(await sweep.sweepExpiredGuests()).toBe(1);
+     after = await db.prisma.identity.findUniqueOrThrow({ where: { id: guest2.id } });
+     expect(after.deletedAt).not.toBeNull();
+   });
+ });
++
++describe('GuestSweepService — окно гонки C-8.1: re-check откатывает свип', () => {
++  const RACE_TARGET = Symbol('RACE_TARGET');
++  type RaceTarget = { winnerId: string; roomId: string; prizeId: string };
++
++  class RacingGuard implements AnonymizationGuard {
++    private calls = 0;
++    constructor(
++      private readonly prisma: PrismaService,
++      private readonly real: RewardsAnonymizationGuard,
++      private readonly target: RaceTarget,
++    ) {}
++    async hasOpenAwards(tx: Prisma.TransactionClient, ids: readonly string[]): Promise<Set<string>> {
++      this.calls += 1;
++      if (this.calls === 1) {
++        // «Конкурирующий» award — своим соединением, до блокировок свипа.
++        await this.prisma.award.create({
++          data: {
++            roomId: this.target.roomId,
++            prizeId: this.target.prizeId,
++            winnerId: this.target.winnerId,
++            status: 'AWARDED',
++            sourceAppId: 'lottery',
++          },
++        });
++        return new Set();
++      }
++      return this.real.hasOpenAwards(tx, ids);
++    }
++  }
++
++  let db: TestDb;
++  let sweep: GuestSweepService;
++  let target: RaceTarget;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    const org = await seedIdentity(db.prisma, { email: `org-${randomUUID()}@example.test` });
++    const room = await db.prisma.room.create({
++      data: { code: randomUUID().slice(0, 8).toUpperCase(), organizerId: org.id },
++    });
++    const prize = await db.prisma.prize.create({
++      data: { roomId: room.id, name: 'Приз гонки', quantityTotal: 1, quantity: 1 },
++    });
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.$executeRaw`UPDATE identity."Identity" SET "createdAt" = now() - interval '25 hours' WHERE id = ${guest.id}::uuid`;
++    target = { winnerId: guest.id, roomId: room.id, prizeId: prize.id };
++
++    const RACE_TOKEN = RACE_TARGET;
++    @Global()
++    @Module({
++      // PrismaModule нужен прямо: он не @Global, а RewardsModule не ре-экспортирует
++      // PrismaService — без imports фабрика не разрешит PrismaService в этом скоупе.
++      imports: [RewardsModule, PrismaModule],
++      providers: [
++        { provide: RACE_TOKEN, useValue: target },
++        {
++          provide: ANONYMIZATION_GUARDS,
++          useFactory: (prisma: PrismaService, real: RewardsAnonymizationGuard, t: RaceTarget): AnonymizationGuard[] => [
++            new RacingGuard(prisma, real, t),
++          ],
++          inject: [PrismaService, RewardsAnonymizationGuard, RACE_TOKEN],
++        },
++      ],
++      exports: [ANONYMIZATION_GUARDS],
++    })
++    class TestRaceWiringModule {}
++
++    const moduleRef = await Test.createTestingModule({
++      imports: [
++        ConfigModule,
++        PrismaModule,
++        AppRegistryModule.register([]),
++        AppRuntimeModule.register([]),
++        MembershipModule,
++        RealtimeModule,
++        RewardsModule,
++        IdentityModule,
++        TestRaceWiringModule,
++      ],
++    })
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    await moduleRef.init();
++    sweep = moduleRef.get(GuestSweepService);
++  }, 120_000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('award, закоммиченный между гард-чеком и коммитом, откатывает анонимизацию (0, identity не тронута)', async () => {
++    const anonymized = await sweep.sweepExpiredGuests();
++    expect(anonymized).toBe(0);
++    const after = await db.prisma.identity.findUniqueOrThrow({ where: { id: target.winnerId } });
++    expect(after.deletedAt).toBeNull(); // свип откачен — REQ-RWD-013 победил
++    const award = await db.prisma.award.findFirst({ where: { winnerId: target.winnerId, status: 'AWARDED' } });
++    expect(award).not.toBeNull(); // «конкурирующая» награда — на месте
++  });
++});
+diff --git a/packages/core/src/identity/guest-sweep.service.ts b/packages/core/src/identity/guest-sweep.service.ts
+index 3968ec0..ac21d3d 100644
+--- a/packages/core/src/identity/guest-sweep.service.ts
++++ b/packages/core/src/identity/guest-sweep.service.ts
+@@ -2,59 +2,83 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { ANONYMIZATION_GUARDS, type AnonymizationGuard } from './anonymization-guards';
+ 
+ // Свип анонимизации гостей (REQ-ID-003/014, догон фазы 3): истечение guest_ttl
+ // реализуется анонимизацией строки (обнуление PII, сохранение id — внешние ключи
+ // и actorId в логе остаются валидными), не физическим удалением. База TTL —
+ // createdAt (решение владельца, design §0.8). Приостановка при открытой награде —
+ // через ANONYMIZATION_GUARDS (REQ-RWD-013); без подключённого rewards приостановки нет.
++// Внутренний сигнал отката при гонке C-8.1: не доменная ошибка, на провод не
++// маппится (свип вызывается только планировщиком); ловится в sweepExpiredGuests.
++class SweepSuspensionRaceError extends Error {
++  constructor(readonly racedCount: number) {
++    super(`concurrent award detected during sweep for ${racedCount} identit(ies)`);
++    this.name = new.target.name;
++  }
++}
++
+ @Injectable()
+ export class GuestSweepService {
+   private readonly logger = new Logger(GuestSweepService.name);
+ 
+   constructor(
+     private readonly prisma: PrismaService,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
+     @Optional() @Inject(ANONYMIZATION_GUARDS) private readonly guards: AnonymizationGuard[] = [],
+   ) {}
+ 
+   // Возвращает число анонимизированных identity. Одна транзакция даёт атомарность
+-  // самого свипа (выборка кандидатов + запись); перечитывание deletedAt в
+-  // updateMany — вторая линия от гонки с ручным исключением. Гард читает ВНЕ
+-  // транзакции (hasOpenAwards идёт через this.prisma, отдельное соединение):
+-  // остаётся узкое окно «award закоммичен между гард-чеком и коммитом свипа» —
+-  // принято как риск MVP (свип раз в CLEANUP_INTERVAL, окно миллисекунды).
+-  // Закрытие окна — design-level решение (tx-aware гард / serializable+retry),
+-  // зафиксировано в леджере для владельца.
++  // свипа; C-8.1 (ф.4) закрыто re-check'ом: гард опрашивается дважды ВНУТРИ tx —
++  // до анонимизации и после updateMany. READ COMMITTED делает видимым любой award,
++  // закоммитившийся до перепроверки (включая тот, чей INSERT ждал нашей
++  // FOR NO KEY UPDATE блокировки на identity — FK-проверка Award берёт FOR KEY
++  // SHARE, блокировки конфликтуют) → throw откатывает всю tx. Остаточное
++  // направление «анонимизирован → награждён» (award коммитится после COMMIT
++  // свипа) закрыто гардой identity.deletedAt в RewardsService.awardPrize.
+   async sweepExpiredGuests(now: Date = new Date()): Promise<number> {
+     const cutoff = new Date(now.getTime() - this.config.GUEST_TTL * 1000);
+-    return this.prisma.$transaction(async (tx) => {
+-      const candidates = await tx.identity.findMany({
+-        where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
+-        select: { id: true },
++    try {
++      return await this.prisma.$transaction(async (tx) => {
++        const candidates = await tx.identity.findMany({
++          where: { kind: 'GUEST', deletedAt: null, createdAt: { lt: cutoff } },
++          select: { id: true },
++        });
++        if (candidates.length === 0) return 0;
++        const ids = candidates.map((c) => c.id);
++        const suspended = new Set<string>();
++        for (const guard of this.guards) {
++          for (const id of await guard.hasOpenAwards(tx, ids)) suspended.add(id);
++        }
++        const sweepIds = ids.filter((id) => !suspended.has(id));
++        if (sweepIds.length === 0) return 0;
++        const anonymized = await tx.identity.updateMany({
++          where: { id: { in: sweepIds }, deletedAt: null },
++          data: { displayName: null, email: null, deletedAt: now },
++        });
++        await tx.session.updateMany({
++          where: { identityId: { in: sweepIds }, revokedAt: null },
++          data: { revokedAt: now },
++        });
++        // C-8.1: re-check после updateMany — award, закоммитившийся между первым
++        // чеком и этой строкой, здесь виден → откат всей tx (анонимизация и
++        // отзыв сессий отменяются).
++        const raced = new Set<string>();
++        for (const guard of this.guards) {
++          for (const id of await guard.hasOpenAwards(tx, sweepIds)) raced.add(id);
++        }
++        if (raced.size > 0) throw new SweepSuspensionRaceError(raced.size);
++        this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
++        return anonymized.count;
+       });
+-      if (candidates.length === 0) return 0;
+-      const ids = candidates.map((c) => c.id);
+-      const suspended = new Set<string>();
+-      for (const guard of this.guards) {
+-        for (const id of await guard.hasOpenAwards(ids)) suspended.add(id);
++    } catch (err) {
++      if (err instanceof SweepSuspensionRaceError) {
++        // Ожидаемый исход гонки, не алерт: следующий тик CLEANUP_INTERVAL
++        // обработает гостя как приостановленного (award уже виден первому чеку).
++        this.logger.warn(`guest sweep rolled back: concurrent award for ${err.racedCount} identit(ies) (C-8.1)`);
++        return 0;
+       }
+-      const sweepIds = ids.filter((id) => !suspended.has(id));
+-      if (sweepIds.length === 0) return 0;
+-      const anonymized = await tx.identity.updateMany({
+-        where: { id: { in: sweepIds }, deletedAt: null },
+-        data: { displayName: null, email: null, deletedAt: now },
+-      });
+-      // Отзыв живых сессий гостя — по прецеденту среза исключения
+-      // (membership.service.ts:118-123). Сессия гостя под приостановкой истекает
+-      // по своему капу как обычно (design §5) — здесь её нет.
+-      await tx.session.updateMany({
+-        where: { identityId: { in: sweepIds }, revokedAt: null },
+-        data: { revokedAt: now },
+-      });
+-      this.logger.log(`guest sweep: anonymized ${anonymized.count}, suspended ${suspended.size}`);
+-      return anonymized.count;
+-    });
++      throw err;
++    }
+   }
+ }
+diff --git a/packages/core/src/rewards/rewards-anonymization.guard.ts b/packages/core/src/rewards/rewards-anonymization.guard.ts
+index eea9fcc..59cace7 100644
+--- a/packages/core/src/rewards/rewards-anonymization.guard.ts
++++ b/packages/core/src/rewards/rewards-anonymization.guard.ts
+@@ -1,20 +1,20 @@
+ import { Injectable } from '@nestjs/common';
++import type { Prisma } from '@prisma/client';
+ import type { AnonymizationGuard } from '../identity/anonymization-guards';
+-import { PrismaService } from '../prisma/prisma.service';
+ 
+ // REQ-RWD-013: гость с нерешённой наградой (AWARDED; FULFILLED/REVOKED — решённые)
+ // не анонимизируется до разрешения — иначе приз осиротеет из-за обнуления имени
+ // победителя до вручения.
+ @Injectable()
+ export class RewardsAnonymizationGuard implements AnonymizationGuard {
+-  constructor(private readonly prisma: PrismaService) {}
+-
+-  async hasOpenAwards(identityIds: readonly string[]): Promise<Set<string>> {
++  // PrismaService больше не инжектируется (C-8.1, ф.4): чтение строго через tx
++  // вызывающего — внетранзакционное чтение создавало окно гонки со свипом.
++  async hasOpenAwards(tx: Prisma.TransactionClient, identityIds: readonly string[]): Promise<Set<string>> {
+     if (identityIds.length === 0) return new Set();
+-    const rows = await this.prisma.award.findMany({
++    const rows = await tx.award.findMany({
+       where: { winnerId: { in: [...identityIds] }, status: 'AWARDED' },
+       select: { winnerId: true },
+     });
+     return new Set(rows.map((r) => r.winnerId));
+   }
+ }
+diff --git a/packages/core/src/rewards/rewards.errors.ts b/packages/core/src/rewards/rewards.errors.ts
+index 1f305da..a18cd1b 100644
+--- a/packages/core/src/rewards/rewards.errors.ts
++++ b/packages/core/src/rewards/rewards.errors.ts
+@@ -18,10 +18,18 @@ export class AwardUnknownError extends ContractError {
+   constructor(awardId: string) {
+     super('AWARD_UNKNOWN', `no award ${awardId} in this room`);
+   }
+ }
+ 
+ export class RewardAlreadyResolvedError extends ContractError {
+   constructor(awardId: string, status: string) {
+     super('REWARD_ALREADY_RESOLVED', `award ${awardId} is already ${status}`);
+   }
+ }
++
++// C-8.1 (ф.4): награждение анонимизированной (свип) или неизвестной identity
++// отклонено — приз осиротел бы (displayName уже NULL, вручать некому).
++export class IdentityAnonymizedError extends ContractError {
++  constructor(identityId: string) {
++    super('IDENTITY_ANONYMIZED', `identity ${identityId} is anonymized or unknown — prize would be orphaned`);
++  }
++}
+diff --git a/packages/core/src/rewards/rewards.int-spec.ts b/packages/core/src/rewards/rewards.int-spec.ts
+index 7dbfa1b..2553668 100644
+--- a/packages/core/src/rewards/rewards.int-spec.ts
++++ b/packages/core/src/rewards/rewards.int-spec.ts
+@@ -95,20 +95,35 @@ describe('RewardsService (int)', () => {
+     expect(awards[0].status).toBe('AWARDED');
+     const log = await db.prisma.$queryRaw<{ type: string; visibility: string; payload: { winnerId: string } }[]>`
+       SELECT type, "visibility"::text AS visibility, payload FROM realtime."LogEvent" WHERE "roomId" = ${room.id}::uuid ORDER BY seq`;
+     expect(log).toHaveLength(1);
+     expect(log[0].type).toBe('rewards.reward.awarded');
+     expect(log[0].visibility).toBe('public'); // сырое DB-значение lowercase (HANDOFF)
+     expect(log[0].payload.winnerId).toBe(winner.id);
+     expect(log[0].payload).not.toHaveProperty('displayName'); // REQ-SEC-009
+   });
+ 
++  it('award.prize по анонимизированному гостю отклоняется IDENTITY_ANONYMIZED; фонд и таблица не тронуты (C-8.1)', async () => {
++    const { room, prize } = await seedPrize(1);
++    const swept = await guest();
++    await db.prisma.identity.update({ where: { id: swept.id }, data: { deletedAt: new Date() } });
++
++    await expect(
++      outbox.run((tx) =>
++        rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, swept.id)]),
++      ),
++    ).rejects.toMatchObject({ code: 'IDENTITY_ANONYMIZED' });
++
++    expect((await db.prisma.prize.findUniqueOrThrow({ where: { id: prize.id } })).quantity).toBe(1);
++    expect(await db.prisma.award.count({ where: { prizeId: prize.id } })).toBe(0);
++  });
++
+   it('K > quantity конкурентных награждений разным identity → ровно quantity успехов, без минуса (REQ-RWD-010)', async () => {
+     const { room, prize } = await seedPrize(2);
+     const winners = await Promise.all(Array.from({ length: 5 }, () => guest()));
+     const results = await Promise.allSettled(
+       winners.map((w) => outbox.run((tx) => rewards.executeEffects(tx, room.id, 'lottery', [prizeEffect(prize.id, w.id)]))),
+     );
+     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+     for (const r of results.filter((x) => x.status === 'rejected')) {
+       expect((r as PromiseRejectedResult).reason).toBeInstanceOf(PrizeFundExhaustedError);
+     }
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+index 58f60ff..84129a0 100644
+--- a/packages/core/src/rewards/rewards.service.ts
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -3,20 +3,21 @@ import { Prisma } from '@prisma/client';
+ import type { AppEffect, CreatePrizeRequest } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membership.errors';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { RoomNotActiveError } from '../realtime/realtime.errors';
+ import type { AwardEffectHandler } from '../app-runtime/effects';
+ import {
+   AwardUnknownError,
++  IdentityAnonymizedError,
+   PrizeFundExhaustedError,
+   PrizeUnknownError,
+   RewardAlreadyResolvedError,
+ } from './rewards.errors';
+ 
+ // Контур rewards (design 2026-09-10 §2/§3). Два входа:
+ // 1) executeEffects — из диспетчера app-runtime, ВНУТРИ его outbox.run (вложенный
+ //    run запрещён — поэтому tx приходит параметром); отказ → откат всей транзакции.
+ // 2) REST-методы (createPrize/listAwards/fulfill/revoke) — свои outbox.run.
+ // События rewards.* коммитятся в той же транзакции (лог — нотификация и аудит,
+@@ -63,20 +64,29 @@ export class RewardsService implements AwardEffectHandler {
+   // декремента откатывает insert вместе со всей транзакцией (REQ-RWD-010).
+   private async awardPrize(
+     tx: Prisma.TransactionClient,
+     roomId: string,
+     sourceAppId: string,
+     prizeId: string,
+     winnerId: string,
+   ): Promise<void> {
+     const prize = await tx.prize.findFirst({ where: { id: prizeId, roomId } });
+     if (!prize) throw new PrizeUnknownError(prizeId);
++    // C-8.1 (ф.4): победитель не должен быть анонимизирован/отсутствовать. Чтение
++    // в той же tx; FK-проверка Award ниже берёт FOR KEY SHARE на identity и
++    // конфликтует с updateMany свипа (FOR NO KEY UPDATE) — пути сериализуются,
++    // и проигравший гонку видит финальное состояние этой проверкой. Отказ —
++    // типизированный, откатывает tx без списания фонда (организатор перерозыгрышит).
++    const winner = await tx.identity.findUnique({ where: { id: winnerId }, select: { deletedAt: true } });
++    if (winner === null || winner.deletedAt !== null) {
++      throw new IdentityAnonymizedError(winnerId);
++    }
+     // НЕ try/catch P2002: unique-violation абортит Postgres-транзакцию (25P02 на
+     // каждый следующий statement, COMMIT молча откатывает) — в батче эффектов это
+     // убило бы sibling-эффекты и коммиты событий. Дубль — не-возбуждающим
+     // INSERT ... ON CONFLICT DO NOTHING по частичному индексу (REQ-RWD-003).
+     // Не-nullable колонок без DB-дефолта, кроме перечисленных, в модели нет.
+     const inserted = await tx.$executeRaw`
+       INSERT INTO rewards."Award" (id, "roomId", "prizeId", "winnerId", "sourceAppId")
+       VALUES (gen_random_uuid(), ${roomId}::uuid, ${prizeId}::uuid, ${winnerId}::uuid, ${sourceAppId})
+       ON CONFLICT ("roomId", "prizeId", "winnerId") WHERE "status" IN ('AWARDED', 'FULFILLED') DO NOTHING`;
+     if (inserted === 0) return; // сетевой повтор — no-op ДО декремента: фонд не тратим
+diff --git a/packages/core/src/transport/http-exception.filter.spec.ts b/packages/core/src/transport/http-exception.filter.spec.ts
+index 7ec4275..ef805a7 100644
+--- a/packages/core/src/transport/http-exception.filter.spec.ts
++++ b/packages/core/src/transport/http-exception.filter.spec.ts
+@@ -77,20 +77,22 @@ describe('HttpExceptionFilter (REQ-SEC-006)', () => {
+     ['room not configured', new RoomNotConfiguredError('x'), 409, 'ROOM_NOT_CONFIGURED'],
+     ['room settings frozen', new RoomSettingsFrozenError('x'), 409, 'ROOM_SETTINGS_FROZEN'],
+     // REST-контур rewards (ф.3, design 2026-09-10 §2): ContractError'ы домена идут
+     // в wire по паритету кода — код сознательно добавлен в STATUS_BY_WIRE_CODE.
+     // Кейсы кидают голый ContractError (не конкретные классы rewards): остальному
+     // core нельзя импортировать core/rewards (boundary Task 11 круизит и спеки).
+     ['prize unknown', new ContractError('PRIZE_UNKNOWN', 'x'), 404, 'PRIZE_UNKNOWN'],
+     ['award unknown', new ContractError('AWARD_UNKNOWN', 'x'), 404, 'AWARD_UNKNOWN'],
+     ['prize fund exhausted', new ContractError('PRIZE_FUND_EXHAUSTED', 'x'), 409, 'PRIZE_FUND_EXHAUSTED'],
+     ['reward already resolved', new ContractError('REWARD_ALREADY_RESOLVED', 'x'), 409, 'REWARD_ALREADY_RESOLVED'],
++    // Фаза 4 (C-8.1): награждение анонимизированной identity — конфликт состояния.
++    ['identity anonymized', new ContractError('IDENTITY_ANONYMIZED', 'x'), 409, 'IDENTITY_ANONYMIZED'],
+     // ROOM_NOT_ACTIVE по HTTP достижим из createPrize — но это RealtimeError
+     // (core-internal, НЕ ContractError): своя ветка, тот же паритет кода.
+     ['room not active', new RoomNotActiveError('x'), 409, 'ROOM_NOT_ACTIVE'],
+     // Пин второго realtime-кода ветки: realtime-вариант ActorNotMemberError (гейт
+     // эмита) — тот же wire-код/статус, что membership-вариант выше.
+     ['actor not member (realtime-вариант)', new RealtimeActorNotMemberError('x'), 403, 'ACTOR_NOT_MEMBER'],
+     // Прочие RealtimeError в маппинге нет — blast radius ветки ровно ROOM_NOT_ACTIVE
+     // и ACTOR_NOT_MEMBER.
+     ['event type unknown (прочий RealtimeError)', new EventTypeUnknownError('x'), 500, 'INTERNAL_ERROR'],
+     ['zod', new ZodError([]), 400, 'REQUEST_INVALID'],
+diff --git a/packages/core/src/transport/http-exception.filter.ts b/packages/core/src/transport/http-exception.filter.ts
+index 1a50480..9c38d05 100644
+--- a/packages/core/src/transport/http-exception.filter.ts
++++ b/packages/core/src/transport/http-exception.filter.ts
+@@ -39,20 +39,22 @@ const STATUS_BY_WIRE_CODE = {
+   ROOM_TRANSITION_INVALID: 409,
+   ROOM_CONFLICT: 409,
+   ROOM_NOT_CONFIGURED: 409,
+   ROOM_SETTINGS_FROZEN: 409,
+   // Фаза 3 (design 2026-09-10 §2): REST-контур rewards.
+   ROOM_NOT_ACTIVE: 409,
+   PRIZE_UNKNOWN: 404,
+   AWARD_UNKNOWN: 404,
+   PRIZE_FUND_EXHAUSTED: 409,
+   REWARD_ALREADY_RESOLVED: 409,
++  // Фаза 4 (C-8.1): гонка свип/розыгрыш проиграна награждением — как прочие 409 конфликта состояния.
++  IDENTITY_ANONYMIZED: 409,
+   INTERNAL_ERROR: 500,
+ } as const;
+ 
+ type WireCode = keyof typeof STATUS_BY_WIRE_CODE;
+ 
+ // Core не зависит от fastify напрямую (адаптер подключается в apps/server) — фильтру
+ // достаточно структурного минимума ответа; FastifyReply совместим по форме.
+ interface ReplyLike {
+   status(statusCode: number): { send(body: unknown): unknown };
+ }
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index 9470419..e94881b 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,13 +1,13 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "1.7.0",
++  "version": "1.8.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+   "dependencies": {
+diff --git a/packages/sdk/src/contract-version.contract.spec.ts b/packages/sdk/src/contract-version.contract.spec.ts
+index 8ddd9b3..3b8d8df 100644
+--- a/packages/sdk/src/contract-version.contract.spec.ts
++++ b/packages/sdk/src/contract-version.contract.spec.ts
+@@ -20,21 +20,21 @@ describe('contract version', () => {
+     const pkg = JSON.parse(
+       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
+     ) as { version: string };
+     expect(pkg.version).toBe(CONTRACT_VERSION);
+   });
+ 
+   it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(true);
+   });
+ 
+-  it.each(['^2.0.0', '>=1.8.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
++  it.each(['^2.0.0', '>=2.0.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
+     expect(isContractRangeSatisfied(range)).toBe(false);
+   });
+ 
+   it.each(['garbage!!', '', 'not-a-range', '*'])(
+     'rejects a range that constrains nothing or is malformed: %s',
+     (range) => {
+       expect(isContractRangeSatisfied(range)).toBe(false);
+     },
+   );
+ 
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+index f1883ed..a85c82e 100644
+--- a/packages/sdk/src/contract-version.ts
++++ b/packages/sdk/src/contract-version.ts
+@@ -1,18 +1,18 @@
+ import { satisfies, validRange } from 'semver';
+ import { ContractError } from './errors/error-codes';
+ 
+ // The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
+ // contract version — packages/sdk/package.json is kept equal to this by a contract
+ // test. Versioning from day one is the enforcement mechanism of the boundary, not
+ // preparation for a future consumer (ADR-002).
+-export const CONTRACT_VERSION = '1.7.0';
++export const CONTRACT_VERSION = '1.8.0';
+ 
+ // A manifest declares the range of contract versions it is compatible with; the
+ // core checks it at registration (REQ-CTR-004). We normalize the range with semver
+ // before judging it, rather than pattern-matching the input spelling: many strings
+ // normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
+ // normalized form catches all of them instead of an incomplete enumeration of
+ // spellings. A range that constrains nothing has not declared compatibility — it has
+ // opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
+ // range that fails to parse at all. It never silently passes as "no constraint".
+ export const isContractRangeSatisfied = (range: string): boolean => {
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+index dd63fbe..36a137d 100644
+--- a/packages/sdk/src/errors/error-codes.contract.spec.ts
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -42,20 +42,21 @@ describe('contract errors', () => {
+       'ALREADY_ANSWERED',
+       'QUESTION_UNKNOWN',
+       'OPTION_UNKNOWN',
+       'ROOM_NOT_ACTIVE',
+       'CAPABILITY_UNAVAILABLE',
+       'PRIZE_UNKNOWN',
+       'PRIZE_FUND_EXHAUSTED',
+       'DRAW_POOL_EMPTY',
+       'AWARD_UNKNOWN',
+       'REWARD_ALREADY_RESOLVED',
++      'IDENTITY_ANONYMIZED',
+       'INTERNAL_ERROR',
+     ]);
+   });
+ 
+   it.each([
+     'MODULE_UNAVAILABLE',
+     'PUBLISH_FORBIDDEN',
+     'ANSWER_TOO_FAST',
+     'ROUND_NOT_OPEN',
+     'ALREADY_ANSWERED',
+@@ -70,20 +71,24 @@ describe('contract errors', () => {
+     'CAPABILITY_UNAVAILABLE',
+     'PRIZE_UNKNOWN',
+     'PRIZE_FUND_EXHAUSTED',
+     'DRAW_POOL_EMPTY',
+     'AWARD_UNKNOWN',
+     'REWARD_ALREADY_RESOLVED',
+   ] as const)('accepts phase-3 code %s', (code) => {
+     expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
+   });
+ 
++  it.each(['IDENTITY_ANONYMIZED'] as const)('accepts phase-4 code %s', (code) => {
++    expect(contractErrorCodeSchema.safeParse(code).success).toBe(true);
++  });
++
+   it('rejects an unknown code', () => {
+     expect(contractErrorCodeSchema.safeParse('KABOOM').success).toBe(false);
+   });
+ 
+   it('carries its code and stays a real Error', () => {
+     const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
+     expect(err).toBeInstanceOf(Error);
+     expect(err.code).toBe('EVENT_UNKNOWN_TYPE');
+   });
+ 
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+index dbdc58e..e9b9ac0 100644
+--- a/packages/sdk/src/errors/error-codes.ts
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -43,20 +43,23 @@ export const CONTRACT_ERROR_CODES = [
+   'QUESTION_UNKNOWN',
+   'OPTION_UNKNOWN',
+   // Фаза 3 (design 2026-09-10): rewards/lottery + REST-контур фонда.
+   'ROOM_NOT_ACTIVE',
+   'CAPABILITY_UNAVAILABLE',
+   'PRIZE_UNKNOWN',
+   'PRIZE_FUND_EXHAUSTED',
+   'DRAW_POOL_EMPTY',
+   'AWARD_UNKNOWN',
+   'REWARD_ALREADY_RESOLVED',
++  // Фаза 4 (C-8.1): award по анонимизированной/неизвестной identity отклонён —
++  // приз не должен осиротеть (дизайн 2026-09-24 §4).
++  'IDENTITY_ANONYMIZED',
+   'INTERNAL_ERROR',
+ ] as const;
+ 
+ export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
+ export const contractErrorCodeSchema = z.enum(CONTRACT_ERROR_CODES);
+ 
+ // The wire form of an error: a code, and deliberately nothing else. strictObject so
+ // that a well-meaning `message` field cannot be added without failing this contract
+ // (REQ-SEC-006 bans forwarding raw error.message outward).
+ export const contractErrorPayloadSchema = z.strictObject({

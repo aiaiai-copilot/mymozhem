@@ -1,0 +1,1916 @@
+# Review package: a6d53b8..47d7105
+
+## Commits
+47d7105 feat(core): wire identity/membership modules into the app (REQ-ID-002)
+d70f919 fix(server): set DATABASE_URL placeholder for AppModule boot in health e2e (REQ-OPS-003)
+a123f0d feat(core): guest join flow with entry limits (REQ-ID-002, REQ-ID-003, REQ-ID-006, REQ-ID-013)
+47588e3 docs(handoff): update for session 2026-07-29 (batch 2: tasks 3-4)
+60ee3f6 feat(core): IdentityService.createGuest + organizer membership on room create (REQ-ID-003, REQ-ID-011)
+46363d0 fix(core): match P2010-wrapped 23505 in room code collision classifier (REQ-ID-013)
+6ec1277 feat(core): membership schema + room code & join policy in create (REQ-ID-013, REQ-ID-002, REQ-ID-011)
+1b8729b docs(handoff): update for session 2026-07-29 (batch 1: tasks 1-2)
+e4d8b64 feat(core): §4 join/code/participant config params + ConfigModule (REQ-OPS-003)
+3279301 feat(sdk): room join policy + displayName contract schemas (REQ-ID-002, REQ-ID-003)
+
+## Files changed
+ HANDOFF.md                                         |  42 ++---
+ apps/server/src/app.module.ts                      |  12 +-
+ apps/server/test/health.e2e-spec.ts                |   3 +
+ packages/core/jest.integration.config.js           |   2 +-
+ .../migration.sql                                  |  51 ++++++
+ packages/core/prisma/schema.prisma                 |  71 ++++++--
+ packages/core/src/config/config.module.ts          |   9 +
+ packages/core/src/config/config.schema.spec.ts     |  28 +++
+ packages/core/src/config/config.schema.ts          |  10 +-
+ packages/core/src/config/config.tokens.ts          |   3 +
+ .../core/src/identity/identity-schema.int-spec.ts  |  10 ++
+ packages/core/src/identity/identity.module.ts      |  10 ++
+ .../core/src/identity/identity.service.int-spec.ts |  38 ++++
+ packages/core/src/identity/identity.service.ts     |  23 +++
+ packages/core/src/index.ts                         |   8 +
+ .../core/src/membership/join-rate-limiter.spec.ts  |  27 +++
+ packages/core/src/membership/join-rate-limiter.ts  |  31 ++++
+ .../src/membership/membership-schema.int-spec.ts   |  84 +++++++++
+ packages/core/src/membership/membership.errors.ts  |  46 +++++
+ packages/core/src/membership/membership.module.ts  |  22 +++
+ .../src/membership/membership.service.int-spec.ts  | 197 +++++++++++++++++++++
+ packages/core/src/membership/membership.service.ts |  84 +++++++++
+ packages/core/src/realtime/event-log.int-spec.ts   |  20 +++
+ packages/core/src/room/room-code.spec.ts           |  60 +++++++
+ packages/core/src/room/room-code.ts                |  33 ++++
+ packages/core/src/room/room.module.ts              |   4 +-
+ packages/core/src/room/room.service.int-spec.ts    |  89 +++++++++-
+ packages/core/src/room/room.service.ts             |  65 +++++--
+ packages/core/src/testing/harness.int-spec.ts      |   7 +-
+ .../sdk/src/identity/display-name.contract.spec.ts |  21 +++
+ packages/sdk/src/identity/display-name.fixtures.ts |   4 +
+ packages/sdk/src/identity/display-name.ts          |   7 +
+ packages/sdk/src/index.ts                          |   4 +
+ .../membership/room-join-policy.contract.spec.ts   |  16 ++
+ .../src/membership/room-join-policy.fixtures.ts    |   6 +
+ packages/sdk/src/membership/room-join-policy.ts    |   7 +
+ 36 files changed, 1092 insertions(+), 62 deletions(-)
+
+## Diff
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 1e00f30..c71849d 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -1,31 +1,31 @@
+ # HANDOFF
+ 
+-**Date:** 2026-07-29
+-**Branch:** `main` (3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать) — последний коммит `9ff5ac0` membership/guest-join implementation plan (2026-07-29).
++**Date:** 2026-07-29 (вечер, батч 2 membership/guest-join)
++**Branch:** `phase-1-membership-guest-join` (6 коммитов поверх `main`: батч 1 — `3279301` SDK-схемы, `e4d8b64` конфиг §4; батч 2 — `6ec1277` схема membership + код/политика, `46363d0` fix классификатора коллизии, `60ee3f6` createGuest + ORGANIZER-membership; `main` сам на 3 коммита впереди `origin/main`, push — решение владельца; untracked `AGENTS.md` — не сессионный, не трогать).
+ 
+-**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. **Следующий срез выбран: Membership / guest-join** (REQ-ID-002/003/006/011/013) — дизайн одобрен по секциям, план написан и закоммичен (`docs/sessions/2026-07-29-membership-guest-join-{design,implementation-plan}.md`). **Исполнение — subagent-driven в новой сессии** (решение владельца 2026-07-29). Этап продукта — MVP. Метод — AIDD / Specification-Driven.
++**Состояние фазы 1.** SDK contract core, сервис регистрации манифеста, Room lifecycle, Identity minimal seam, Lifecycle-эмит в лог и appSettings write path — завершены и слиты в `main`. Срез **Membership / guest-join** (REQ-ID-002/003/006/011/013) исполняется subagent-driven по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md`, разбитому на 3 батча (решение владельца 2026-07-29, один батч на сессию): **батч 1 (Tasks 1–2) и батч 2 (Tasks 3–4) — COMPLETE**, ревью чистые (батч 2 — после одного fix-раунда на Task 3); батч 3 (Tasks 5–6 + финальное whole-branch ревью ветки) — в новой сессии. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+ 
+ ## Как войти в контекст за одно чтение
+ 
+ 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
+-2. **`.superpowers/sdd/progress.md` — леджер исполнения планов** (все шесть срезов). Читать после CLAUDE.md. Задачи COMPLETE — сделаны, не пере-диспатчить. Леджера нет в git (`.superpowers/` игнорируется) — он существует только на этой машине; `git clean -fdx` уничтожит.
++2. **`.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — леджер текущего среза.** Tasks 1–4 COMPLETE, ревью чистые — не пере-диспатчить. Резюм: Task 5. (Старый леджер прежних срезов — `.superpowers/sdd/progress.md`.) Леджер не в git (`.superpowers/` игнорируется) — существует только на этой машине; `git clean -fdx` уничтожит.
+ 3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
+ 4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
+ 5. `docs/sessions/2026-07-23-appsettings-write-path-design.md` — образец свежего дизайна среза (§0 — решения владельца, §5 — post-lock re-read, §9 — швы).
+ 6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
+ 
+ Исполненные планы (sdk-contract-core, app-registry, room-lifecycle, identity-minimal-seam, realtime-log-lifecycle-emit, appsettings-write-path, их дизайн-доки) читать только при разборе истории — их работа в коммитах.
+ 
+ ## Следующее действие
+ 
+-**Исполнение среза Membership / guest-join** по плану `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (6 задач: SDK-схемы → конфиг → миграция+код комнаты → IdentityService+organizer-membership → join+лимиты → wiring+гейты+boot) через superpowers:subagent-driven-development — режим подтверждён владельцем 2026-07-29. Дизайн: `docs/sessions/2026-07-29-membership-guest-join-design.md` (§1 — решения владельца; controller-notes в шапке плана — обязательное чтение исполнителем).
++**Батч 3 среза Membership / guest-join — Tasks 5–6 в новой сессии** (subagent-driven, режим тот же) **+ финальное whole-branch ревью ветки**: `JoinRateLimiter` + `MembershipService.join` с лимитами и единообразным отказом, затем экспорты/wiring приложения, полные гейты и живой boot с 6 миграциями. План: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — обязательное чтение: depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности). Леджер резюма — см. пункт 2 выше. Интерфейсы, готовые для батча 3: `roomJoinPolicySchema`/`RoomJoinPolicy`, `displayNameSchema` (SDK); `APP_CONFIG`/`ConfigModule`/`AppConfig` (`3279301`/`e4d8b64`); Prisma-схема `membership` (модель `Membership`, enum `MemberRole`, частичный индекс `Membership_single_organizer_key`), `Room.code`/`Room.joinPolicy`, `Identity.displayName` (миграция `20260729164500_membership_guest_join`, commit `6ec1277`); `IdentityService.createGuest(displayName, tx?)`, `MembershipService.createOrganizerMembership(tx, roomId, identityId)`, `RoomService.create(organizerId, joinPolicy?)` — 5-аргументный конструктор (commit `60ee3f6`). Классификатор коллизии кода матчит P2010-обёртку (commit `46363d0`) — см. долгоживущие ограничения.
+ 
+ **Follow-up пакеты, подбираемые будущими планами явно:**
+ 
+ **Для следующего среза, трогающего configure/app-registry** (из финального ревью appSettings, ~15 строк суммарно):
+ - guard в `configure` на `settings === undefined || settings === null` → `AppSettingsInvalidError` (сейчас: permissive-схема + null даёт сырую P2011 от CHECK, а re-configure с `undefined` молча оставляет stale settings под новым пином; гейт активации ловит до эмита, но отказ нетипизирован);
+ - `ValidateFunction` импортировать из `ajv/dist/2020`, а не из `ajv` (type-only косметика);
+ - race-тест configure-vs-activate со второй версией манифеста (quiz@2) — сейчас обе стороны гонки пинят quiz@1, и ассерт «пин == строке» проходит тривиально;
+ - при появлении транспорта: зафиксировать в контрактных доках допущение «settings — не-null JSON value».
+ 
+ **Для первого реального identity-пишущего потока** (guest-join / OAuth), со среза identity — **бóльшая часть подобрана планом membership/guest-join** (presence-тест индекса с UNIQUE+колонкой, кросс-kind кейс, косметика harness'а и jest-конфига — Task 3 плана). Остаётся на транспортный срез:
+@@ -39,62 +39,64 @@
+ 
+ **Forward-обязательство** (не забыть при первом же выходе наружу): первый потребитель, отдающий `ContractError`/доменную ошибку по HTTP/Socket.io, обязан идти через типизированный код без стектрейса, не `err.message` (REQ-SEC-006).
+ 
+ ## Два гейта над фазами
+ 
+ 1. **Юрист** — до первого события с посторонними или призами. Список вопросов готов (`docs/legal/questions-for-lawyer.md`). Блокирует старт работы с реальными PII, не блокирует реализацию.
+ 2. **Первое живое событие** — до тяжёлых вложений в фазу 3 (rewards/лотерея).
+ 
+ ## Долгоживущие ограничения, введённые срезами
+ 
+-- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`. Любое изменение — только новой миграцией.
++- **Замороженные миграции:** `20260718061612_room_lifecycle`, `20260722151900_identity_seam`, `20260722153952_room_organizer_fk`, `20260722180147_realtime_log_event`, `20260723090841_room_app_config`, `20260729164500_membership_guest_join`. Любое изменение — только новой миграцией.
+ - **Конвенция порядка блокировок:** advisory lock комнаты — всегда leaf-most; транзакция, захватившая его, не должна после этого писать в `room."Room"` (порядок безопасен: `transition` берёт row-lock до advisory lock, эмит — последним шагом; `commitCoreEvent` не трогает Room; `configure` advisory lock не берёт и цикла не создаёт — проверено финальным ревью appSettings).
+ - **Prisma 7.8 adapter-pg ловушка:** `$queryRaw` не десериализует `void`-возвращающие выражения (`pg_advisory_xact_lock`) — использовать `$executeRaw`. Учитывать при написании будущих планов.
++- **Prisma 7.8 adapter-pg: форма ошибок raw-запросов.** Падающий `$queryRaw` оборачивается в `PrismaClientKnownRequestError` с кодом `P2010`; SQLSTATE сидит внутри message (``Raw query failed. Code: `23505`. Message: ...``) и в `meta.driverAdapterError.cause.originalCode`. Топ-левел `err.code` НИКОГДА не равен SQLSTATE — матчить как `code === 'P2010'` + подстроки в message (прецедент: `isRoomCodeCollision`, commit `46363d0`). Также: `$queryRaw` возвращает сырое DB-значение enum (`'guests'`), а не Prisma-имя из `@map` (`'GUESTS'`) — клиентский `@map` применяет только десериализация клиента; при `RETURNING *` из raw INSERT нужен re-read через клиент (`findUniqueOrThrow`), как в `insertRoom`.
+ - **Инвариант «change both or neither»:** предикат `kind = 'REGISTERED' AND deletedAt IS NULL` живёт в двух местах — частичный индекс `"Identity_registered_email_key"` (миграция identity_seam) и guarded INSERT в `RoomService.create`. Менять только вместе (design §7).
+ - **Хост-порт 5432 занят чужим контейнером `lt-pg`** (не проектным, не трогать). Authoring-контейнер миграций (`mm-migrate`, эфемерный) публиковать на свободный порт (в срезах использовались 55432/55433) и подставлять его в `DATABASE_URL`.
+ - **`prisma migrate dev` не всегда регенерирует клиент; явный `pnpm exec prisma generate` требует DATABASE_URL** и cwd = корень репозитория (обнаружение `prisma.config.ts`).
+ - **`packages/core/src/testing/postgres.testcontainer.ts` — переиспользуемый паттерн ядра.** Все будущие DB-тесты пойдут через него, поэтому его острые углы наследуются: он мутирует глобальный `process.env.DATABASE_URL` и не восстанавливает его (безопасно только при `maxWorkers: 1`), и требует cwd = корень репозитория для обнаружения `prisma.config.ts`.
+ - **Прогон интеграционной ланы поднимает контейнеры Postgres** (по одному на describe с `startTestDb`; ~8 с локально на файл, дольше на холодном CI-раннере). Docker Desktop должен быть запущен.
+ - **Jest CLI:** форма `pnpm --filter @mymozhem/core test:int -- -t "..."` миспарсится (`-t` становится testPathPattern) — рабочая форма без `--`: `test:int -t "..."`. В планах писать сразу правильно.
+ 
+ ## Отложенные follow-up (не гейтят; полный список с обоснованиями — в леджере)
+ 
+ Самое ценное из накопленного:
+ 
+ - **`updateManyAndReturn` доступен на закреплённой Prisma 7.8.0** — схлопнет 3 запроса в 2 в обеих мутациях `RoomService` (transition/softDelete) и попутно уберёт дублирование хвоста `if (count===0) throw` + re-read. Проверено ревьюером, не гипотеза. **Осторожно:** `transition` — транзакция с побочным эмитом; применение updateManyAndReturn не должно разорвать атомарность «UPDATE + лог». После appSettings-среза в transition есть ещё и post-lock re-read — его роль (консистентный снимок пина) не спутать с рефакторингом. Аналогичный 2-запросный паттерн и в `configure` — тот же кандидат.
+ - **Нет гейта на дрейф миграций.** `prisma migrate diff --from-migrations` здесь непригоден: Prisma 7.8 требует `datasource.shadowDatabaseUrl` в `prisma.config.ts`, которого нет. Стоит завести настоящий гейт, пока миграций мало.
+ - **Общая рекурсивная `jsonValueSchema`** для payload в `log-event`/`projected-event` — `z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002.
+ - **Комментарий-шов о конвенции порядка блокировок в `event-log.service.ts`** (advisory lock — всегда leaf-most) — добавить в ближайшем срезе, трогающем файл, без отдельного коммита (appSettings-срез файл не трогал).
+ - Косметика: breadcrumb в `schema.prisma` о существовании рукописного CHECK; ассерт ортогональности soft-delete добавлен только для ветки CANCELLED (из трёх удаляемых статусов).
+ 
+ ## Осталось недоделанным
+ 
+-- **Исполнение плана membership/guest-join** — subagent-driven в новой сессии (см. «Следующее действие»).
++- **Батч 3 плана membership/guest-join** (Tasks 5–6 + финальное whole-branch ревью ветки) — subagent-driven, новая сессия (см. «Следующее действие»).
+ - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
+ 
+-## Session 2026-07-29 (дизайн + план среза membership/guest-join)
++## Session 2026-07-29, вечер (батч 2 membership/guest-join: Tasks 3–4)
+ 
+ ### Что сделано
+ 
+-- Выбран следующий срез фазы 1 (решение владельца): **Membership / guest-join** — код комнаты, политика входа, членство, лимиты входа.
+-- Дизайн пройден через superpowers:brainstorming по секциям, одобрен: `docs/sessions/2026-07-29-membership-guest-join-design.md`. Решения владельца (§1 дизайна): объём «join + лимиты» (kick и TTL — отдельные срезы); `displayName` на Identity; ORGANIZER-membership при create; rate-limit in-memory; `ROOM_PARTICIPANT_LIMIT_REACHED` отдельным кодом; гонка count-then-insert на лимите принята.
+-- План написан через superpowers:writing-plans, 6 задач: `docs/sessions/2026-07-29-membership-guest-join-implementation-plan.md` (controller-notes в шапке — depcruise не меняется, алфавит 31 символ, заявленная замена теста атомарности, нетестируемая коллизия кода).
+-- Режим исполнения: **subagent-driven в новой сессии** (решение владельца) — эта сессия код не писала.
++- **Task 3 (миграция + код/политика в create)** — COMPLETE, commits `6ec1277` + fix `46363d0`. TDD RED→GREEN, unit 80/80, int 59/59, lint+typecheck чисто. Ревью: 1 Important (классификатор коллизии матчил несуществующую форму ошибки — топ-левел `23505` вместо P2010-обёртки) → fix-раунд 1: классификатор исправлен + 9 юнит-тестов на форму ошибки; re-review PASS. Отклонения, принятые ревью: re-read через `findUniqueOrThrow` (raw `$queryRaw` не применяет `@map` enum), ассерт `lower(email)` без кавычек (депарс Postgres), вынужденные правки двух старых raw-SQL тестов (NOT NULL `code`) и call-site в event-log.
++- **Task 4 (createGuest + ORGANIZER-membership в транзакции create)** — COMPLETE, commit `60ee3f6`. TDD RED→GREEN, int 63/63, unit 80/80, lint+typecheck чисто. Ревью: spec ✅, Approved, 0 Critical/Important, 2 Minor (в roll-up леджера). Все 3 call-site `new RoomService(` обновлены под 5-аргументный конструктор.
++- Миграция `20260729164500_membership_guest_join` применена и заморожена (рукописный частичный индекс `Membership_single_organizer_key`, REQ-DEV-006).
++- Follow-up пакет identity-среза подобран планом (presence-апгрейд + кросс-kind тест) — исполнен в Task 3.
++- Pre-flight конфликтов не было (скан чист ещё с батча 1); контроллер-ноутс плана сработали как заявлено.
+ 
+ ### Коммиты этой сессии
+ 
+-- `be62c90` docs(sessions): membership/guest-join slice design (REQ-ID-002/003/006/011/013)
+-- `9ff5ac0` docs(sessions): membership/guest-join implementation plan
+-- плюс этот handoff-коммит; все три впереди `origin/main`, push — решение владельца.
++- `6ec1277` feat(core): membership schema + room code & join policy in create (REQ-ID-013, REQ-ID-002, REQ-ID-011)
++- `46363d0` fix(core): match P2010-wrapped 23505 in room code collision classifier (REQ-ID-013)
++- `60ee3f6` feat(core): IdentityService.createGuest + organizer membership on room create (REQ-ID-003, REQ-ID-011)
++- плюс handoff-коммит. Всё на ветке `phase-1-membership-guest-join`, не пушено (push — решение владельца).
+ 
+ ### Локальное состояние (не в git)
+ 
+-- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет.
+-- Untracked `AGENTS.md` в корне — не создан этой сессией, содержимое не проверялось, не трогать.
+-- `.superpowers/sdd/` — леджер (`progress.md`) прежних срезов; нового раздела под membership/guest-join пока нет — заведёт исполняющая сессия. Не отслеживается git; `git clean -fdx` уничтожит.
++- Docker Desktop запущен; `lt-pg` на 5432 нетронут; проектных контейнеров нет (`mm-migrate` удалён после authoring'а миграции).
++- Untracked `AGENTS.md` в корне — не трогать.
++- Леджер среза: `.superpowers/sdd/2026-07-29-membership-guest-join-implementation-plan/progress.md` — Tasks 1–4 COMPLETE с разборами ревью и fix-раунда; briefs/reports/диффы ревью рядом. `git clean -fdx` уничтожит.
+ - Внешних side-effects не было (ни push, ни прод-тестов).
+ 
+ ### Осталось недоделанным
+ 
+-- Исполнение плана membership/guest-join — subagent-driven, новая сессия (см. «Следующее действие»).
+-- После исполнения: код-срезы из follow-up пакетов (configure/app-registry, event-commit) остаются на будущие планы.
++- Батч 3 (Tasks 5–6 + финальное ревью ветки) — новая сессия (см. «Следующее действие»).
+ - Юрист — гейт 1 открыт, действие вне агента.
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index b3220e1..0e95664 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,13 +1,23 @@
+ import { Module } from '@nestjs/common';
+ import {
+   AppRegistryModule,
+   HealthModule,
++  IdentityModule,
++  MembershipModule,
+   PrismaModule,
+   RealtimeModule,
+   RoomModule,
+ } from '@mymozhem/core';
+ 
+ @Module({
+-  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule, RealtimeModule],
++  imports: [
++    PrismaModule,
++    HealthModule,
++    AppRegistryModule,
++    RoomModule,
++    IdentityModule,
++    MembershipModule,
++    RealtimeModule,
++  ],
+ })
+ export class AppModule {}
+diff --git a/apps/server/test/health.e2e-spec.ts b/apps/server/test/health.e2e-spec.ts
+index a7abd2c..79d7abd 100644
+--- a/apps/server/test/health.e2e-spec.ts
++++ b/apps/server/test/health.e2e-spec.ts
+@@ -1,20 +1,23 @@
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+ import { PrismaService } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ 
+ describe('Health (e2e)', () => {
+   let app: NestFastifyApplication;
+   const prismaStub = { isHealthy: jest.fn(), onModuleInit: jest.fn(), onModuleDestroy: jest.fn() };
+ 
+   beforeAll(async () => {
++    // AppModule now includes ConfigModule (REQ-OPS-003): env is validated at boot.
++    // PrismaService is stubbed below, so a placeholder URL is sufficient.
++    process.env.DATABASE_URL ??= 'postgresql://stub:stub@localhost:5432/stub';
+     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+       .overrideProvider(PrismaService)
+       .useValue(prismaStub)
+       .compile();
+     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+     await app.init();
+     await app.getHttpAdapter().getInstance().ready();
+   });
+ 
+   afterAll(async () => {
+diff --git a/packages/core/jest.integration.config.js b/packages/core/jest.integration.config.js
+index c642720..6c11cff 100644
+--- a/packages/core/jest.integration.config.js
++++ b/packages/core/jest.integration.config.js
+@@ -1,11 +1,11 @@
+ // Integration lane: DB-backed tests (*.int-spec.ts) against an ephemeral
+ // Testcontainers Postgres. Separate from unit `jest.config.js` (*.spec.ts) so unit
+ // runs stay fast and DB-free. `.int-spec.ts` does NOT match the unit `**/*.spec.ts`.
+ module.exports = {
+   preset: 'ts-jest',
+   testEnvironment: 'node',
+   roots: ['<rootDir>/src'],
+   testMatch: ['**/*.int-spec.ts'],
+   testTimeout: 120000, // container pull + start
+-  maxWorkers: 1, // one shared container per file; avoid parallel DB contention
++  maxWorkers: 1, // one container per describe block (startTestDb); avoid parallel DB contention
+ };
+diff --git a/packages/core/prisma/migrations/20260729164500_membership_guest_join/migration.sql b/packages/core/prisma/migrations/20260729164500_membership_guest_join/migration.sql
+new file mode 100644
+index 0000000..64f277e
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260729164500_membership_guest_join/migration.sql
+@@ -0,0 +1,51 @@
++/*
++  Warnings:
++
++  - A unique constraint covering the columns `[code]` on the table `Room` will be added. If there are existing duplicate values, this will fail.
++  - Added the required column `code` to the `Room` table without a default value. This is not possible if the table is not empty.
++
++*/
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "membership";
++
++-- CreateEnum
++CREATE TYPE "room"."RoomJoinPolicy" AS ENUM ('guests', 'registered', 'invite_only');
++
++-- CreateEnum
++CREATE TYPE "membership"."MemberRole" AS ENUM ('ORGANIZER', 'MODERATOR', 'PARTICIPANT', 'SPECTATOR');
++
++-- AlterTable
++ALTER TABLE "identity"."Identity" ADD COLUMN     "displayName" TEXT;
++
++-- AlterTable
++ALTER TABLE "room"."Room" ADD COLUMN     "code" TEXT NOT NULL,
++ADD COLUMN     "joinPolicy" "room"."RoomJoinPolicy" NOT NULL DEFAULT 'guests';
++
++-- CreateTable
++CREATE TABLE "membership"."Membership" (
++    "id" UUID NOT NULL,
++    "roomId" UUID NOT NULL,
++    "identityId" UUID NOT NULL,
++    "role" "membership"."MemberRole" NOT NULL,
++    "joinedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "Membership_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "Membership_roomId_identityId_key" ON "membership"."Membership"("roomId", "identityId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "Room_code_key" ON "room"."Room"("code");
++
++-- AddForeignKey
++ALTER TABLE "membership"."Membership" ADD CONSTRAINT "Membership_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "room"."Room"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "membership"."Membership" ADD CONSTRAINT "Membership_identityId_fkey" FOREIGN KEY ("identityId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- Рукописная часть (практика REQ-DEV-006): ровно один ORGANIZER-membership на
++-- комнату (design §2). PARTICIPANT/SPECTATOR/MODERATOR не ограничиваются.
++CREATE UNIQUE INDEX "Membership_single_organizer_key"
++  ON "membership"."Membership" ("roomId")
++  WHERE "role" = 'ORGANIZER';
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index bec810f..4f8c6d1 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,73 +1,88 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
+-  schemas  = ["identity", "realtime", "room"]
++  schemas  = ["identity", "membership", "realtime", "room"]
+ }
+ 
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+ 
++// REQ-ID-002: join policy — атрибут комнаты, дефолт guests (ADR-004). Значения в БД —
++// lowercase-строки спеки (прецедент EventVisibility); Prisma-имена — как у MemberRole.
++enum RoomJoinPolicy {
++  GUESTS      @map("guests")
++  REGISTERED  @map("registered")
++  INVITE_ONLY @map("invite_only")
++
++  @@schema("room")
++}
++
+ // Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
+ // in room-state-machine.ts (REQ-RT-005). organizerId is a declarative FK to
+ // identity.id; the REGISTERED invariant (REQ-ID-005) is enforced by the guarded
+ // INSERT in RoomService.create, not by the FK itself.
+ // Конфигурация приложения (REQ-RT-004): тройка (appId, manifestVersion, appSettings)
+ // атомарна — либо все NULL, либо все заданы (CHECK "Room_config_triple", рукописная
+ // часть миграции room_app_config). Единственный путь записи — RoomService.configure;
+ // заморозка — предикат status = 'DRAFT' в его guarded UPDATE, не флаг.
+ model Room {
+-  id              String     @id @default(uuid()) @db.Uuid
+-  organizer       Identity   @relation(fields: [organizerId], references: [id])
+-  organizerId     String     @db.Uuid
+-  status          RoomStatus @default(DRAFT)
++  id              String         @id @default(uuid()) @db.Uuid
++  organizer       Identity       @relation(fields: [organizerId], references: [id])
++  organizerId     String         @db.Uuid
++  status          RoomStatus     @default(DRAFT)
++  code            String         @unique
++  joinPolicy      RoomJoinPolicy @default(GUESTS)
+   appId           String?
+   manifestVersion Int?
+   appSettings     Json?
+   deletedAt       DateTime?
+-  createdAt       DateTime   @default(now())
+-  updatedAt       DateTime   @updatedAt
++  createdAt       DateTime       @default(now())
++  updatedAt       DateTime       @updatedAt
+   logEvents       LogEvent[]
++  memberships     Membership[]
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+   REGISTERED
+   GUEST
+ 
+   @@schema("identity")
+ }
+ 
+ // Identity — core CRUD entity (ADR-004: single table, kind REGISTERED | GUEST).
+ // deletedAt marks anonymization (REQ-ID-014: PII zeroed, id kept — never physical
+ // delete while FKs reference it). email is nullable; uniqueness among live
+ // REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+ // NOT a Prisma preview feature.
+ model Identity {
+-  id        String       @id @default(uuid()) @db.Uuid
+-  kind      IdentityKind
+-  email     String?
+-  deletedAt DateTime?
+-  createdAt DateTime     @default(now())
+-  updatedAt DateTime     @updatedAt
+-  rooms     Room[]
+-  logEvents LogEvent[]
++  id          String       @id @default(uuid()) @db.Uuid
++  kind        IdentityKind
++  email       String?
++  displayName String?
++  deletedAt   DateTime?
++  createdAt   DateTime     @default(now())
++  updatedAt   DateTime     @updatedAt
++  rooms       Room[]
++  logEvents   LogEvent[]
++  memberships Membership[]
+ 
+   @@schema("identity")
+ }
+ 
+ enum EventVisibility {
+   PUBLIC         @map("public")
+   ORGANIZER      @map("organizer")
+   MODULE_PRIVATE @map("module-private")
+ 
+   @@schema("realtime")
+@@ -86,10 +101,36 @@ model LogEvent {
+   actorId       String?         @db.Uuid
+   visibility    EventVisibility
+   schemaVersion Int
+   recordedAt    DateTime        @default(now())
+   room          Room            @relation(fields: [roomId], references: [id], onDelete: Restrict)
+   actor         Identity?       @relation(fields: [actorId], references: [id], onDelete: Restrict)
+ 
+   @@id([roomId, seq])
+   @@schema("realtime")
+ }
++
++enum MemberRole {
++  ORGANIZER
++  MODERATOR
++  PARTICIPANT
++  SPECTATOR
++
++  @@schema("membership")
++}
++
++// Membership — связь identity с комнатой, несущая роль (REQ-ID-011). CRUD-домен
++// (ADR-005): изменения членства в лог не пишутся. ORGANIZER-membership создаётся в
++// транзакции RoomService.create; единственность организатора — частичный индекс
++// "Membership_single_organizer_key" (рукописная часть миграции, REQ-DEV-006).
++model Membership {
++  id         String    @id @default(uuid()) @db.Uuid
++  room       Room      @relation(fields: [roomId], references: [id], onDelete: Restrict)
++  roomId     String    @db.Uuid
++  identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Restrict)
++  identityId String    @db.Uuid
++  role       MemberRole
++  joinedAt   DateTime  @default(now())
++
++  @@unique([roomId, identityId])
++  @@schema("membership")
++}
+diff --git a/packages/core/src/config/config.module.ts b/packages/core/src/config/config.module.ts
+new file mode 100644
+index 0000000..d21ff7a
+--- /dev/null
++++ b/packages/core/src/config/config.module.ts
+@@ -0,0 +1,9 @@
++import { Module } from '@nestjs/common';
++import { APP_CONFIG } from './config.tokens';
++import { loadConfig } from './config.schema';
++
++@Module({
++  providers: [{ provide: APP_CONFIG, useFactory: () => loadConfig(process.env) }],
++  exports: [APP_CONFIG],
++})
++export class ConfigModule {}
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 78958b5..0aa1ef0 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -15,11 +15,39 @@ describe('loadConfig', () => {
+     expect(cfg.PORT).toBe(8080);
+   });
+ 
+   it('throws when DATABASE_URL is missing', () => {
+     expect(() => loadConfig({} as NodeJS.ProcessEnv)).toThrow(/DATABASE_URL/);
+   });
+ 
+   it('throws when PORT is out of range', () => {
+     expect(() => loadConfig({ ...base, PORT: '70000' } as NodeJS.ProcessEnv)).toThrow(/PORT/);
+   });
++
++  it('applies §4 defaults (REQ-ID-006, REQ-ID-013)', () => {
++    const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
++    expect(cfg.ROOM_CODE_MIN_LEN).toBe(8);
++    expect(cfg.ROOM_PARTICIPANT_LIMIT).toBe(500);
++    expect(cfg.JOIN_RATE_LIMIT_IP).toBe(20);
++  });
++
++  it.each([
++    ['ROOM_CODE_MIN_LEN', '5'],
++    ['ROOM_PARTICIPANT_LIMIT', '0'],
++    ['ROOM_PARTICIPANT_LIMIT', '100001'],
++    ['JOIN_RATE_LIMIT_IP', '0'],
++  ] as const)('throws when %s is out of range (%s)', (key, value) => {
++    expect(() => loadConfig({ ...base, [key]: value } as NodeJS.ProcessEnv)).toThrow(
++      new RegExp(key),
++    );
++  });
++
++  it('coerces §4 params from strings', () => {
++    const cfg = loadConfig({
++      ...base,
++      ROOM_CODE_MIN_LEN: '10',
++      JOIN_RATE_LIMIT_IP: '5',
++    } as NodeJS.ProcessEnv);
++    expect(cfg.ROOM_CODE_MIN_LEN).toBe(10);
++    expect(cfg.JOIN_RATE_LIMIT_IP).toBe(5);
++  });
+ });
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index baa71fa..4c305cf 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -1,18 +1,24 @@
+ import { z } from 'zod';
+ 
+-// Startup config validation mechanism (REQ-OPS-003). Phase 0 keeps the surface
+-// minimal; §4 parameters arrive with their own phases.
++// Startup config validation mechanism (REQ-OPS-003). §4 parameters arrive with the
++// phases that need them; ranges are the hard bounds of the spec's §4 table.
+ export const configSchema = z.object({
+   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+   DATABASE_URL: z.string().min(1),
++  // REQ-ID-013: room code length (§4: default 8, min 6).
++  ROOM_CODE_MIN_LEN: z.coerce.number().int().min(6).default(8),
++  // REQ-ID-006: max PARTICIPANT memberships per room (§4: default 500, 1..100 000).
++  ROOM_PARTICIPANT_LIMIT: z.coerce.number().int().min(1).max(100_000).default(500),
++  // REQ-ID-006: join attempts per minute per IP (§4: default 20, ≥ 1).
++  JOIN_RATE_LIMIT_IP: z.coerce.number().int().min(1).default(20),
+ });
+ 
+ export type AppConfig = z.infer<typeof configSchema>;
+ 
+ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
+   const parsed = configSchema.safeParse(env);
+   if (!parsed.success) {
+     const detail = parsed.error.issues
+       .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+       .join('; ');
+diff --git a/packages/core/src/config/config.tokens.ts b/packages/core/src/config/config.tokens.ts
+new file mode 100644
+index 0000000..e1730cc
+--- /dev/null
++++ b/packages/core/src/config/config.tokens.ts
+@@ -0,0 +1,3 @@
++// DI token for the validated startup config (REQ-OPS-003). Services inject AppConfig;
++// nothing outside PrismaService reads process.env directly.
++export const APP_CONFIG = Symbol('APP_CONFIG');
+diff --git a/packages/core/src/identity/identity-schema.int-spec.ts b/packages/core/src/identity/identity-schema.int-spec.ts
+index 845ccc9..b3212ff 100644
+--- a/packages/core/src/identity/identity-schema.int-spec.ts
++++ b/packages/core/src/identity/identity-schema.int-spec.ts
+@@ -17,25 +17,35 @@ describe('Identity registered-email partial unique index', () => {
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity" CASCADE');
+   });
+ 
+   it('exists in the migrated database (REQ-DEV-006 автотест наличия)', async () => {
+     const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
+       SELECT indexdef FROM pg_indexes
+       WHERE schemaname = 'identity' AND indexname = 'Identity_registered_email_key'
+     `;
+     expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
++    // Postgres deparses the lowercase identifier без кавычек: миграция пишет
++    // lower("email"), pg_indexes отдаёт lower(email).
++    expect(rows[0].indexdef).toContain('lower(email)');
+     expect(rows[0].indexdef).toMatch(/lower/i);
+     expect(rows[0].indexdef).toContain('REGISTERED');
+     expect(rows[0].indexdef).toMatch(/deletedAt" IS NULL/i);
+   });
+ 
++  it('allows a GUEST row with the email of a live REGISTERED row', async () => {
++    await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
++    await db.prisma.identity.create({ data: { kind: 'GUEST', email: 'a@b.c' } });
++    expect(await db.prisma.identity.count()).toBe(2);
++  });
++
+   it('rejects a second live REGISTERED row with the same email', async () => {
+     await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
+     await expect(
+       db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } }),
+     ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
+   });
+ 
+   it('is case-insensitive (lower() in the index)', async () => {
+     await db.prisma.identity.create({ data: { kind: 'REGISTERED', email: 'a@b.c' } });
+     await expect(
+diff --git a/packages/core/src/identity/identity.module.ts b/packages/core/src/identity/identity.module.ts
+new file mode 100644
+index 0000000..379f1ad
+--- /dev/null
++++ b/packages/core/src/identity/identity.module.ts
+@@ -0,0 +1,10 @@
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { IdentityService } from './identity.service';
++
++@Module({
++  imports: [PrismaModule],
++  providers: [IdentityService],
++  exports: [IdentityService],
++})
++export class IdentityModule {}
+diff --git a/packages/core/src/identity/identity.service.int-spec.ts b/packages/core/src/identity/identity.service.int-spec.ts
+new file mode 100644
+index 0000000..0f2ac14
+--- /dev/null
++++ b/packages/core/src/identity/identity.service.int-spec.ts
+@@ -0,0 +1,38 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { IdentityService } from './identity.service';
++
++// REQ-ID-003: гость создаётся по коду комнаты и имени; этот сервис — первый
++// identity-пишущий поток (identity seam design §6).
++describe('IdentityService.createGuest (REQ-ID-003)', () => {
++  let db: TestDb;
++  let service: IdentityService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new IdentityService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE identity."Identity" CASCADE');
++  });
++
++  it('creates a GUEST identity with a trimmed display name', async () => {
++    const guest = await service.createGuest('  Саша  ');
++    expect(guest.kind).toBe('GUEST');
++    expect(guest.displayName).toBe('Саша');
++    expect(guest.email).toBeNull();
++    expect(guest.deletedAt).toBeNull();
++  });
++
++  it('rejects an empty-after-trim name', async () => {
++    await expect(service.createGuest('   ')).rejects.toThrow();
++  });
++
++  it('rejects a name over 40 chars', async () => {
++    await expect(service.createGuest('x'.repeat(41))).rejects.toThrow();
++  });
++});
+diff --git a/packages/core/src/identity/identity.service.ts b/packages/core/src/identity/identity.service.ts
+new file mode 100644
+index 0000000..0d37926
+--- /dev/null
++++ b/packages/core/src/identity/identity.service.ts
+@@ -0,0 +1,23 @@
++import { Injectable } from '@nestjs/common';
++import type { Identity, Prisma } from '@prisma/client';
++import { displayNameSchema } from '@mymozhem/sdk';
++import { PrismaService } from '../prisma/prisma.service';
++
++@Injectable()
++export class IdentityService {
++  constructor(private readonly prisma: PrismaService) {}
++
++  // REQ-ID-003: a guest is created by room code + name. This is the first
++  // identity-writing flow — the identity seam deferred this service to exactly here
++  // (design §6 of the identity slice). displayName is validated by the SDK contract
++  // schema; a ZodError propagates untyped — mapping it is the first transport's job
++  // (REQ-SEC-006). `tx` lets callers join their transaction (guest join is atomic,
++  // membership design §3).
++  async createGuest(
++    displayName: string,
++    tx: Prisma.TransactionClient = this.prisma,
++  ): Promise<Identity> {
++    const name = displayNameSchema.parse(displayName);
++    return tx.identity.create({ data: { kind: 'GUEST', displayName: name } });
++  }
++}
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index a4eeba6..e5ba07e 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -1,15 +1,23 @@
+ export * from './config/config.schema';
++export * from './config/config.tokens';
++export * from './config/config.module';
+ export * from './prisma/prisma.service';
+ export * from './prisma/prisma.module';
+ export * from './health/health.controller';
+ export * from './health/health.module';
+ export * from './app-registry/app-registry';
+ export * from './app-registry/app-registry.tokens';
+ export * from './app-registry/app-registry.service';
+ export * from './app-registry/app-registry.module';
+ export * from './room/room.errors';
+ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
++export * from './identity/identity.service';
++export * from './identity/identity.module';
++export * from './membership/membership.errors';
++export * from './membership/join-rate-limiter';
++export * from './membership/membership.service';
++export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
+ export * from './realtime/realtime.module';
+diff --git a/packages/core/src/membership/join-rate-limiter.spec.ts b/packages/core/src/membership/join-rate-limiter.spec.ts
+new file mode 100644
+index 0000000..b9885fb
+--- /dev/null
++++ b/packages/core/src/membership/join-rate-limiter.spec.ts
+@@ -0,0 +1,27 @@
++import { JoinRateLimiter } from './join-rate-limiter';
++
++describe('JoinRateLimiter (REQ-ID-006)', () => {
++  it('allows up to the limit within a window, then refuses', () => {
++    const now = { t: 1_000_000 };
++    const limiter = new JoinRateLimiter(2, 60_000, () => now.t);
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(false);
++  });
++
++  it('tracks IPs independently', () => {
++    const limiter = new JoinRateLimiter(1, 60_000);
++    expect(limiter.tryAcquire('1.1.1.1')).toBe(true);
++    expect(limiter.tryAcquire('2.2.2.2')).toBe(true);
++    expect(limiter.tryAcquire('1.1.1.1')).toBe(false);
++  });
++
++  it('resets after the window elapses', () => {
++    const now = { t: 1_000_000 };
++    const limiter = new JoinRateLimiter(1, 60_000, () => now.t);
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(false);
++    now.t += 60_001;
++    expect(limiter.tryAcquire('1.2.3.4')).toBe(true);
++  });
++});
+diff --git a/packages/core/src/membership/join-rate-limiter.ts b/packages/core/src/membership/join-rate-limiter.ts
+new file mode 100644
+index 0000000..5769974
+--- /dev/null
++++ b/packages/core/src/membership/join-rate-limiter.ts
+@@ -0,0 +1,31 @@
++// Per-IP fixed-window limiter for room-join attempts (REQ-ID-006, join_rate_limit_ip).
++// State lives in the provider instance field, NOT module-level (REQ-CORE-004's eslint
++// gate passes); a single replica (REQ-OPS-005) makes in-memory correct; a restart
++// resets the 60s window — acceptable (design §4). The phase-4 global backoff layer
++// (REQ-ID-019, amendment v1.3) will sit behind this same interface.
++// Map growth: one entry per distinct IP per process lifetime — negligible at MVP scale.
++export class JoinRateLimiter {
++  private readonly attempts = new Map<string, { windowStart: number; count: number }>();
++
++  constructor(
++    private readonly limit: number,
++    private readonly windowMs: number = 60_000,
++    private readonly now: () => number = () => Date.now(),
++  ) {}
++
++  // Records the attempt and returns whether it is allowed. Called BEFORE any room
++  // lookup (design §3): brute-force attempts against wrong codes accumulate too.
++  tryAcquire(ip: string): boolean {
++    const now = this.now();
++    const entry = this.attempts.get(ip);
++    if (!entry || now - entry.windowStart >= this.windowMs) {
++      this.attempts.set(ip, { windowStart: now, count: 1 });
++      return true;
++    }
++    if (entry.count >= this.limit) {
++      return false;
++    }
++    entry.count += 1;
++    return true;
++  }
++}
+diff --git a/packages/core/src/membership/membership-schema.int-spec.ts b/packages/core/src/membership/membership-schema.int-spec.ts
+new file mode 100644
+index 0000000..97988d4
+--- /dev/null
++++ b/packages/core/src/membership/membership-schema.int-spec.ts
+@@ -0,0 +1,84 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++
++// REQ-ID-011 + REQ-DEV-006: таблица membership и частичный индекс единственного
++// организатора существуют и ведут себя как специфицировано (design §2).
++describe('Membership schema', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(
++      'TRUNCATE TABLE membership."Membership", room."Room" CASCADE',
++    );
++  });
++
++  const createRoom = (code: string) =>
++    db.prisma.room.create({ data: { organizerId: ORG, code } });
++
++  it('single-organizer partial unique index exists (REQ-DEV-006 presence test)', async () => {
++    const rows = await db.prisma.$queryRaw<{ indexdef: string }[]>`
++      SELECT indexdef FROM pg_indexes
++      WHERE schemaname = 'membership' AND indexname = 'Membership_single_organizer_key'
++    `;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].indexdef).toMatch(/^CREATE UNIQUE INDEX/);
++    expect(rows[0].indexdef).toContain('"roomId"');
++    expect(rows[0].indexdef).toMatch(/role = 'ORGANIZER'/);
++  });
++
++  it('enforces one ORGANIZER per room at the database level', async () => {
++    const room = await createRoom('testcode1');
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: ORG, role: 'ORGANIZER' },
++    });
++    await expect(
++      db.prisma.membership.create({
++        data: { roomId: room.id, identityId: guest.id, role: 'ORGANIZER' },
++      }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('allows a second ORGANIZER membership in a DIFFERENT room', async () => {
++    const roomA = await createRoom('testcode1');
++    const roomB = await createRoom('testcode2');
++    await db.prisma.membership.create({
++      data: { roomId: roomA.id, identityId: ORG, role: 'ORGANIZER' },
++    });
++    await db.prisma.membership.create({
++      data: { roomId: roomB.id, identityId: ORG, role: 'ORGANIZER' },
++    });
++    expect(await db.prisma.membership.count()).toBe(2);
++  });
++
++  it('enforces unique(roomId, identityId)', async () => {
++    const room = await createRoom('testcode1');
++    const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
++    await db.prisma.membership.create({
++      data: { roomId: room.id, identityId: guest.id, role: 'PARTICIPANT' },
++    });
++    await expect(
++      db.prisma.membership.create({
++        data: { roomId: room.id, identityId: guest.id, role: 'SPECTATOR' },
++      }),
++    ).rejects.toThrow(/[Uu]nique constraint|duplicate key/);
++  });
++
++  it('enforces unique room codes', async () => {
++    await createRoom('testcode1');
++    await expect(createRoom('testcode1')).rejects.toThrow(
++      /[Uu]nique constraint|duplicate key/,
++    );
++  });
++});
+diff --git a/packages/core/src/membership/membership.errors.ts b/packages/core/src/membership/membership.errors.ts
+new file mode 100644
+index 0000000..cede084
+--- /dev/null
++++ b/packages/core/src/membership/membership.errors.ts
+@@ -0,0 +1,46 @@
++// Core-internal typed domain errors for membership. NOT part of the SDK contract.
++// The first transport maps them to typed responses without stack traces (REQ-SEC-006).
++export const MEMBERSHIP_ERROR_CODES = {
++  ROOM_JOIN_DENIED: 'ROOM_JOIN_DENIED',
++  JOIN_RATE_LIMITED: 'JOIN_RATE_LIMITED',
++  ROOM_PARTICIPANT_LIMIT_REACHED: 'ROOM_PARTICIPANT_LIMIT_REACHED',
++} as const;
++
++export type MembershipErrorCode =
++  (typeof MEMBERSHIP_ERROR_CODES)[keyof typeof MEMBERSHIP_ERROR_CODES];
++
++export class MembershipError extends Error {
++  constructor(
++    readonly code: MembershipErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
++
++// Единообразный отказ входа (REQ-ID-013): ветки «неверный код», «комната удалена»,
++// «терминальный статус», «закрытая политика» свёрнуты в один код — до установления
++// членства ответ не раскрывает ни существование комнаты, ни её политику, ни статус
++// (design §3). Server-side message может быть точным — наружу он не уходит.
++export class RoomJoinDeniedError extends MembershipError {
++  constructor(message: string) {
++    super(MEMBERSHIP_ERROR_CODES.ROOM_JOIN_DENIED, message);
++  }
++}
++
++// Превышен per-IP лимит попыток входа (REQ-ID-006). Отдельный код: он про IP, не про
++// комнату — существование комнаты не раскрывает (design §3).
++export class JoinRateLimitedError extends MembershipError {
++  constructor(message: string) {
++    super(MEMBERSHIP_ERROR_CODES.JOIN_RATE_LIMITED, message);
++  }
++}
++
++// Комната заполнена (REQ-ID-006, room_participant_limit). Отдельный код — решение
++// владельца (design §1, развилка (а)): «комната заполнена» actionable для организатора.
++export class RoomParticipantLimitReachedError extends MembershipError {
++  constructor(message: string) {
++    super(MEMBERSHIP_ERROR_CODES.ROOM_PARTICIPANT_LIMIT_REACHED, message);
++  }
++}
+diff --git a/packages/core/src/membership/membership.module.ts b/packages/core/src/membership/membership.module.ts
+new file mode 100644
+index 0000000..d9e1062
+--- /dev/null
++++ b/packages/core/src/membership/membership.module.ts
+@@ -0,0 +1,22 @@
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { ConfigModule } from '../config/config.module';
++import { IdentityModule } from '../identity/identity.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { MembershipService } from './membership.service';
++import { JoinRateLimiter } from './join-rate-limiter';
++
++@Module({
++  imports: [PrismaModule, ConfigModule, IdentityModule],
++  providers: [
++    {
++      provide: JoinRateLimiter,
++      useFactory: (config: AppConfig) => new JoinRateLimiter(config.JOIN_RATE_LIMIT_IP),
++      inject: [APP_CONFIG],
++    },
++    MembershipService,
++  ],
++  exports: [MembershipService],
++})
++export class MembershipModule {}
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+new file mode 100644
+index 0000000..59bb8df
+--- /dev/null
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -0,0 +1,197 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
++import type { AppConfig } from '../config/config.schema';
++import { EventLogService } from '../realtime/event-log.service';
++import { AppRegistryService } from '../app-registry/app-registry.service';
++import { RoomService } from '../room/room.service';
++import { IdentityService } from '../identity/identity.service';
++import { MembershipService } from './membership.service';
++import { JoinRateLimiter } from './join-rate-limiter';
++import {
++  JoinRateLimitedError,
++  RoomJoinDeniedError,
++  RoomParticipantLimitReachedError,
++} from './membership.errors';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++const IP = '203.0.113.7';
++const IP2 = '198.51.100.9';
++
++const TEST_CONFIG: AppConfig = {
++  NODE_ENV: 'test',
++  PORT: 3000,
++  DATABASE_URL: 'postgresql://unused',
++  ROOM_CODE_MIN_LEN: 8,
++  ROOM_PARTICIPANT_LIMIT: 500,
++  JOIN_RATE_LIMIT_IP: 20,
++};
++
++describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
++  let db: TestDb;
++  let roomService: RoomService;
++
++  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
++    new MembershipService(
++      db.prisma,
++      new IdentityService(db.prisma),
++      new JoinRateLimiter(overrides.rateLimit ?? 1000),
++      { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? 500 },
++    );
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    roomService = new RoomService(
++      db.prisma,
++      new EventLogService(),
++      new AppRegistryService([]),
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
++    );
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe(
++      'TRUNCATE TABLE membership."Membership", room."Room" CASCADE',
++    );
++  });
++
++  it('joins a DRAFT room by code + name (REQ-ID-003)', async () => {
++    const room = await roomService.create(ORG);
++    const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
++    expect(result.identity.kind).toBe('GUEST');
++    expect(result.identity.displayName).toBe('Саша');
++    expect(result.membership.roomId).toBe(room.id);
++    expect(result.membership.identityId).toBe(result.identity.id);
++    expect(result.membership.role).toBe('PARTICIPANT');
++  });
++
++  it('joins an ACTIVE room (late-join, ADR-005)', async () => {
++    const room = await roomService.create(ORG);
++    await db.prisma.room.update({ where: { id: room.id }, data: { status: 'ACTIVE' } });
++    const result = await makeMembership().join({ code: room.code, displayName: 'A', ip: IP });
++    expect(result.membership.role).toBe('PARTICIPANT');
++  });
++
++  it('rejects an invalid display name before any write', async () => {
++    const room = await roomService.create(ORG);
++    await expect(
++      makeMembership().join({ code: room.code, displayName: '', ip: IP }),
++    ).rejects.toThrow();
++    // Только ORGANIZER-membership от create; гостевая запись не появилась.
++    expect(await db.prisma.membership.count({ where: { roomId: room.id } })).toBe(1);
++  });
++
++  // REQ-ID-013 exit criterion: all branches below collapse into the same typed refusal.
++  it.each([
++    'unknown code',
++    'registered policy',
++    'invite_only policy',
++    'COMPLETED room',
++    'CANCELLED room',
++    'soft-deleted room',
++  ])('refuses %s with the same ROOM_JOIN_DENIED', async (scenario) => {
++    const room = await roomService.create(ORG);
++    let code = room.code;
++    switch (scenario) {
++      case 'unknown code':
++        code = 'zzzzzzzz';
++        break;
++      case 'registered policy':
++        await db.prisma.room.update({ where: { id: room.id }, data: { joinPolicy: 'REGISTERED' } });
++        break;
++      case 'invite_only policy':
++        await db.prisma.room.update({ where: { id: room.id }, data: { joinPolicy: 'INVITE_ONLY' } });
++        break;
++      case 'COMPLETED room':
++        await db.prisma.room.update({ where: { id: room.id }, data: { status: 'COMPLETED' } });
++        break;
++      case 'CANCELLED room':
++        await db.prisma.room.update({ where: { id: room.id }, data: { status: 'CANCELLED' } });
++        break;
++      case 'soft-deleted room':
++        await db.prisma.room.update({ where: { id: room.id }, data: { deletedAt: new Date() } });
++        break;
++    }
++    const err = await makeMembership()
++      .join({ code, displayName: 'A', ip: IP })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomJoinDeniedError);
++    expect((err as RoomJoinDeniedError).code).toBe('ROOM_JOIN_DENIED');
++  });
++
++  it('writes nothing on denial', async () => {
++    const guestsBefore = await db.prisma.identity.count({ where: { kind: 'GUEST' } });
++    await expect(
++      makeMembership().join({ code: 'zzzzzzzz', displayName: 'A', ip: IP }),
++    ).rejects.toThrow(RoomJoinDeniedError);
++    expect(await db.prisma.identity.count({ where: { kind: 'GUEST' } })).toBe(guestsBefore);
++    expect(await db.prisma.membership.count()).toBe(0);
++  });
++
++  it('refuses a join at the participant limit with ROOM_PARTICIPANT_LIMIT_REACHED', async () => {
++    const room = await roomService.create(ORG);
++    const service = makeMembership({ participantLimit: 1 });
++    await service.join({ code: room.code, displayName: 'A', ip: IP });
++    const err = await service
++      .join({ code: room.code, displayName: 'B', ip: IP2 })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(RoomParticipantLimitReachedError);
++    expect((err as RoomParticipantLimitReachedError).code).toBe(
++      'ROOM_PARTICIPANT_LIMIT_REACHED',
++    );
++  });
++
++  it('does not count the ORGANIZER membership toward the participant limit', async () => {
++    const room = await roomService.create(ORG); // создаёт ORGANIZER-membership
++    const result = await makeMembership({ participantLimit: 1 }).join({
++      code: room.code,
++      displayName: 'A',
++      ip: IP,
++    });
++    expect(result.membership.role).toBe('PARTICIPANT');
++  });
++
++  it('refuses the (limit+1)-th attempt from one IP with JOIN_RATE_LIMITED', async () => {
++    const room = await roomService.create(ORG);
++    const service = makeMembership({ rateLimit: 2 });
++    await service.join({ code: room.code, displayName: 'A', ip: IP });
++    await service.join({ code: room.code, displayName: 'B', ip: IP });
++    const err = await service
++      .join({ code: room.code, displayName: 'C', ip: IP })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(JoinRateLimitedError);
++    expect((err as JoinRateLimitedError).code).toBe('JOIN_RATE_LIMITED');
++  });
++
++  it('counts attempts BEFORE the room lookup (brute force accumulates)', async () => {
++    const service = makeMembership({ rateLimit: 2 });
++    await expect(service.join({ code: 'zzzzzzzz', displayName: 'A', ip: IP })).rejects.toThrow(
++      RoomJoinDeniedError,
++    );
++    await expect(service.join({ code: 'yyyyyyyy', displayName: 'A', ip: IP })).rejects.toThrow(
++      RoomJoinDeniedError,
++    );
++    const err = await service
++      .join({ code: 'xxxxxxxx', displayName: 'A', ip: IP })
++      .catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(JoinRateLimitedError);
++  });
++
++  it('does not throttle other IPs', async () => {
++    const room = await roomService.create(ORG);
++    const service = makeMembership({ rateLimit: 1 });
++    await service.join({ code: room.code, displayName: 'A', ip: IP });
++    const other = await service.join({ code: room.code, displayName: 'B', ip: IP2 });
++    expect(other.membership.role).toBe('PARTICIPANT');
++  });
++});
+diff --git a/packages/core/src/membership/membership.service.ts b/packages/core/src/membership/membership.service.ts
+new file mode 100644
+index 0000000..5e78e33
+--- /dev/null
++++ b/packages/core/src/membership/membership.service.ts
+@@ -0,0 +1,84 @@
++import { Inject, Injectable } from '@nestjs/common';
++import type { Identity, Membership, Prisma } from '@prisma/client';
++import { displayNameSchema } from '@mymozhem/sdk';
++import { PrismaService } from '../prisma/prisma.service';
++import { IdentityService } from '../identity/identity.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { JoinRateLimiter } from './join-rate-limiter';
++import {
++  JoinRateLimitedError,
++  RoomJoinDeniedError,
++  RoomParticipantLimitReachedError,
++} from './membership.errors';
++
++export interface JoinResult {
++  membership: Membership;
++  identity: Identity;
++}
++
++@Injectable()
++export class MembershipService {
++  constructor(
++    private readonly prisma: PrismaService,
++    private readonly identity: IdentityService,
++    private readonly joinRateLimiter: JoinRateLimiter,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  // Called by RoomService.create inside its transaction: the organizer becomes the
++  // room's first member (design §1). A violation of the partial unique index
++  // "Membership_single_organizer_key" rolls the room insert back too.
++  async createOrganizerMembership(
++    tx: Prisma.TransactionClient,
++    roomId: string,
++    identityId: string,
++  ): Promise<Membership> {
++    return tx.membership.create({
++      data: { roomId, identityId, role: 'ORGANIZER' },
++    });
++  }
++
++  // Guest join by room code + name (REQ-ID-003). Порядок проверок значим (design §3):
++  // лимит по IP — ДО lookup комнаты, иначе перебор кодов не накапливает счётчик;
++  // ветки «нет комнаты / удалена / терминальный статус / закрытая политика» свёрнуты
++  // в один ROOM_JOIN_DENIED (REQ-ID-013).
++  async join(params: { code: string; displayName: string; ip: string }): Promise<JoinResult> {
++    if (!this.joinRateLimiter.tryAcquire(params.ip)) {
++      throw new JoinRateLimitedError('Join rate limit exceeded');
++    }
++    // ZodError propagates untyped by design (§6) — mapping is the first transport's job.
++    const name = displayNameSchema.parse(params.displayName);
++
++    const room = await this.prisma.room.findUnique({ where: { code: params.code } });
++    if (!room) {
++      throw new RoomJoinDeniedError('no room for code');
++    }
++    if (room.deletedAt !== null) {
++      throw new RoomJoinDeniedError(`room ${room.id} deleted`);
++    }
++    if (room.status === 'COMPLETED' || room.status === 'CANCELLED') {
++      throw new RoomJoinDeniedError(`room ${room.id} status ${room.status}`);
++    }
++    if (room.joinPolicy !== 'GUESTS') {
++      throw new RoomJoinDeniedError(`room ${room.id} policy ${room.joinPolicy}`);
++    }
++
++    // Гонка count-then-insert принята (design §1, развилка (б)): лимит анти-накруточный,
++    // возможный перелёт на единицы; advisory lock здесь ничего ценного не защищает.
++    const participantCount = await this.prisma.membership.count({
++      where: { roomId: room.id, role: 'PARTICIPANT' },
++    });
++    if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
++      throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
++    }
++
++    return this.prisma.$transaction(async (tx) => {
++      const identity = await this.identity.createGuest(name, tx);
++      const membership = await tx.membership.create({
++        data: { roomId: room.id, identityId: identity.id, role: 'PARTICIPANT' },
++      });
++      return { membership, identity };
++    });
++  }
++}
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index adfc2c2..40a0509 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -1,32 +1,52 @@
+ import { ContractError, validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
++import { MembershipService } from '../membership/membership.service';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { IdentityService } from '../identity/identity.service';
++import type { AppConfig } from '../config/config.schema';
+ import { RoomService } from '../room/room.service';
+ import { EventLogService } from './event-log.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
++const TEST_CONFIG: AppConfig = {
++  NODE_ENV: 'test',
++  PORT: 3000,
++  DATABASE_URL: 'postgresql://unused',
++  ROOM_CODE_MIN_LEN: 8,
++  ROOM_PARTICIPANT_LIMIT: 500,
++  JOIN_RATE_LIMIT_IP: 20,
++};
++
+ describe('EventLogService.commitCoreEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     rooms = new RoomService(
+       db.prisma,
+       new EventLogService(),
+       new AppRegistryService([validManifests[0]]),
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
+     );
+     eventLog = new EventLogService();
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     // CASCADE чистит и realtime."LogEvent" (FK-ссылка), и room."Room".
+diff --git a/packages/core/src/room/room-code.spec.ts b/packages/core/src/room/room-code.spec.ts
+new file mode 100644
+index 0000000..3ea13a8
+--- /dev/null
++++ b/packages/core/src/room/room-code.spec.ts
+@@ -0,0 +1,60 @@
++import { generateRoomCode, isRoomCodeCollision, ROOM_CODE_ALPHABET } from './room-code';
++
++describe('generateRoomCode (REQ-ID-013)', () => {
++  it('produces a code of the requested length from the safe alphabet only', () => {
++    const code = generateRoomCode(8);
++    expect(code).toHaveLength(8);
++    for (const ch of code) expect(ROOM_CODE_ALPHABET).toContain(ch);
++  });
++
++  it('excludes confusable characters by construction (no 0/o, 1/l/i)', () => {
++    expect(ROOM_CODE_ALPHABET).not.toMatch(/[01ilo]/);
++  });
++
++  it('respects other lengths', () => {
++    expect(generateRoomCode(12)).toHaveLength(12);
++  });
++});
++
++describe('isRoomCodeCollision (REQ-ID-013)', () => {
++  // Форма, которую реально бросает Prisma 7.8 + adapter-pg при failed $queryRaw:
++  // PrismaClientKnownRequestError P2010, SQLSTATE и имя индекса — внутри message.
++  const p2010 = (message: string) => ({ code: 'P2010', message });
++
++  it('matches a P2010 raw-query error carrying 23505 on the Room_code_key index', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Room_code_key"`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(true);
++  });
++
++  it('rejects a P2010 on a different index', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Membership_single_organizer_key"`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it('rejects a P2010 with a different SQLSTATE', () => {
++    const err = p2010(
++      'Raw query failed. Code: `23502`. Message: `null value in column "code" violates not-null constraint`',
++    );
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it('rejects a non-P2010 error even with 23505 in the message', () => {
++    const err = {
++      code: 'P2002',
++      message:
++        'Raw query failed. Code: `23505`. Message: `duplicate key value violates unique constraint "Room_code_key"`',
++    };
++    expect(isRoomCodeCollision(err)).toBe(false);
++  });
++
++  it.each([null, undefined, new Error('boom'), '23505', {}])(
++    'rejects non-error-shaped input (%p)',
++    (input) => {
++      expect(isRoomCodeCollision(input)).toBe(false);
++    },
++  );
++});
+diff --git a/packages/core/src/room/room-code.ts b/packages/core/src/room/room-code.ts
+new file mode 100644
+index 0000000..a7182eb
+--- /dev/null
++++ b/packages/core/src/room/room-code.ts
+@@ -0,0 +1,33 @@
++import { randomInt } from 'node:crypto';
++
++// REQ-ID-013: cryptographically random room code; alphabet excludes confusable
++// characters (no 0/o, 1/l/i) — 31 chars, 8 chars ≈ 8.5e11 combinations. Length comes
++// from ROOM_CODE_MIN_LEN (config §4), never a literal.
++export const ROOM_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
++
++export function generateRoomCode(length: number): string {
++  let code = '';
++  for (let i = 0; i < length; i++) {
++    code += ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)];
++  }
++  return code;
++}
++
++// Unique violation on the room code (index "Room_code_key"). Prisma 7 + adapter-pg
++// wraps every failing $queryRaw in PrismaClientKnownRequestError with code P2010 and
++// message `Raw query failed. Code: \`23505\`. Message: \`duplicate key value violates
++// unique constraint "Room_code_key"...\`` — the raw SQLSTATE never reaches the top
++// level (verified against @prisma/client@7.8.0 runtime + @prisma/adapter-pg@7.8.0
++// convertError: 23505 → UniqueConstraintViolation with originalCode '23505', also
++// reachable as meta.driverAdapterError.cause.originalCode). The retry loop in
++// create() is a safety net — a collision is a ~1e-12 event and intentionally untested
++// end-to-end; the classifier itself is unit-tested in room-code.spec.ts.
++export function isRoomCodeCollision(e: unknown): boolean {
++  const err = e as { code?: string; message?: string } | null;
++  return (
++    err?.code === 'P2010' &&
++    typeof err.message === 'string' &&
++    err.message.includes('23505') &&
++    err.message.includes('Room_code_key')
++  );
++}
+diff --git a/packages/core/src/room/room.module.ts b/packages/core/src/room/room.module.ts
+index 2de2267..2e4e794 100644
+--- a/packages/core/src/room/room.module.ts
++++ b/packages/core/src/room/room.module.ts
+@@ -1,12 +1,14 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { AppRegistryModule } from '../app-registry/app-registry.module';
++import { ConfigModule } from '../config/config.module';
++import { MembershipModule } from '../membership/membership.module';
+ import { RoomService } from './room.service';
+ 
+ @Module({
+-  imports: [PrismaModule, RealtimeModule, AppRegistryModule],
++  imports: [PrismaModule, RealtimeModule, AppRegistryModule, ConfigModule, MembershipModule],
+   providers: [RoomService],
+   exports: [RoomService],
+ })
+ export class RoomModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index ae77209..0e23855 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,34 +1,58 @@
+ import { validManifests } from '@mymozhem/sdk';
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
+ import { readRoomLog } from '../testing/read-room-log';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
++import { MembershipService } from '../membership/membership.service';
++import { JoinRateLimiter } from '../membership/join-rate-limiter';
++import { IdentityService } from '../identity/identity.service';
+ import { AppManifestUnknownError, AppSettingsInvalidError } from '../app-registry/app-registry.errors';
++import type { AppConfig } from '../config/config.schema';
+ import { RoomService } from './room.service';
+ import {
+   RoomError,
+   RoomTransitionError,
+   RoomConflictError,
+   RoomNotConfiguredError,
+   RoomOrganizerNotRegisteredError,
+   RoomSettingsFrozenError,
+ } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ // quiz@1 из SDK-фикстур: appSettings требует { title: string, correctAnswers: number[] }.
+ const QUIZ_SETTINGS = { title: 'Friday quiz', correctAnswers: [0, 2] };
+ 
++const TEST_CONFIG: AppConfig = {
++  NODE_ENV: 'test',
++  PORT: 3000,
++  DATABASE_URL: 'postgresql://unused',
++  ROOM_CODE_MIN_LEN: 8,
++  ROOM_PARTICIPANT_LIMIT: 500,
++  JOIN_RATE_LIMIT_IP: 20,
++};
++
+ const makeService = (db: TestDb) =>
+-  new RoomService(db.prisma, new EventLogService(), new AppRegistryService([validManifests[0]]));
++  new RoomService(
++    db.prisma,
++    new EventLogService(),
++    new AppRegistryService([validManifests[0]]),
++    new MembershipService(
++      db.prisma,
++      new IdentityService(db.prisma),
++      new JoinRateLimiter(1000),
++      TEST_CONFIG,
++    ),
++    TEST_CONFIG,
++  );
+ 
+ const configureQuiz = (service: RoomService, roomId: string) =>
+   service.configure(roomId, { appId: 'quiz', manifestVersion: 1, settings: QUIZ_SETTINGS });
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+@@ -44,20 +68,28 @@ describe('RoomService lifecycle', () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+ 
+   it('create() yields a DRAFT room', async () => {
+     const room = await service.create(ORG);
+     expect(room.status).toBe('DRAFT');
+     expect(room.deletedAt).toBeNull();
+     expect(room.organizerId).toBe(ORG);
+   });
+ 
++  it('creates the ORGANIZER membership atomically with the room (REQ-ID-011, design §1)', async () => {
++    const room = await service.create(ORG);
++    const memberships = await db.prisma.membership.findMany({ where: { roomId: room.id } });
++    expect(memberships).toHaveLength(1);
++    expect(memberships[0].identityId).toBe(ORG);
++    expect(memberships[0].role).toBe('ORGANIZER');
++  });
++
+   it('rejects a GUEST organizer with ROOM_ORGANIZER_NOT_REGISTERED (REQ-ID-005)', async () => {
+     const guest = await seedIdentity(db.prisma, { kind: 'GUEST' });
+     const err = await service.create(guest.id).catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(RoomOrganizerNotRegisteredError);
+     expect((err as RoomOrganizerNotRegisteredError).code).toBe('ROOM_ORGANIZER_NOT_REGISTERED');
+   });
+ 
+   it('rejects a nonexistent organizer with the same collapsed code', async () => {
+     await expect(
+       service.create('00000000-0000-0000-0000-0000000000aa'),
+@@ -210,22 +242,22 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
+ 
+     // Unaffected: the rejected write must not have partially applied.
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.deletedAt).toBeNull();
+     expect(reread.status).toBe('ACTIVE');
+   });
+ 
+   it('rejects an INSERT of a row that is both ACTIVE and soft-deleted, at the database level', async () => {
+     await expect(
+       db.prisma.$executeRawUnsafe(
+-        `INSERT INTO room."Room" (id, "organizerId", status, "deletedAt", "updatedAt")
+-         VALUES (gen_random_uuid(), $1, 'ACTIVE', now(), now())`,
++        `INSERT INTO room."Room" (id, "organizerId", status, code, "deletedAt", "updatedAt")
++         VALUES (gen_random_uuid(), $1, 'ACTIVE', 'rawcheck1', now(), now())`,
+         ORG,
+       ),
+     ).rejects.toThrow(/Room_softdelete_not_active/);
+   });
+ });
+ 
+ describe('Room organizerId FK', () => {
+   let db: TestDb;
+ 
+   beforeAll(async () => {
+@@ -234,22 +266,22 @@ describe('Room organizerId FK', () => {
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   // Raw SQL around the service: the database itself must refuse an organizer that
+   // does not exist in identity."Identity" (declarative FK, REQ-ID-005).
+   it('rejects a room whose organizerId is not an identity, at the database level', async () => {
+     await expect(
+       db.prisma.$executeRawUnsafe(
+-        `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
+-         VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
++        `INSERT INTO room."Room" (id, "organizerId", status, code, "updatedAt")
++         VALUES (gen_random_uuid(), $1, 'DRAFT', 'rawfk001', now())`,
+         '00000000-0000-0000-0000-0000000000ee',
+       ),
+     ).rejects.toThrow(/Room_organizerId_fkey/);
+   });
+ });
+ 
+ describe('RoomService lifecycle log emit (REQ-RT-010)', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+@@ -522,20 +554,27 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
+ 
+   // Реестр boot-time, строка комнаты durable: активация против версии, которой нет
+   // в реестре процесса (редеплой убрал), обязана отказать (design §5).
+   it('rejects activation when the pinned manifest is absent from the registry', async () => {
+     const room = await service.create(ORG);
+     await configureQuiz(service, room.id);
+     const emptyRegistryService = new RoomService(
+       db.prisma,
+       new EventLogService(),
+       new AppRegistryService([]),
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++      ),
++      TEST_CONFIG,
+     );
+     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(AppManifestUnknownError);
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.status).toBe('DRAFT');
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
+   // Гонка configure vs activate (design §5): row-lock guarded UPDATE активации —
+   // точка сериализации. Ровно одно из двух: configure успел (активирована новая
+@@ -563,10 +602,50 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
+     }
+     const log = await readRoomLog(db.prisma, room.id);
+     expect(log).toHaveLength(1);
+     expect(log[0]).toMatchObject({
+       seq: 1,
+       type: 'core.room.activated',
+       payload: { appId: final.appId, manifestVersion: final.manifestVersion },
+     });
+   });
+ });
++
++describe('RoomService.create room code and join policy (REQ-ID-013, REQ-ID-002)', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    service = makeService(db);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('creates a room with an 8-char safe-alphabet code and guests policy by default', async () => {
++    const room = await service.create(ORG);
++    expect(room.code).toMatch(/^[abcdefghjkmnpqrstuvwxyz23456789]{8}$/);
++    expect(room.joinPolicy).toBe('GUESTS');
++  });
++
++  it('generates distinct codes for two rooms', async () => {
++    const a = await service.create(ORG);
++    const b = await service.create(ORG);
++    expect(a.code).not.toBe(b.code);
++  });
++
++  it('honours an explicit join policy', async () => {
++    const room = await service.create(ORG, 'registered');
++    expect(room.joinPolicy).toBe('REGISTERED');
++  });
++
++  it('rejects an invalid join policy before touching the DB', async () => {
++    await expect(service.create(ORG, 'public' as never)).rejects.toThrow();
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index c2f2c01..60e50cc 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,16 +1,20 @@
+-import { Injectable } from '@nestjs/common';
++import { Inject, Injectable } from '@nestjs/common';
+ import type { Room, $Enums, Prisma } from '@prisma/client';
+-import type { CoreEventName } from '@mymozhem/sdk';
++import { roomJoinPolicySchema, type CoreEventName, type RoomJoinPolicy } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
++import { MembershipService } from '../membership/membership.service';
++import { generateRoomCode, isRoomCodeCollision } from './room-code';
+ import {
+   assertTransition,
+   assertDeletable,
+   DELETABLE_STATUSES,
+   type RoomStatus,
+ } from './room-state-machine';
+ import {
+   RoomConflictError,
+   RoomNotConfiguredError,
+   RoomOrganizerNotRegisteredError,
+@@ -35,48 +39,79 @@ const LIFECYCLE_EVENTS: Partial<Record<RoomStatus, CoreEventName>> = {
+   COMPLETED: 'room.completed',
+   CANCELLED: 'room.cancelled',
+ };
+ 
+ @Injectable()
+ export class RoomService {
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly eventLog: EventLogService,
+     private readonly appRegistry: AppRegistryService,
++    private readonly membership: MembershipService,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
+   ) {}
+ 
+-  async create(organizerId: string): Promise<Room> {
+-    // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
+-    // INSERT — the WHERE EXISTS predicate is the single source of truth, no
+-    // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
+-    // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
+-    // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
+-    // The same predicate lives in the "Identity_registered_email_key" index
+-    // condition (design §7) — change both or neither.
+-    // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
+-    const rows = await this.prisma.$queryRaw<Room[]>`
+-      INSERT INTO room."Room" ("id", "organizerId", "status", "createdAt", "updatedAt")
+-      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', now(), now()
++  async create(organizerId: string, joinPolicy: RoomJoinPolicy = 'guests'): Promise<Room> {
++    const policy = roomJoinPolicySchema.parse(joinPolicy);
++    // Retry on code collision lives OUTSIDE any transaction: a failed statement aborts
++    // the whole Postgres transaction, so retrying inside one is pointless.
++    for (let attempt = 0; attempt < 3; attempt++) {
++      const code = generateRoomCode(this.config.ROOM_CODE_MIN_LEN);
++      try {
++        // One transaction: room row + ORGANIZER membership land atomically
++        // (REQ-ID-011, design §1) — a partial pair can never be observed.
++        return await this.prisma.$transaction(async (tx) => {
++          const room = await this.insertRoom(tx, organizerId, code, policy);
++          await this.membership.createOrganizerMembership(tx, room.id, organizerId);
++          return room;
++        });
++      } catch (e) {
++        if (attempt < 2 && isRoomCodeCollision(e)) continue;
++        throw e;
++      }
++    }
++    throw new Error('unreachable: the retry loop exits via return or throw');
++  }
++
++  // REQ-ID-005: organizer must be a live REGISTERED identity. One atomic guarded
++  // INSERT — the WHERE EXISTS predicate is the single source of truth, no
++  // check-before-write (same philosophy as the guarded UPDATEs below). Race-safe
++  // structurally: in phase 1 kind is immutable, later flips go GUEST→REGISTERED
++  // only (REQ-ID-004), and no flow sets deletedAt on REGISTERED (design §3).
++  // The same predicate lives in the "Identity_registered_email_key" index
++  // condition (design §7) — change both or neither.
++  // `updatedAt` is explicit: Prisma's @updatedAt is client-side, no DB default.
++  private async insertRoom(
++    tx: Prisma.TransactionClient,
++    organizerId: string,
++    code: string,
++    joinPolicy: RoomJoinPolicy,
++  ): Promise<Room> {
++    const rows = await tx.$queryRaw<Room[]>`
++      INSERT INTO room."Room" ("id", "organizerId", "status", "code", "joinPolicy", "createdAt", "updatedAt")
++      SELECT gen_random_uuid(), ${organizerId}::uuid, 'DRAFT', ${code}, ${joinPolicy}::"room"."RoomJoinPolicy", now(), now()
+       WHERE EXISTS (
+         SELECT 1 FROM identity."Identity"
+         WHERE "id" = ${organizerId}::uuid
+           AND "kind" = 'REGISTERED'
+           AND "deletedAt" IS NULL
+       )
+       RETURNING *
+     `;
+     if (rows.length === 0) {
+       throw new RoomOrganizerNotRegisteredError(
+         `Organizer ${organizerId} is not a live REGISTERED identity`,
+       );
+     }
+-    return rows[0];
++    // Re-read через клиент: $queryRaw отдаёт сырое DB-значение enum ('guests'), а
++    // контракт метода — Prisma-имя ('GUESTS'); маппинг @map выполняет только клиент.
++    return tx.room.findUniqueOrThrow({ where: { id: rows[0].id } });
+   }
+ 
+   // REQ-RT-004 write path: атомарная замена всей тройки (appId, manifestVersion,
+   // appSettings) — промежуточного состояния не существует (design §4). Валидация ДО
+   // обращения к БД (REQ-CORE-007); запись — guarded UPDATE: только DRAFT и не
+   // удалённая. Заморозка активной комнаты — этот предикат, не флаг.
+   async configure(
+     roomId: string,
+     config: { appId: string; manifestVersion: number; settings: unknown },
+   ): Promise<Room> {
+diff --git a/packages/core/src/testing/harness.int-spec.ts b/packages/core/src/testing/harness.int-spec.ts
+index 27f3dcb..d7d368a 100644
+--- a/packages/core/src/testing/harness.int-spec.ts
++++ b/packages/core/src/testing/harness.int-spec.ts
+@@ -1,26 +1,29 @@
+ import { startTestDb, type TestDb } from './postgres.testcontainer';
+ import { seedIdentity } from './seed-identity';
+ 
+ describe('integration harness', () => {
+   let db: TestDb;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+-    await seedIdentity(db.prisma, { id: '00000000-0000-0000-0000-000000000001' });
++    await seedIdentity(db.prisma, {
++      id: '00000000-0000-0000-0000-000000000001',
++      email: 'harness@example.test',
++    });
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   it('applies the migration and can round-trip a Room row', async () => {
+     const created = await db.prisma.room.create({
+-      data: { organizerId: '00000000-0000-0000-0000-000000000001' },
++      data: { organizerId: '00000000-0000-0000-0000-000000000001', code: 'harness01' },
+     });
+     expect(created.status).toBe('DRAFT');
+     expect(created.deletedAt).toBeNull();
+ 
+     const found = await db.prisma.room.findUnique({ where: { id: created.id } });
+     expect(found?.id).toBe(created.id);
+   });
+ });
+diff --git a/packages/sdk/src/identity/display-name.contract.spec.ts b/packages/sdk/src/identity/display-name.contract.spec.ts
+new file mode 100644
+index 0000000..041ef94
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.contract.spec.ts
+@@ -0,0 +1,21 @@
++import { DISPLAY_NAME_MAX_LENGTH, displayNameSchema } from './display-name';
++import { validDisplayNames, invalidDisplayNames } from './display-name.fixtures';
++
++describe('displayName contract (REQ-ID-003)', () => {
++  it.each(validDisplayNames)('accepts %s', (name) => {
++    expect(displayNameSchema.safeParse(name).success).toBe(true);
++  });
++
++  it.each(invalidDisplayNames.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(displayNameSchema.safeParse(v).success).toBe(false);
++  });
++
++  it('trims surrounding whitespace', () => {
++    expect(displayNameSchema.parse('  Alex  ')).toBe('Alex');
++  });
++
++  it('accepts exactly DISPLAY_NAME_MAX_LENGTH chars and rejects one more', () => {
++    expect(displayNameSchema.safeParse('x'.repeat(DISPLAY_NAME_MAX_LENGTH)).success).toBe(true);
++    expect(displayNameSchema.safeParse('x'.repeat(DISPLAY_NAME_MAX_LENGTH + 1)).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/identity/display-name.fixtures.ts b/packages/sdk/src/identity/display-name.fixtures.ts
+new file mode 100644
+index 0000000..816a932
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.fixtures.ts
+@@ -0,0 +1,4 @@
++export const validDisplayNames: string[] = ['Саша', 'A', '  Alex  '];
++
++// Empty, whitespace-only (trims to empty), over the cap, non-strings — all rejected.
++export const invalidDisplayNames: unknown[] = ['', '   ', 'x'.repeat(41), null, 42];
+diff --git a/packages/sdk/src/identity/display-name.ts b/packages/sdk/src/identity/display-name.ts
+new file mode 100644
+index 0000000..536e783
+--- /dev/null
++++ b/packages/sdk/src/identity/display-name.ts
+@@ -0,0 +1,7 @@
++import { z } from 'zod';
++
++// Guest display name (REQ-ID-003): trimmed, 1..40 chars. PII-adjacent: it lives on the
++// Identity row only and never enters event-log payloads (REQ-SEC-009).
++export const DISPLAY_NAME_MAX_LENGTH = 40;
++export const displayNameSchema = z.string().trim().min(1).max(DISPLAY_NAME_MAX_LENGTH);
++export type DisplayName = z.infer<typeof displayNameSchema>;
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index ac2ac9f..4296f0e 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -10,10 +10,14 @@ export * from './events/projected-event.schema';
+ export * from './events/projected-event.fixtures';
+ export * from './manifest/manifest.schema';
+ export * from './manifest/manifest.fixtures';
+ export * from './manifest/app-settings-visibility';
+ export * from './manifest/define-app';
+ export * from './manifest/define-app.fixtures';
+ export * from './identity/identity-kind';
+ export * from './identity/identity-kind.fixtures';
+ export * from './membership/member-role';
+ export * from './membership/member-role.fixtures';
++export * from './identity/display-name';
++export * from './identity/display-name.fixtures';
++export * from './membership/room-join-policy';
++export * from './membership/room-join-policy.fixtures';
+diff --git a/packages/sdk/src/membership/room-join-policy.contract.spec.ts b/packages/sdk/src/membership/room-join-policy.contract.spec.ts
+new file mode 100644
+index 0000000..a547162
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.contract.spec.ts
+@@ -0,0 +1,16 @@
++import { ROOM_JOIN_POLICIES, roomJoinPolicySchema } from './room-join-policy';
++import { validJoinPolicies, invalidJoinPolicies } from './room-join-policy.fixtures';
++
++describe('roomJoinPolicy contract (REQ-ID-002)', () => {
++  it('declares exactly the three policies of REQ-ID-002', () => {
++    expect([...ROOM_JOIN_POLICIES]).toEqual(['guests', 'registered', 'invite_only']);
++  });
++
++  it.each(validJoinPolicies)('accepts %s', (policy) => {
++    expect(roomJoinPolicySchema.safeParse(policy).success).toBe(true);
++  });
++
++  it.each(invalidJoinPolicies.map((v) => [String(v), v] as const))('rejects %s', (_name, v) => {
++    expect(roomJoinPolicySchema.safeParse(v).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/membership/room-join-policy.fixtures.ts b/packages/sdk/src/membership/room-join-policy.fixtures.ts
+new file mode 100644
+index 0000000..7de65bb
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.fixtures.ts
+@@ -0,0 +1,6 @@
++import type { RoomJoinPolicy } from './room-join-policy';
++
++export const validJoinPolicies: RoomJoinPolicy[] = ['guests', 'registered', 'invite_only'];
++
++// Wrong case, unknown values, empty, non-strings — all rejected.
++export const invalidJoinPolicies: unknown[] = ['GUESTS', 'Guests', 'public', '', null, 42];
+diff --git a/packages/sdk/src/membership/room-join-policy.ts b/packages/sdk/src/membership/room-join-policy.ts
+new file mode 100644
+index 0000000..06bb943
+--- /dev/null
++++ b/packages/sdk/src/membership/room-join-policy.ts
+@@ -0,0 +1,7 @@
++import { z } from 'zod';
++
++// REQ-ID-002: join policy is a room attribute, default 'guests' (ADR-004). Values are
++// the lowercase spec strings; the DB enum maps to them via @map (design §2).
++export const ROOM_JOIN_POLICIES = ['guests', 'registered', 'invite_only'] as const;
++export const roomJoinPolicySchema = z.enum(ROOM_JOIN_POLICIES);
++export type RoomJoinPolicy = z.infer<typeof roomJoinPolicySchema>;

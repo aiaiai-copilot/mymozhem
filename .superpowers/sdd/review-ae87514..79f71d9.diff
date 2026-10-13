@@ -1,0 +1,284 @@
+# Review package: ae87514..79f71d9
+
+## Commits
+79f71d9 fix(core): close review findings on Room lifecycle (REQ-RT-005, REQ-CORE-003)
+
+## Files changed
+ .../20260718061612_room_lifecycle/migration.sql    |  8 ++++
+ packages/core/src/room/room-state-machine.spec.ts  | 10 ++++
+ packages/core/src/room/room-state-machine.ts       | 11 ++++-
+ packages/core/src/room/room.service.int-spec.ts    | 55 +++++++++++++++++++++-
+ packages/core/src/room/room.service.ts             | 25 ++++++++--
+ 5 files changed, 102 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql b/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql
+index 86b4ca0..131703f 100644
+--- a/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql
++++ b/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql
+@@ -8,10 +8,18 @@ CREATE TYPE "room"."RoomStatus" AS ENUM ('DRAFT', 'ACTIVE', 'COMPLETED', 'CANCEL
+ CREATE TABLE "room"."Room" (
+     "id" UUID NOT NULL,
+     "organizerId" UUID NOT NULL,
+     "status" "room"."RoomStatus" NOT NULL DEFAULT 'DRAFT',
+     "deletedAt" TIMESTAMP(3),
+     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     "updatedAt" TIMESTAMP(3) NOT NULL,
+ 
+     CONSTRAINT "Room_pkey" PRIMARY KEY ("id")
+ );
++
++-- Soft-delete is orthogonal to status (REQ-RT-005): deletion is not a status, and a
++-- soft-deleted room can never be ACTIVE. Enforced as a DB invariant (REQ-RWD-010
++-- philosophy: constraint, not check-before-write) rather than only in RoomService.
++-- Holds unconditionally because every transition guard requires deletedAt IS NULL, so a
++-- soft-deleted room can never transition to ACTIVE in the first place.
++ALTER TABLE "room"."Room" ADD CONSTRAINT "Room_softdelete_not_active"
++  CHECK ("deletedAt" IS NULL OR "status" <> 'ACTIVE');
+diff --git a/packages/core/src/room/room-state-machine.spec.ts b/packages/core/src/room/room-state-machine.spec.ts
+index fe81551..9d2a7a3 100644
+--- a/packages/core/src/room/room-state-machine.spec.ts
++++ b/packages/core/src/room/room-state-machine.spec.ts
+@@ -43,20 +43,30 @@ describe('room-state-machine transitions', () => {
+   it.each(ILLEGAL)('rejects %s → %s', (from, to) => {
+     expect(canTransition(from, to)).toBe(false);
+     expect(() => assertTransition(from, to)).toThrow(RoomTransitionError);
+   });
+ 
+   it('throws with code ROOM_TRANSITION_INVALID', () => {
+     expect(() => assertTransition('DRAFT', 'COMPLETED')).toThrow(
+       expect.objectContaining({ code: 'ROOM_TRANSITION_INVALID' }),
+     );
+   });
++
++  it('degrades to false/typed-error instead of throwing for an out-of-domain status', () => {
++    // Simulates a Prisma enum value that has drifted out of sync with RoomStatus at
++    // runtime — the scenario room.service.ts's compile-time parity assertion guards
++    // against. Without a total lookup, ROOM_TRANSITIONS[from] would be undefined and
++    // `.has(to)` would throw an untyped TypeError instead of a typed domain error.
++    const drifted = 'ARCHIVED' as unknown as RoomStatus;
++    expect(canTransition(drifted, 'DRAFT')).toBe(false);
++    expect(() => assertTransition(drifted, 'DRAFT')).toThrow(RoomTransitionError);
++  });
+ });
+ 
+ describe('room-state-machine deletability', () => {
+   it.each<[RoomStatus, boolean]>([
+     ['DRAFT', true],
+     ['COMPLETED', true],
+     ['CANCELLED', true],
+     ['ACTIVE', false],
+   ])('isDeletable(%s) === %s', (status, expected) => {
+     expect(isDeletable(status)).toBe(expected);
+diff --git a/packages/core/src/room/room-state-machine.ts b/packages/core/src/room/room-state-machine.ts
+index 6214ae3..dcdd730 100644
+--- a/packages/core/src/room/room-state-machine.ts
++++ b/packages/core/src/room/room-state-machine.ts
+@@ -10,28 +10,35 @@ export type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+ // compile error here until its outgoing edges are declared. COMPLETED and CANCELLED are
+ // terminal — stated as empty sets in the data, not only in prose.
+ const ROOM_TRANSITIONS: Readonly<Record<RoomStatus, ReadonlySet<RoomStatus>>> = {
+   DRAFT: new Set<RoomStatus>(['ACTIVE', 'CANCELLED']),
+   ACTIVE: new Set<RoomStatus>(['COMPLETED', 'CANCELLED']),
+   COMPLETED: new Set<RoomStatus>(),
+   CANCELLED: new Set<RoomStatus>(),
+ };
+ 
+ // Soft-delete allowed in DRAFT/COMPLETED/CANCELLED, forbidden in ACTIVE (REQ-RT-005).
+-const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
++// Exported so room.service.ts derives its DB-level guard from this one set instead of
++// duplicating the rule in a hardcoded `status: { not: 'ACTIVE' }` clause.
++export const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
+   'DRAFT',
+   'COMPLETED',
+   'CANCELLED',
+ ]);
+ 
++const EMPTY_TRANSITIONS: ReadonlySet<RoomStatus> = new Set();
++
+ export function canTransition(from: RoomStatus, to: RoomStatus): boolean {
+-  return ROOM_TRANSITIONS[from].has(to);
++  // Total lookup: an out-of-band `from` (e.g. a Prisma enum value that has drifted from
++  // this domain union) falls back to the empty set instead of throwing TypeError, so the
++  // caller gets a typed ROOM_TRANSITION_INVALID via assertTransition rather than a crash.
++  return (ROOM_TRANSITIONS[from] ?? EMPTY_TRANSITIONS).has(to);
+ }
+ 
+ export function assertTransition(from: RoomStatus, to: RoomStatus): void {
+   if (!canTransition(from, to)) {
+     throw new RoomTransitionError(`Illegal room transition: ${from} -> ${to}`);
+   }
+ }
+ 
+ export function isDeletable(status: RoomStatus): boolean {
+   return DELETABLE_STATUSES.has(status);
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index afa263e..04dd1be 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -64,21 +64,25 @@ describe('RoomService lifecycle', () => {
+   it('soft-deletes in DRAFT/COMPLETED/CANCELLED, refuses in ACTIVE', async () => {
+     const draft = await service.create(ORG);
+     expect((await service.softDelete(draft.id)).deletedAt).not.toBeNull();
+ 
+     const active = await service.create(ORG);
+     await service.activate(active.id);
+     await expect(service.softDelete(active.id)).rejects.toBeInstanceOf(RoomTransitionError);
+ 
+     const cancelled = await service.create(ORG);
+     await service.cancel(cancelled.id);
+-    expect((await service.softDelete(cancelled.id)).deletedAt).not.toBeNull();
++    const deleted = await service.softDelete(cancelled.id);
++    expect(deleted.deletedAt).not.toBeNull();
++    // Orthogonality (REQ-RT-005): soft-delete is not a status — status must survive
++    // softDelete unchanged.
++    expect(deleted.status).toBe('CANCELLED');
+   });
+ 
+   it('a soft-deleted room is inert (transitions conflict)', async () => {
+     const room = await service.create(ORG);
+     await service.softDelete(room.id);
+     await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
+   });
+ });
+ 
+ describe('RoomService transition atomicity', () => {
+@@ -103,26 +107,73 @@ describe('RoomService transition atomicity', () => {
+   // Racing cancel() vs cancel() on one DRAFT room has exactly one winner under
+   // every possible schedule:
+   //   - Interleaved: both read DRAFT, both pass assertTransition, both issue the
+   //     guarded UPDATE; one affects 1 row, the loser affects 0 rows -> RoomConflictError.
+   //   - Serialized: the loser reads CANCELLED, which is terminal, so
+   //     assertTransition itself throws -> RoomTransitionError.
+   // Either outcome is a legitimate proof that only one CANCELLED transition ever
+   // lands; which specific error class the loser gets depends on the (unobservable)
+   // schedule. Do not tighten the assertion below to one subclass — that would
+   // reintroduce the same flakiness this test is designed to avoid.
+-  it('two competing cancels on one room: exactly one wins, the other conflicts', async () => {
++  it('two competing cancels on one room: exactly one wins, the other is rejected', async () => {
+     const room = await service.create(ORG);
+ 
+     const results = await Promise.allSettled([service.cancel(room.id), service.cancel(room.id)]);
+ 
+     const fulfilled = results.filter((r) => r.status === 'fulfilled');
+     const rejected = results.filter((r) => r.status === 'rejected');
+     expect(fulfilled).toHaveLength(1);
+     expect(rejected).toHaveLength(1);
+     expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(RoomError);
+ 
+     const finalStatus = (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } }))
+       .status;
+     expect(finalStatus).toBe('CANCELLED');
+   });
+ });
++
++describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new RoomService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  // RoomService can never produce this write: softDelete() guards against ACTIVE, and no
++  // transition can reach ACTIVE while deletedAt is already set. Go around the service with
++  // raw SQL to prove the invariant is enforced by the database itself (the
++  // Room_softdelete_not_active CHECK constraint), not merely by application code
++  // (REQ-RWD-010 philosophy: DB invariant, not check-before-write).
++  it('rejects an UPDATE that sets deletedAt on an ACTIVE room, at the database level', async () => {
++    const room = await service.create(ORG);
++    await service.activate(room.id);
++
++    await expect(
++      db.prisma.$executeRawUnsafe(`UPDATE room."Room" SET "deletedAt" = now() WHERE id = $1`, room.id),
++    ).rejects.toThrow(/Room_softdelete_not_active/);
++
++    // Unaffected: the rejected write must not have partially applied.
++    const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
++    expect(reread.deletedAt).toBeNull();
++    expect(reread.status).toBe('ACTIVE');
++  });
++
++  it('rejects an INSERT of a row that is both ACTIVE and soft-deleted, at the database level', async () => {
++    await expect(
++      db.prisma.$executeRawUnsafe(
++        `INSERT INTO room."Room" (id, "organizerId", status, "deletedAt", "updatedAt")
++         VALUES (gen_random_uuid(), $1, 'ACTIVE', now(), now())`,
++        ORG,
++      ),
++    ).rejects.toThrow(/Room_softdelete_not_active/);
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+index 5d43987..bee3212 100644
+--- a/packages/core/src/room/room.service.ts
++++ b/packages/core/src/room/room.service.ts
+@@ -1,16 +1,32 @@
+ import { Injectable } from '@nestjs/common';
+-import type { Room } from '@prisma/client';
++import type { Room, $Enums } from '@prisma/client';
+ import { PrismaService } from '../prisma/prisma.service';
+-import { assertTransition, assertDeletable, type RoomStatus } from './room-state-machine';
++import {
++  assertTransition,
++  assertDeletable,
++  DELETABLE_STATUSES,
++  type RoomStatus,
++} from './room-state-machine';
+ import { RoomConflictError } from './room.errors';
+ 
++// Compile-time parity assertion between the Prisma-generated enum and the domain union.
++// `current.status as RoomStatus` below is a no-op cast only while the two stay identical;
++// if a member is ever added to one side and not the other, this line fails to compile
++// instead of the cast silently degrading `ROOM_TRANSITIONS[from]` to undefined at runtime.
++type RoomStatusParity = [RoomStatus] extends [$Enums.RoomStatus]
++  ? [$Enums.RoomStatus] extends [RoomStatus]
++    ? true
++    : never
++  : never;
++void (true satisfies RoomStatusParity);
++
+ @Injectable()
+ export class RoomService {
+   constructor(private readonly prisma: PrismaService) {}
+ 
+   create(organizerId: string): Promise<Room> {
+     // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
+     return this.prisma.room.create({ data: { organizerId } });
+   }
+ 
+   async transition(roomId: string, to: RoomStatus): Promise<Room> {
+@@ -43,20 +59,23 @@ export class RoomService {
+   cancel(roomId: string): Promise<Room> {
+     return this.transition(roomId, 'CANCELLED');
+   }
+ 
+   async softDelete(roomId: string): Promise<Room> {
+     const current = await this.prisma.room.findUnique({ where: { id: roomId } });
+     if (!current || current.deletedAt !== null) {
+       throw new RoomConflictError(`Room ${roomId} not found or already deleted`);
+     }
+     assertDeletable(current.status as RoomStatus);
++    // Guard derived from the single source of truth (DELETABLE_STATUSES) rather than a
++    // hardcoded `status: { not: 'ACTIVE' }`, so a future change to that set is enforced
++    // here automatically instead of silently diverging from the SQL guard.
+     const res = await this.prisma.room.updateMany({
+-      where: { id: roomId, deletedAt: null, status: { not: 'ACTIVE' } },
++      where: { id: roomId, deletedAt: null, status: { in: [...DELETABLE_STATUSES] } },
+       data: { deletedAt: new Date() },
+     });
+     if (res.count === 0) {
+       throw new RoomConflictError(`Room ${roomId} changed concurrently`);
+     }
+     return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
+   }
+ }

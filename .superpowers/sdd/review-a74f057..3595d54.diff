@@ -1,0 +1,234 @@
+# Review package: a74f057..3595d54
+
+## Commits
+3595d54 feat(core): FK room.organizerId to identity.id + test seeding (REQ-ID-005)
+
+## Files changed
+ .../20260722153952_room_organizer_fk/migration.sql |  2 ++
+ packages/core/prisma/schema.prisma                 |  9 ++++---
+ packages/core/src/room/room.service.int-spec.ts    | 28 ++++++++++++++++++++++
+ packages/core/src/testing/harness.int-spec.ts      |  2 ++
+ packages/core/src/testing/seed-identity.ts         | 24 +++++++++++++++++++
+ 5 files changed, 62 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql b/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql
+new file mode 100644
+index 0000000..b9e4913
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260722153952_room_organizer_fk/migration.sql
+@@ -0,0 +1,2 @@
++-- AddForeignKey
++ALTER TABLE "room"."Room" ADD CONSTRAINT "Room_organizerId_fkey" FOREIGN KEY ("organizerId") REFERENCES "identity"."Identity"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index 934a181..f61ee23 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -10,25 +10,27 @@ datasource db {
+ enum RoomStatus {
+   DRAFT
+   ACTIVE
+   COMPLETED
+   CANCELLED
+ 
+   @@schema("room")
+ }
+ 
+ // Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
+-// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
+-// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
+-// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
++// in room-state-machine.ts (REQ-RT-005). organizerId is a declarative FK to
++// identity.id; the REGISTERED invariant (REQ-ID-005) is enforced by the guarded
++// INSERT in RoomService.create, not by the FK itself.
++// appSettings/pin/freeze (REQ-RT-004) deferred to a later plan.
+ model Room {
+   id          String     @id @default(uuid()) @db.Uuid
++  organizer   Identity   @relation(fields: [organizerId], references: [id])
+   organizerId String     @db.Uuid
+   status      RoomStatus @default(DRAFT)
+   deletedAt   DateTime?
+   createdAt   DateTime   @default(now())
+   updatedAt   DateTime   @updatedAt
+ 
+   @@schema("room")
+ }
+ 
+ enum IdentityKind {
+@@ -43,13 +45,14 @@ enum IdentityKind {
+ // delete while FKs reference it). email is nullable; uniqueness among live
+ // REGISTERED rows is a hand-written partial index in the migration (REQ-DEV-006),
+ // NOT a Prisma preview feature.
+ model Identity {
+   id        String       @id @default(uuid()) @db.Uuid
+   kind      IdentityKind
+   email     String?
+   deletedAt DateTime?
+   createdAt DateTime     @default(now())
+   updatedAt DateTime     @updatedAt
++  rooms     Room[]
+ 
+   @@schema("identity")
+ }
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 04dd1be..b91744a 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -1,22 +1,24 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { seedIdentity } from '../testing/seed-identity';
+ import { RoomService } from './room.service';
+ import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+@@ -84,20 +86,21 @@ describe('RoomService lifecycle', () => {
+     await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
+   });
+ });
+ 
+ describe('RoomService transition atomicity', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
+   // serialize instead of interleave, the second one reads ACTIVE, and
+   // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
+@@ -130,20 +133,21 @@ describe('RoomService transition atomicity', () => {
+     expect(finalStatus).toBe('CANCELLED');
+   });
+ });
+ 
+ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () => {
+   let db: TestDb;
+   let service: RoomService;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     service = new RoomService(db.prisma);
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+   });
+@@ -170,10 +174,34 @@ describe('Room CHECK constraint: soft-delete is incompatible with ACTIVE', () =>
+   it('rejects an INSERT of a row that is both ACTIVE and soft-deleted, at the database level', async () => {
+     await expect(
+       db.prisma.$executeRawUnsafe(
+         `INSERT INTO room."Room" (id, "organizerId", status, "deletedAt", "updatedAt")
+          VALUES (gen_random_uuid(), $1, 'ACTIVE', now(), now())`,
+         ORG,
+       ),
+     ).rejects.toThrow(/Room_softdelete_not_active/);
+   });
+ });
++
++describe('Room organizerId FK', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  // Raw SQL around the service: the database itself must refuse an organizer that
++  // does not exist in identity."Identity" (declarative FK, REQ-ID-005).
++  it('rejects a room whose organizerId is not an identity, at the database level', async () => {
++    await expect(
++      db.prisma.$executeRawUnsafe(
++        `INSERT INTO room."Room" (id, "organizerId", status, "updatedAt")
++         VALUES (gen_random_uuid(), $1, 'DRAFT', now())`,
++        '00000000-0000-0000-0000-0000000000ee',
++      ),
++    ).rejects.toThrow(/Room_organizerId_fkey/);
++  });
++});
+diff --git a/packages/core/src/testing/harness.int-spec.ts b/packages/core/src/testing/harness.int-spec.ts
+index 6248166..27f3dcb 100644
+--- a/packages/core/src/testing/harness.int-spec.ts
++++ b/packages/core/src/testing/harness.int-spec.ts
+@@ -1,17 +1,19 @@
+ import { startTestDb, type TestDb } from './postgres.testcontainer';
++import { seedIdentity } from './seed-identity';
+ 
+ describe('integration harness', () => {
+   let db: TestDb;
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
++    await seedIdentity(db.prisma, { id: '00000000-0000-0000-0000-000000000001' });
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   it('applies the migration and can round-trip a Room row', async () => {
+     const created = await db.prisma.room.create({
+       data: { organizerId: '00000000-0000-0000-0000-000000000001' },
+     });
+diff --git a/packages/core/src/testing/seed-identity.ts b/packages/core/src/testing/seed-identity.ts
+new file mode 100644
+index 0000000..67bb305
+--- /dev/null
++++ b/packages/core/src/testing/seed-identity.ts
+@@ -0,0 +1,24 @@
++import type { $Enums } from '@prisma/client';
++import type { PrismaService } from '../prisma/prisma.service';
++
++// Test-side seeding of identity rows. No IdentityService exists in core by design
++// (design §6: the first real flow — guest join or OAuth — will own it); until then
++// tests are the only writers, via the Prisma client directly.
++export function seedIdentity(
++  prisma: PrismaService,
++  data: {
++    id?: string;
++    kind?: $Enums.IdentityKind;
++    email?: string | null;
++    deletedAt?: Date | null;
++  } = {},
++) {
++  return prisma.identity.create({
++    data: {
++      id: data.id,
++      kind: data.kind ?? 'REGISTERED',
++      email: data.email ?? null,
++      deletedAt: data.deletedAt ?? null,
++    },
++  });
++}

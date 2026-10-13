@@ -1,0 +1,383 @@
+# Review package: eafee47..HEAD
+
+## Commits
+2d4c39c feat(sdk): манифест — обязательный clientInitiated на тип события (design 2026-09-09 §2)
+
+## Files changed
+ apps/server/test/realtime.e2e-spec.ts                 |  3 +++
+ packages/core/src/realtime/db-down.int-spec.ts        |  1 +
+ packages/core/src/realtime/event-commit.int-spec.ts   |  2 ++
+ packages/core/src/realtime/event-outbox.int-spec.ts   |  1 +
+ packages/sdk/src/manifest/define-app.contract.spec.ts | 16 ++++++++++++++++
+ packages/sdk/src/manifest/define-app.ts               |  5 +++--
+ packages/sdk/src/manifest/manifest.fixtures.ts        | 16 +++++++++++++---
+ packages/sdk/src/manifest/manifest.schema.ts          |  5 ++++-
+ 8 files changed, 43 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index fdc2655..ff9a237 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -46,28 +46,31 @@ const TEST_APP: AppManifest = {
+     properties: {
+       label: { type: 'string', 'x-visibility': 'public' },
+       orgNote: { type: 'string', 'x-visibility': 'organizer' },
+       answers: { type: 'object' }, // без аннотации → module-private (fail-safe)
+     },
+   },
+   events: {
+     'note.posted': {
+       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
+       visibility: 'public',
++      clientInitiated: true,
+     },
+     'round.hinted': {
+       schema: { type: 'object', properties: { hint: { type: 'string' } }, required: ['hint'] },
+       visibility: 'organizer',
++      clientInitiated: true,
+     },
+     'secret.recorded': {
+       schema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
+       visibility: 'module-private',
++      clientInitiated: true,
+     },
+   },
+ };
+ 
+ function restoreEnv(key: string, value: string | undefined): void {
+   if (value === undefined) delete process.env[key];
+   else process.env[key] = value;
+ }
+ 
+ // Boot зеркалит main.ts + websocket-адаптер (transport e2e прецедент); APP_MANIFESTS
+diff --git a/packages/core/src/realtime/db-down.int-spec.ts b/packages/core/src/realtime/db-down.int-spec.ts
+index 9d35e29..c2dcb52 100644
+--- a/packages/core/src/realtime/db-down.int-spec.ts
++++ b/packages/core/src/realtime/db-down.int-spec.ts
+@@ -29,20 +29,21 @@ const TEST_APP: AppManifest = {
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' } },
+         required: ['n'],
+         additionalProperties: false,
+       },
+       visibility: 'public',
++      clientInitiated: true,
+     },
+   },
+ };
+ 
+ // REQ-DEV-008, критерий выхода ф.1 «fail-closed тест при недоступности БД» —
+ // буквальная форма: БД реально остановлена (testcontainer), действие отклоняется
+ // (rejection — подтверждения клиенту нет), частичной записи не остаётся
+ // (верификация по ТОЙ ЖЕ БД после поднятия контейнера).
+ // Substance нормы (подтверждение только после фиксации, откат целиком) уже
+ // закрыт outbox-стэджингом и rollback-тестами; здесь — сам факт недоступности.
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+index 15ae6d5..f7fd0d8 100644
+--- a/packages/core/src/realtime/event-commit.int-spec.ts
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -39,29 +39,31 @@ const TEST_APP: AppManifest = {
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' }, blob: { type: 'string' } },
+         required: ['n'],
+         additionalProperties: true,
+       },
+       visibility: 'public',
++      clientInitiated: true,
+     },
+     'secret.recorded': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' } },
+         required: ['n'],
+         additionalProperties: false,
+       },
+       visibility: 'module-private',
++      clientInitiated: true,
+     },
+   },
+ };
+ 
+ describe('EventLogService.commitAppEvent', () => {
+   let db: TestDb;
+   let rooms: RoomService;
+   let eventLog: EventLogService;
+   let outbox: EventOutbox;
+ 
+diff --git a/packages/core/src/realtime/event-outbox.int-spec.ts b/packages/core/src/realtime/event-outbox.int-spec.ts
+index e3125b1..83bee83 100644
+--- a/packages/core/src/realtime/event-outbox.int-spec.ts
++++ b/packages/core/src/realtime/event-outbox.int-spec.ts
+@@ -32,20 +32,21 @@ const TEST_APP: AppManifest = {
+   },
+   events: {
+     'note.posted': {
+       schema: {
+         type: 'object',
+         properties: { n: { type: 'number' } },
+         required: ['n'],
+         additionalProperties: true,
+       },
+       visibility: 'public',
++      clientInitiated: true,
+     },
+   },
+ };
+ 
+ describe('EventOutbox', () => {
+   let db: TestDb;
+   let bus: RealtimeBus;
+   let outbox: EventOutbox;
+   let eventLog: EventLogService;
+   let rooms: RoomService;
+diff --git a/packages/sdk/src/manifest/define-app.contract.spec.ts b/packages/sdk/src/manifest/define-app.contract.spec.ts
+index 1a558e6..5da3d11 100644
+--- a/packages/sdk/src/manifest/define-app.contract.spec.ts
++++ b/packages/sdk/src/manifest/define-app.contract.spec.ts
+@@ -13,20 +13,21 @@ const quizSettings = z.object({
+ 
+ const defineQuiz = () =>
+   defineApp({
+     appId: 'quiz',
+     manifestVersion: 1,
+     appSettings: quizSettings,
+     events: {
+       'answer.submitted': {
+         schema: z.object({ roundId: z.string(), choice: z.number().int() }),
+         visibility: 'module-private',
++        clientInitiated: true,
+       },
+     },
+   });
+ 
+ describe('conversion guard', () => {
+   it.each(representableSchemas.map((c) => [c.name, c.schema] as const))(
+     'converts a legal schema: %s',
+     (_name, schema) => {
+       expect(() => toRegisteredSchema(schema)).not.toThrow();
+     },
+@@ -86,20 +87,34 @@ describe('defineApp', () => {
+     });
+     expect(manifest.contractRange).toBe('>=1.0.0 <2.0.0');
+   });
+ 
+   it('registers events under short names and carries their ceiling', () => {
+     const manifest = defineQuiz();
+     expect(Object.keys(manifest.events)).toEqual(['answer.submitted']);
+     expect(manifest.events['answer.submitted'].visibility).toBe('module-private');
+   });
+ 
++  it('carries clientInitiated into the registered manifest', () => {
++    const manifest = defineApp({
++      appId: 'flag-app',
++      manifestVersion: 1,
++      appSettings: z.strictObject({ label: z.string() }),
++      events: {
++        'note.posted': { schema: z.strictObject({ n: z.number() }), visibility: 'public', clientInitiated: true },
++        'note.derived': { schema: z.strictObject({ n: z.number() }), visibility: 'public', clientInitiated: false },
++      },
++    });
++    expect(manifest.events['note.posted']?.clientInitiated).toBe(true);
++    expect(manifest.events['note.derived']?.clientInitiated).toBe(false);
++  });
++
+   it('snapshots appSettings with visibility annotations intact (ADR-008)', () => {
+     const manifest = defineQuiz();
+     expect(readPropertyVisibility(manifest.appSettings, 'title')).toBe('public');
+     // Never annotated → module-private, and that is what the outcome-deciding data
+     // must be (REQ-CORE-008).
+     expect(readPropertyVisibility(manifest.appSettings, 'correctAnswers')).toBe('module-private');
+   });
+ 
+   // REQ-CTR-002: what the registry stores must be serializable — no live zod.
+   it('produces a JSON-serializable manifest with no live objects in it', () => {
+@@ -116,20 +131,21 @@ describe('defineApp', () => {
+   it('refuses an unrepresentable event schema with a typed error', () => {
+     expect(() =>
+       defineApp({
+         appId: 'quiz',
+         manifestVersion: 1,
+         appSettings: quizSettings,
+         events: {
+           'answer.submitted': {
+             schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b),
+             visibility: 'module-private',
++            clientInitiated: true,
+           },
+         },
+       }),
+     ).toThrow(ContractError);
+   });
+ 
+   it('refuses a misspelled visibility annotation', () => {
+     expect(() =>
+       defineApp({
+         appId: 'quiz',
+diff --git a/packages/sdk/src/manifest/define-app.ts b/packages/sdk/src/manifest/define-app.ts
+index e6add5a..01333cd 100644
+--- a/packages/sdk/src/manifest/define-app.ts
++++ b/packages/sdk/src/manifest/define-app.ts
+@@ -14,21 +14,22 @@ import {
+ // held by data: the snapshot sits in the core's storage under
+ // (appId, manifestVersion), so a module cannot break an active room's validation by
+ // deleting last version's code.
+ export type AppDefinition = {
+   appId: string;
+   manifestVersion: number;
+   // Defaults to the current major of the contract (REQ-CTR-004).
+   contractRange?: string;
+   appSettings: z.ZodType;
+   // Short names; the core prefixes the namespace itself (design §4.1).
+-  events: Record<string, { schema: z.ZodType; visibility: Visibility }>;
++  // clientInitiated — обязательное явное решение по каждому типу (fail-safe = false).
++  events: Record<string, { schema: z.ZodType; visibility: Visibility; clientInitiated: boolean }>;
+ };
+ 
+ type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
+ type CheckInternals = { _zod?: { def?: { check?: string } } };
+ 
+ // The allowlist of check kinds known to survive z.toJSONSchema intact. Ordinary
+ // bounds ('min_length', 'greater_than', …) convert fine — testing for a non-empty
+ // checks array would reject legal schemas like .min(1). Everything NOT on this list
+ // is refused, not just 'custom' (.refine()/.superRefine()): zod also has 'overwrite'
+ // checks (.trim(), .toLowerCase(), …) that convert with NO trace in the JSON Schema
+@@ -111,21 +112,21 @@ export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
+ // Where zod stops being the artifact and JSON Schema starts. The core validates the
+ // FORM from this snapshot; semantics that need room state stay with the app
+ // (design §4.6, REQ-RT-013).
+ export const defineApp = (definition: AppDefinition): AppManifest => {
+   const appSettings = toRegisteredSchema(definition.appSettings);
+   assertVisibilityAnnotations(appSettings);
+ 
+   const events = Object.fromEntries(
+     Object.entries(definition.events).map(([shortName, event]) => [
+       shortName,
+-      { schema: toRegisteredSchema(event.schema), visibility: event.visibility },
++      { schema: toRegisteredSchema(event.schema), visibility: event.visibility, clientInitiated: event.clientInitiated },
+     ]),
+   );
+ 
+   const manifest = {
+     appId: definition.appId,
+     manifestVersion: definition.manifestVersion,
+     contractRange: definition.contractRange ?? `^${CONTRACT_VERSION}`,
+     appSettings,
+     events,
+   };
+diff --git a/packages/sdk/src/manifest/manifest.fixtures.ts b/packages/sdk/src/manifest/manifest.fixtures.ts
+index 27b655f..a9caf08 100644
+--- a/packages/sdk/src/manifest/manifest.fixtures.ts
++++ b/packages/sdk/src/manifest/manifest.fixtures.ts
+@@ -17,24 +17,27 @@ export const validManifests: AppManifest[] = [
+     },
+     events: {
+       'answer.submitted': {
+         schema: {
+           type: 'object',
+           properties: { roundId: { type: 'string' }, choice: { type: 'number' } },
+           required: ['roundId', 'choice'],
+           additionalProperties: false,
+         },
+         visibility: 'module-private',
++        clientInitiated: true,
+       },
++      // Производный тип (эмиссия модуля): клиенту закрыт (design 2026-09-09 §2).
+       'round.opened': {
+         schema: { type: 'object', properties: {}, additionalProperties: false },
+         visibility: 'public',
++        clientInitiated: false,
+       },
+     },
+   },
+ ];
+ 
+ export const invalidManifestCases: { name: string; value: unknown }[] = [
+   {
+     name: 'appId is not a slug',
+     value: { ...validManifests[0], appId: 'Quiz App' },
+   },
+@@ -55,32 +58,39 @@ export const invalidManifestCases: { name: string; value: unknown }[] = [
+     value: { ...validManifests[0], contractRange: '>=1.0.0' },
+   },
+   {
+     name: 'contractRange constrains almost nothing yet is not literally * (>=0.0.0-0)',
+     value: { ...validManifests[0], contractRange: '>=0.0.0-0' },
+   },
+   {
+     name: 'event short name would forge a namespace',
+     value: {
+       ...validManifests[0],
+-      events: { 'Bad.Key!': { schema: { type: 'object' }, visibility: 'public' } },
++      events: { 'Bad.Key!': { schema: { type: 'object' }, visibility: 'public', clientInitiated: true } },
+     },
+   },
+   {
+     name: 'event declares an unknown visibility ceiling',
+     value: {
+       ...validManifests[0],
+-      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'secret' } },
++      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'secret', clientInitiated: true } },
+     },
+   },
+   {
+     name: 'event definition misses its visibility ceiling (REQ-CTR-009 makes it mandatory)',
+     value: {
+       ...validManifests[0],
+-      events: { 'answer.submitted': { schema: { type: 'object' } } },
++      events: { 'answer.submitted': { schema: { type: 'object' }, clientInitiated: true } },
++    },
++  },
++  {
++    name: 'event definition misses clientInitiated (design 2026-09-09 §2 makes it mandatory)',
++    value: {
++      ...validManifests[0],
++      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'public' } },
+     },
+   },
+   {
+     name: 'manifest carries a capabilities field (rewards is phase 3 — design §5)',
+     value: { ...validManifests[0], capabilities: ['rewards'] },
+   },
+ ];
+diff --git a/packages/sdk/src/manifest/manifest.schema.ts b/packages/sdk/src/manifest/manifest.schema.ts
+index e83806d..4509504 100644
+--- a/packages/sdk/src/manifest/manifest.schema.ts
++++ b/packages/sdk/src/manifest/manifest.schema.ts
+@@ -19,24 +19,27 @@ export type JsonSchemaObject = z.infer<typeof jsonSchemaObjectSchema>;
+ export const contractRangeSchema = z
+   .string()
+   .refine((range) => validRange(range) !== null, { message: 'not a valid semver range' })
+   // REQ-CTR-004: the declared range must be bounded above — an unbounded range claims
+   // compatibility with a contract major that does not exist yet (see
+   // admitsUnboundedContractMajor). This is the single home of that invariant.
+   .refine((range) => !admitsUnboundedContractMajor(range), {
+     message: 'contract range must be bounded above (it must not admit a contract major that does not exist yet)',
+   });
+ 
+-// Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2).
++// Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2). clientInitiated
++// (фаза 2): только типы с true открыты для клиентского publish; производные типы
++// (эмиссия модуля, actorId=null) клиенту закрыты — гейт в app-runtime диспетчере.
+ export const manifestEventSchema = z.strictObject({
+   schema: jsonSchemaObjectSchema,
+   visibility: visibilitySchema,
++  clientInitiated: z.boolean(),
+ });
+ 
+ // The manifest (design §5). strictObject: an unknown field is refused rather than
+ // ignored — notably `capabilities`, which ADR-003 will introduce for rewards in
+ // phase 3 and which must not appear as empty scaffolding now (CLAUDE.md §2.3).
+ export const appManifestSchema = z.strictObject({
+   appId: appIdSchema,
+   manifestVersion: z.number().int().positive(),
+   contractRange: contractRangeSchema,
+   appSettings: jsonSchemaObjectSchema,

@@ -1,0 +1,4941 @@
+# Review package: 4dea9cf..HEAD
+
+## Commits
+ae87514 ci: run Testcontainers integration lane (REQ-DEV-001)
+6094fea feat(core): wire RoomModule and register it in the server (REQ-CORE-002)
+c30909c test(core): prove transition atomicity under concurrency (REQ-RT-005)
+8517cec feat(core): RoomService lifecycle via atomic guarded update (REQ-RT-005, REQ-CORE-006)
+56895a6 test(core): Testcontainers integration harness + smoke test (REQ-OPS-002, REQ-DEV-001)
+17903e6 feat(core): Room model + first migration in schema room (REQ-RT-005, REQ-CORE-003, REQ-OPS-002)
+afd6a71 refactor(core): exhaustive transition matrix + keyed allow-list (REQ-RT-005)
+0fd84d9 feat(core): room state machine + typed errors (REQ-RT-005)
+f0b3f85 docs(handoff): update for session 2026-07-18 — Rooms lifecycle design+plan
+50f7fe7 docs(plan): room lifecycle implementation plan (REQ-RT-005, phase 1)
+2aa6844 docs(design): room lifecycle design — state machine slice (REQ-RT-005)
+
+## Files changed
+ .github/workflows/ci.yml                           |   7 +
+ HANDOFF.md                                         |  72 +-
+ apps/server/src/app.module.ts                      |   4 +-
+ docs/sessions/2026-07-18-room-lifecycle-design.md  | 236 +++++
+ ...026-07-18-room-lifecycle-implementation-plan.md | 918 ++++++++++++++++++++
+ package.json                                       |   1 +
+ packages/core/jest.integration.config.js           |  11 +
+ packages/core/package.json                         |   3 +
+ .../20260718061612_room_lifecycle/migration.sql    |  17 +
+ .../core/prisma/migrations/migration_lock.toml     |   3 +
+ packages/core/prisma/schema.prisma                 |  25 +
+ packages/core/src/index.ts                         |   4 +
+ packages/core/src/room/room-state-machine.spec.ts  |  77 ++
+ packages/core/src/room/room-state-machine.ts       |  44 +
+ packages/core/src/room/room.errors.ts              |  35 +
+ packages/core/src/room/room.module.ts              |  10 +
+ packages/core/src/room/room.service.int-spec.ts    | 128 +++
+ packages/core/src/room/room.service.ts             |  62 ++
+ packages/core/src/testing/harness.int-spec.ts      |  24 +
+ .../core/src/testing/postgres.testcontainer.ts     |  38 +
+ packages/core/tsconfig.json                        |   3 +-
+ pnpm-lock.yaml                                     | 953 +++++++++++++++++++++
+ pnpm-workspace.yaml                                |   7 +
+ turbo.json                                         |   1 +
+ 24 files changed, 2645 insertions(+), 38 deletions(-)
+
+## Diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 491fe2f..3a51110 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -19,13 +19,20 @@ jobs:
+       - run: pnpm install --frozen-lockfile
+       - run: pnpm exec prisma generate
+         env:
+           # CI-only placeholder so prisma.config.ts's env('DATABASE_URL') resolves
+           # during config loading. `prisma generate` does not connect to a DB;
+           # mirrors the same placeholder used in the Dockerfile build stage.
+           DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
+       - run: pnpm run typecheck
+       - run: pnpm run lint
+       - run: pnpm run test
++      - run: pnpm run test:int
++        env:
++          # Testcontainers spins up its own ephemeral Postgres via Docker; this is a
++          # placeholder so prisma.config.ts's env('DATABASE_URL') resolves during CLI
++          # config loading. The harness overrides DATABASE_URL with the live container
++          # URL before `migrate deploy` (see postgres.testcontainer.ts).
++          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
+       - run: pnpm run build
+       - run: pnpm run boundary-check
+       - run: pnpm run guardrails
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 7182798..1985125 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -1,70 +1,72 @@
+ # HANDOFF
+ 
+ **Date:** 2026-07-18
+-**Branch:** `main` (чистая; фаза-1-ветки `phase-1-sdk-contract-core` и `phase-1-app-registry-registration` слиты fast-forward и удалены. **Накопленный backlog запушен на `origin/main` 2026-07-18 по явному решению владельца — `main` синхронизирован с remote** (чистый fast-forward, было 49 коммитов); стоявшее с фазы 0 «push отложен» — снято) — последний содержательный коммит `192d38b` feat(core): wire AppRegistryModule with empty phase-2 manifest seam (REQ-CORE-004, ADR-002)
++**Branch:** `phase-1-room-lifecycle` (2 коммита впереди `origin/main`, **не запушена**; создана от `main`) — последний коммит `50f7fe7` docs(plan): room lifecycle implementation plan. `main` синхронизирован с `origin/main`.
+ 
+-**SDK contract core И сервис регистрации манифеста — ЗАВЕРШЕНЫ И СЛИТЫ в `main`.** SDK contract core исполнен (9/9). Затем **app-registry registration** (точка принуждения #1 из дизайна SDK §7) исполнен (2/2), финальное ревью всей ветки чистое (opus, 0 Critical / 0 Important, «Ready to merge: Yes»), 6/6 гейтов зелёные на слитом `main`. Первый настоящий core-side потребитель SDK-контракта: `registerManifest` (валидация манифеста + `assertContractRangeSatisfied`, REQ-CTR-004) и `buildAppRegistry` — boot-time immutable реестр (REQ-CORE-004, без Prisma), обёрнутый в `AppRegistryModule` с пустым DI-швом `APP_MANIFESTS=[]` для приложений фазы 2. Этап продукта — MVP. Метод — AI-Driven / Specification-Driven, спецификация в `docs/` — источник истины.
+-
+-**Уточнение по ходу реализации (внесено в дизайн):** страж конверсии — авторская сторона (`defineApp`), ядро его НЕ вызывает (манифест пересекает границу уже как JSON Schema). Различимый вклад ядра — `assertContractRangeSatisfied` + повторная валидация `appManifestSchema`. Формулировка прошлого HANDOFF («потребитель стража конверсии и проекций») этим скорректирована.
++**Состояние фазы 1.** SDK contract core И сервис регистрации манифеста — **ЗАВЕРШЕНЫ И СЛИТЫ в `main`** (SDK 9/9, app-registry 2/2, финальные ревью чистые, 6/6 гейтов зелёные). Первый настоящий core-side потребитель контракта — `registerManifest` + `assertContractRangeSatisfied` + boot-time immutable реестр (`buildAppRegistry`, `AppRegistryModule` с пустым швом `APP_MANIFESTS=[]` под фазу 2). **Текущая работа:** владелец выбрал **Rooms** как следующий кусок ядра; в этой сессии выполнены brainstorm → design → implementation plan для ПЕРВОГО среза арки Rooms (**Room lifecycle**). Кода ещё нет — только дизайн-док и план, оба закоммичены на ветке. Этап продукта — MVP. Метод — AIDD / Specification-Driven.
+ 
+ ## Как войти в контекст за одно чтение
+ 
+ 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
+-2. **`.superpowers/sdd/progress.md` — леджер исполнения. Читать сразу после CLAUDE.md.** Держит статус каждой задачи, все отклонения от плана с обоснованием, роллап Minor-находок с триажем финального ревью, и раздел «FOLLOW-UPS FILED». Задачи COMPLETE — сделаны, не пере-диспатчить. **Леджера нет в git** (`.superpowers/` игнорируется) — переживает смену сессии, но не `git clean -fdx`; тогда восстановление по `git log`.
+-3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план 0→4.
+-4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом, не вместо.
+-5. `docs/sessions/2026-07-16-sdk-contract-core-design.md` — **дизайн ядра SDK-контракта**. §3.3/§6 амендированы 2026-07-17 (страж = выводимый аллоу-лист); §5 амендирован 2026-07-18 (`contractRange` обязан быть ограничен сверху — чтение REQ-CTR-004).
+-6. `docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md` — **исполненный план SDK**. В конце — Критерии выхода и «что план сознательно НЕ строит». Текст задач НЕ правился при отклонениях (намеренно — чтобы сверка план↔код их вскрывала); перечень отклонений — в леджере.
+-7. `docs/sessions/2026-07-18-app-registry-registration-design.md` + `...-implementation-plan.md` — **дизайн и исполненный план сервиса регистрации** (точка #1 §7). §3 дизайна фиксирует, что страж — авторская сторона.
++2. **`.superpowers/sdd/progress.md` — леджер исполнения прошлых планов** (SDK + app-registry). Читать после CLAUDE.md. Задачи COMPLETE — сделаны, не пере-диспатчить. Леджера нет в git (`.superpowers/` игнорируется).
++3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, §5 фазовый план.
++4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1. Читать вместе с пакетом.
++5. `docs/sessions/2026-07-16-sdk-contract-core-design.md` — дизайн ядра SDK-контракта; §7 «точки принуждения» — Rooms фундамент для точек #3–#5.
++6. `docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md` — исполненный план SDK.
++7. `docs/sessions/2026-07-18-app-registry-registration-design.md` + `...-implementation-plan.md` — дизайн и исполненный план сервиса регистрации (точка #1 §7).
+ 8. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS.
++9. **`docs/sessions/2026-07-18-room-lifecycle-design.md` — ОДОБРЕННЫЙ дизайн текущего среза** (Room lifecycle). Читать перед планом.
++10. **`docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md` — ГОТОВЫЙ план реализации** (7 задач, TDD). Вход для исполнения.
+ 
+ ## Два гейта над фазами
+ 
+-1. **Юрист** — до первого события с посторонними или призами. Список вопросов готов (`docs/legal/questions-for-lawyer.md`), заключение даёт живой юрист. Блокирует старт работы с реальными PII, не блокирует реализацию.
++1. **Юрист** — до первого события с посторонними или призами. Список вопросов готов (`docs/legal/questions-for-lawyer.md`). Блокирует старт работы с реальными PII, не блокирует реализацию.
+ 2. **Первое живое событие** — до тяжёлых вложений в фазу 3 (rewards/лотерея).
+ 
+ ## Следующее действие
+ 
+-Регистрация манифеста (точка #1 §7) слита. Открытого решения, гейтящего продолжение, нет. Дальнейшая работа фазы 1 — на выбор владельца:
+-
+-1. **Rooms (машина состояний + membership)** — разблокирует ОСТАВШИЕСЯ точки §7, которые все висят на Rooms: запись/валидация `appSettings` (#2), пин `(appId, manifestVersion)` при `DRAFT→ACTIVE` (REQ-RT-004, #3), фиксация события (#4), чтение проекции (#5). Это самая крупная оставшаяся часть ядра. Отдельного плана нет — начинать с brainstorm → writing-plans.
+-2. **Топ-follow-up** — рекурсивная `jsonValueSchema` для payload (не требует Rooms; см. ниже).
+-3. **Дешёвые follow-up из этой сессии** (не гейтят; в леджере, раздел FOLLOW-UPS FILED): комментарий-обоснование `@`-безопасности `registryKey`; строка в дизайне «well-formedness вложенных JSON Schema гарантирует `defineApp`, не ядро»; `Object.isFrozen(registry)` тест (закрывает stated-vs-actual §6 дизайна).
++**Исполнить план Room lifecycle** — `docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md`.
+ 
+-**Forward-обязательство** для плана event-commit/Rooms: первый потребитель, отдающий `ContractError` наружу по HTTP/Socket.io, обязан идти через `toPayload()`, не `err.message` (REQ-SEC-006).
++- **Способ (решение владельца):** subagent-driven — `superpowers:subagent-driven-development`, свежий субагент на задачу + двухстадийное ревью между задачами. Начинать с **Task 1** (чистая машина состояний, TDD, без БД).
++- **Ветка:** уже на месте — `phase-1-room-lifecycle` (дизайн `2aa6844` + план `50f7fe7`). Работать на ней.
++- **Предпосылка:** для Task 3–5 нужен запущенный **Docker** (Testcontainers поднимает эфемерный Postgres). Тесты бьют только по одноразовому контейнеру — не по проду (глобальное правило тестирования соблюдено конструктивно).
++- **Объём среза (согласован):** минимальный Room = `{id, organizerId, status, deletedAt, createdAt, updatedAt}` + машина состояний REQ-RT-005 + soft-delete. Headline-требование — **REQ-RT-005**. Осознанно НЕ строится (швы словами, не кодом): lifecycle-эмит в лог (REQ-RT-010), appSettings/пин/заморозка (REQ-RT-004), organizer=REGISTERED+FK (REQ-ID-005), авторизация переходов, HTTP-поверхность, код комнаты/политики (REQ-ID-013/002), запечатывание лога (REQ-RT-016). Полный список швов — §10 дизайн-дока.
++- **Ключевые решения дизайна** (чтобы не переоткрывать): чистый state-machine модуль + тонкий RoomService; переходы — **атомарный условный UPDATE** (`WHERE status=:from`), не read-then-write; две core-внутренние ошибки `ROOM_TRANSITION_INVALID` / `ROOM_CONFLICT` (не в SDK); тесты — Testcontainers.
+ 
+-Push выполнен 2026-07-18 (`main` синхронизирован с `origin/main`). Вне агента остаётся гейт юриста.
++**Forward-обязательство** (из плана app-registry, актуально для будущих планов event-commit/Rooms-HTTP): первый потребитель, отдающий `ContractError`/доменную ошибку наружу по HTTP/Socket.io, обязан идти через типизированный код без стектрейса, не `err.message` (REQ-SEC-006).
+ 
+ ## Отложенные follow-up (не гейтят; полный список в леджере, раздел FOLLOW-UPS FILED)
+ 
+-- **Первый по приоритету:** общая рекурсивная `jsonValueSchema` для payload в `log-event` и `projected-event` — `z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002 (пропустит функцию, `Date`, `Map`, `BigInt`). Не регрессия (унаследовано из фазы 0), но `projected-event` — настоящая граница к клиенту. Небольшая дизайн-задача (политика рекурсии/глубины), задевает и фаза-0 конверт.
+-- **Core-side план:** сигнатура `composeEventType(namespace: string)` — «подделать чужой неймспейс невозможно» держится дисциплиной вызывающих. Внутри SDK единственный вызывающий — `core-events.ts` с `const 'core'`. Первый core-side вызывающий (сборщик проекции/коммит-пайплайн) — в более позднем плане, где §7 дизайна связывает. Долговечный фикс — брендированный `AppId` (z.brand) или параметр `TypeOwner`, НЕ рантайм-проверка здесь.
+-- **Дешёвое харденинг-опционально:** фикстуры union/record-refine для стража; `it.each` над обоими терминальными переходами (Task 5); разбить слитые заголовки range-тестов (Task 6); `!Array.isArray` в `asRecord` (Task 8). Всё копеечное, ничего не несущее.
++- **Первый по приоритету:** общая рекурсивная `jsonValueSchema` для payload в `log-event`/`projected-event` — `z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002. Небольшая дизайн-задача; не требует Rooms.
++- **Core-side:** сигнатура `composeEventType(namespace)` держится дисциплиной вызывающих; первый core-side вызывающий (сборщик проекции/коммит-пайплайн) — в более позднем плане. Долговечный фикс — брендированный `AppId` (z.brand).
++- **Дешёвое харденинг-опционально:** фикстуры union/record-refine для стража; `it.each` над терминальными переходами; `!Array.isArray` в `asRecord`. Копеечное.
+ 
+ ## Осталось недоделанным (шире плана)
+ 
+-- **`origin/main` синхронизирован** с `main` — backlog запушен 2026-07-18 (было 49 коммитов).
++- **Ветка `phase-1-room-lifecycle` не запушена** — 2 коммита (дизайн+план) только локально. Публикация — решение владельца.
++- **Room lifecycle не реализован** — есть дизайн и план, кода нет. Исполнение — следующая сессия (см. «Следующее действие»).
+ - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
+-- **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный против настоящей БД). В фазе 1 не трогался: SDK — лист, рантайма не касается.
++- **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный). В фазе 1 не трогался.
+ 
+-## Session 2026-07-18
++## Session 2026-07-18 — Rooms lifecycle design+plan
+ 
+ ### Что сделано
+-- Закрыт последний накопленный вопрос владельца по SDK contract core: **верхняя граница диапазона контракта (REQ-CTR-004)**. Прочтение A (fail-closed) — диапазон обязан быть ограничен сверху. Безграничный сверху (`>=1.0.0`, `*`, `>=0.0.0-0`) объявлял совместимость с мажором контракта, которого ещё не существует; версионный гейт тихо перестал бы гейтить ровно при первом ломающем 2.0.0. `>=0.0.0-0` — острый случай: ограничивает почти ничего, но в `*` не нормализуется, так что прежняя `*`-проверка его пропускала.
+-- **Реализация:** предикат `admitsUnboundedContractMajor` (сентинел-проба `satisfies('999999.0.0', range)`, движок semver единообразно ест каретки/тильды/x-ranges/дефис/OR) в `contract-version.ts`; второй `.refine()` в `contractRangeSchema`. **Единственный дом инварианта — схема** (Вариант 1); `isContractRangeSatisfied` намеренно НЕ тронут — владелец отклонил defense-in-depth, корректный пайплайн валидирует манифест схемой до регистрации. Дизайн §5 амендирован.
+-- TDD (RED→GREEN, тесты первыми — REQ-CTR-005), двухстадийное ревью двумя параллельными агентами (Standards 0 hard / Spec 0 находок). Все гейты зелёные: 142 теста SDK, весь монорепо (5/5 turbo — core, server e2e, sdk), typecheck, lint, boundary-check (123 модуля, 0 нарушений), guardrails.
+-- Ветка `phase-1-sdk-contract-core` слита в `main` fast-forward и удалена (навык finishing-a-development-branch, Вариант 1: merge локально). Тесты на слитом `main` зелёные. (Push этого и всего накопленного выполнен позже в тот же день, 2026-07-18.)
++- Владелец выбрал **Rooms** как следующий кусок ядра фазы 1 (из трёх опций прошлого HANDOFF).
++- Проведён brainstorm (`superpowers:brainstorming`): срез сужен до **Room lifecycle** (владелец отклонил вариант «Rooms+Identity+Membership» и «Identity-first» в пользу чистого минимального Room). Решено отложить appSettings/пин/заморозку (минимальный Room). Внутренняя структура — Подход 1 (чистая машина состояний + тонкий сервис, атомарный условный UPDATE).
++- Написан и одобрен дизайн-док `docs/sessions/2026-07-18-room-lifecycle-design.md`.
++- Написан план реализации `docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md` (`superpowers:writing-plans`): 7 TDD-задач. Ключевое решение по тестам — **Testcontainers** (эфемерный Postgres; гоняется локально и в CI; первый DB-тест в репозитории, станет переиспользуемым паттерном ядра).
++- Владелец выбрал исполнение **subagent-driven, но в новой сессии** → эта сессия завершается на готовом плане.
+ 
+ ### Коммиты этой сессии
+-- `c4c586d` fix(sdk): contract range must be bounded above (REQ-CTR-004, owner decision 2026-07-18)
++- `2aa6844` docs(design): room lifecycle design — state machine slice (REQ-RT-005)
++- `50f7fe7` docs(plan): room lifecycle implementation plan (REQ-RT-005, phase 1)
+ - (+ коммит этого HANDOFF)
+ 
+ ### Локальное состояние (не в git)
+-- Ничего запущенного: SDK — лист, рантайма не касается; Docker/БД в этой сессии не поднимались.
+-- Рабочее дерево чистое.
+-- Отчёты ревью-агентов эфемерны (фоновые агенты, в файлы проекта не сохранялись); их выводы — в разделе «Что сделано». Таблица «представимых видов проверок zod» из прошлого батча — в леджере.
++- Ничего не запущено: писались только доки, рантайм/БД/Docker не поднимались.
++- Рабочее дерево чистое (кроме HANDOFF на момент коммита).
++- Ветка `phase-1-room-lifecycle` — локальная, не на `origin`.
+ 
+ ### Осталось недоделанным
+-- Push `origin/main` — выполнен 2026-07-18 (охватил и эти коммиты, и app-registry).
+-- Гейт юриста — вне агента.
+-- Follow-up'ы (топ — рекурсивная `jsonValueSchema` для payload) — не гейтят, в леджере (раздел выше).
++- Исполнить план (Task 1→7) в новой сессии через subagent-driven-development.
++- Решить про push ветки (не делалось по умолчанию).
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index adf39d7..6d4d9ba 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,7 +1,7 @@
+ import { Module } from '@nestjs/common';
+-import { AppRegistryModule, HealthModule, PrismaModule } from '@mymozhem/core';
++import { AppRegistryModule, HealthModule, PrismaModule, RoomModule } from '@mymozhem/core';
+ 
+ @Module({
+-  imports: [PrismaModule, HealthModule, AppRegistryModule],
++  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule],
+ })
+ export class AppModule {}
+diff --git a/docs/sessions/2026-07-18-room-lifecycle-design.md b/docs/sessions/2026-07-18-room-lifecycle-design.md
+new file mode 100644
+index 0000000..a285305
+--- /dev/null
++++ b/docs/sessions/2026-07-18-room-lifecycle-design.md
+@@ -0,0 +1,236 @@
++# Дизайн — Room lifecycle (срез 1 арки Rooms)
++
++**Статус:** одобрен владельцем 2026-07-18 (brainstorm-сессия). Вход для writing-plans.
++**Этап:** MVP, фаза 1 (Ядро). Метод — AIDD / Specification-Driven.
++**Отношение к другим документам:** реализует часть объёма фазы 1 (§5 нормативного пакета
++v1.2) с учётом амендмента v1.3. Ссылается на дизайн ядра SDK-контракта
++(`2026-07-16-sdk-contract-core-design.md`, §7 «точки принуждения»): Room — фундамент,
++на который пинятся точки §7 #3–#5 (пин `(appId, manifestVersion)` при ACTIVE, фиксация
++события, чтение проекции). Этот срез строит только фундамент.
++
++---
++
++## 0. Одно-абзацная рамка
++
++Первый срез домена Room — **чистая машина жизненного цикла комнаты как CRUD-сущности**.
++По ADR-005 полный event sourcing CRUD-доменов (комнаты, членство, реестр) избыточен:
++Room — строка с колонкой `status` и явной машиной состояний (REQ-RT-005), а не
++проекция из лога. Lifecycle-эмит в лог (REQ-RT-010) — аддитивное уведомление поверх,
++вводится, когда появится Event Log. Срез намеренно узкий и глубоко тестируемый: он не
++тянет вверх Identity (организатор, гости, токены) и вниз Event Log; авторизация «кто
++переводит» и валидация содержимого — отдельные слои позже.
++
++## 1. Объём и карта требований
++
++**Закрывает (headline): REQ-RT-005** — переходы статуса ограничены явной машиной
++состояний: `DRAFT → ACTIVE → COMPLETED`, `DRAFT → CANCELLED`, `ACTIVE → CANCELLED`;
++иные переходы запрещены. Мягкое удаление — ортогональный атрибут `deletedAt`,
++допустимый в `DRAFT / COMPLETED / CANCELLED`, но не в `ACTIVE`; удаление не является
++статусом.
++
++**Сопутствующе задействует:**
++- REQ-CORE-002 — Room как один из доменов ядра (Identity, Room, Membership, Realtime,
++  App-registry). Срез вводит домен Room.
++- REQ-CORE-003 — каждый модуль владеет таблицами в отдельной PostgreSQL-схеме
++  (Prisma `multiSchema`). Room живёт в схеме `room`. Декларативный FK из таблицы модуля
++  на core-таблицу `identity` допускается без каскадов — задел под будущий `organizerId → identity.id`.
++- REQ-CORE-004 — нет глобального мутабельного состояния процесса: чистый state-machine
++  модуль без module-level мутабельного состояния; сервис — stateless поверх Prisma.
++- REQ-CORE-006 — бизнес-логика в сервисах; в этом срезе транспортной обвязки
++  (контроллеры/гейтвеи) нет вовсе.
++- REQ-OPS-002 — миграция применяется детерминированно (`migrate deploy`); сид в
++  production не попадает.
++- REQ-DEV-001 — CI-гейты: lint (+ boundary-check), type-check, unit, сборка.
++
++**Осознанно НЕ строит (швы фиксируются словами, не пустым кодом — CLAUDE.md §2 п.3):**
++- **REQ-RT-010** (lifecycle-эмит перехода в лог как `public`-событие) — нет Event Log.
++  Переходы пока не эмитятся; шов закрывается в плане Event Log / event-commit.
++- **REQ-RT-004** (заморозка `appSettings` и пина `(appId, manifestVersion)` при ACTIVE) —
++  следующий план (appSettings-write-path, §7 #2/#3 дизайна SDK), где есть чем
++  замораживать и чем валидировать. Room-строка в этом срезе колонок `appSettings/appId/
++  manifestVersion` **не несёт** — миграция аддитивна, колонки добавятся позже.
++- **REQ-ID-005** (организатор = REGISTERED-identity) и FK `organizerId → identity.id` —
++  нет таблицы Identity. `organizerId` — простая колонка (`@db.Uuid`), без FK и без
++  REGISTERED-проверки.
++- **Авторизация переходов** («кто вправе переводить комнату» — роли/членство) — нужен
++  Membership/Identity. Сервис принуждает только легальность машины состояний, не право
++  актора.
++- **HTTP/REST-поверхность** организатора и маппинг ошибок в типизированный API-ответ
++  (REQ-SEC-006) — нужен auth-контекст. В этом срезе — только сервис + персистентность.
++- **REQ-ID-013 / REQ-ID-002** (код комнаты, политики входа) — домен Membership.
++- **REQ-RT-016** (запечатывание лога в терминальном статусе) — event-commit план (нет лога).
++
++## 2. Модель данных (Prisma, схема `room`)
++
++Prisma 7.8.0: `multiSchema` — GA, preview-флаг не нужен. `partialIndexes` (REQ-DEV-006)
++в этом срезе не участвует — частичных уникальных индексов у Room нет.
++
++```prisma
++// datasource: url приходит через @prisma/adapter-pg (как в фазе 0), + schemas
++datasource db {
++  provider = "postgresql"
++  schemas  = ["room"]
++}
++
++enum RoomStatus {
++  DRAFT
++  ACTIVE
++  COMPLETED
++  CANCELLED
++  @@schema("room")
++}
++
++model Room {
++  id          String     @id @default(uuid()) @db.Uuid
++  organizerId String     @db.Uuid                 // простая колонка; FK→identity + REGISTERED — отложено (REQ-ID-005)
++  status      RoomStatus @default(DRAFT)
++  deletedAt   DateTime?                            // ортогональный soft-delete (REQ-RT-005)
++  createdAt   DateTime   @default(now())
++  updatedAt   DateTime   @updatedAt
++  @@schema("room")
++}
++```
++
++- Первая реальная модель ядра ⇒ первая миграция (`prisma migrate dev` при разработке,
++  `migrate deploy` при деплое — REQ-OPS-002). Устанавливает паттерн «схема-на-модуль».
++- Индексы под чтение (напр. по `organizerId`) **не вводятся** — read-path в этом срезе
++  нет; добавятся аддитивно вместе с ним.
++- `@db.Uuid` у `organizerId` — задел под будущий декларативный FK на `identity.id`
++  (REQ-CORE-003), вводимый без миграции данных.
++
++## 3. Чистый модуль машины состояний (`room-state-machine.ts`)
++
++Без зависимостей на Nest/Prisma — полностью юнит-тестируем в изоляции (глубокий узел):
++
++```ts
++type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
++
++// allow-list переходов; COMPLETED и CANCELLED терминальны (нет исходящих)
++const TRANSITIONS: ReadonlyArray<readonly [RoomStatus, RoomStatus]> = [
++  ['DRAFT', 'ACTIVE'],
++  ['DRAFT', 'CANCELLED'],
++  ['ACTIVE', 'COMPLETED'],
++  ['ACTIVE', 'CANCELLED'],
++];
++
++// бросает RoomTransitionError, если пары (from,to) нет в allow-list
++function assertTransition(from: RoomStatus, to: RoomStatus): void;
++
++// soft-delete разрешён ∈ {DRAFT, COMPLETED, CANCELLED}; ACTIVE → RoomTransitionError
++function assertDeletable(status: RoomStatus): void;
++```
++
++Таблица — единственный источник истины по легальности; методы сервиса не дублируют
++правил. `RoomStatus` — локальный доменный тип ядра (не из SDK: lifecycle-статус не
++пересекает границу app↔core в этом срезе).
++
++## 4. RoomService (персистентность + оркестрация)
++
++Корректность конкуренции держится на **атомарном условном UPDATE**, а не на
++read-then-write (CLAUDE.md §4: инвариант в БД, не проверка перед записью):
++
++- `create(organizerId)` → INSERT со `status = DRAFT`. REGISTERED-проверка организатора
++  отложена (REQ-ID-005, нет Identity).
++- `transition(roomId, to)`:
++  1. SELECT текущей строки. `null` → `ROOM_CONFLICT` (not-found свёрнут в конфликт).
++  2. `assertTransition(from, to)` — при нелегальности `ROOM_TRANSITION_INVALID`.
++  3. `UPDATE room SET status = :to WHERE id = :roomId AND status = :from AND deletedAt IS NULL`.
++     Ноль затронутых строк → `ROOM_CONFLICT` (гонка / уже терминально / удалено).
++  4. Удобные обёртки: `activate` / `complete` / `cancel`.
++- `softDelete(roomId)`:
++  1. SELECT. `null` → `ROOM_CONFLICT`.
++  2. `assertDeletable(status)` — при нарушении (ACTIVE) `ROOM_TRANSITION_INVALID`.
++  3. `UPDATE room SET deletedAt = now() WHERE id = :roomId AND deletedAt IS NULL AND status <> 'ACTIVE'`.
++     Ноль строк → `ROOM_CONFLICT`.
++
++SELECT существует **только** ради точного разделения «нелегальный переход существующей
++комнаты» vs «конфликт»; атомарность и корректность гонки держит `WHERE`-условие
++единственного UPDATE, а не прочитанное значение (TOCTOU между SELECT и UPDATE безопасен:
++устаревший `from` в `WHERE` даёт ноль строк → `ROOM_CONFLICT`). Soft-deleted комната
++инертна — она вне `deletedAt IS NULL`, любой переход даёт ноль строк.
++
++## 5. Обработка ошибок
++
++Core-внутренние типизированные доменные ошибки со стабильным `code` — **не в SDK**: они
++не пересекают границу app↔core (это область контрактных кодов §8 дизайна SDK). Две штуки:
++
++- `ROOM_TRANSITION_INVALID` — нарушение машины состояний (нелегальный переход либо
++  удаление в `ACTIVE`).
++- `ROOM_CONFLICT` — атомарный UPDATE затронул ноль строк: not-found, гонка конкурирующих
++  переходов, уже терминальный статус или уже удалено.
++
++**Шов (REQ-SEC-006):** при появлении HTTP-поверхности организатора эти коды маппятся в
++типизированный API-ответ без внутренних сообщений и стектрейсов. Фиксируется словами.
++
++## 6. Обвязка модуля
++
++- `RoomModule` (Nest) предоставляет `RoomService`, импортирует `PrismaModule`.
++- Экспорт из `@mymozhem/core` (`packages/core/src/index.ts`); регистрация в
++  `apps/server/src/app.module.ts` рядом с `AppRegistryModule` / `HealthModule`.
++- Чистый state-machine модуль зависимостей на Nest/Prisma не имеет — импортируется и
++  тестируется отдельно.
++- boundary-check (dependency-cruiser) остаётся зелёным: `RoomService → PrismaService` —
++  тот же внутренний паттерн ядра, что и существующие модули; SDK здесь не задействован.
++
++## 7. Стратегия тестов (TDD, RED → GREEN — тесты первыми)
++
++**Unit (ноль БД) — `room-state-machine`:**
++- каждый из 4 легальных переходов разрешён;
++- представительный набор нелегальных отклонён (`COMPLETED→ACTIVE`, `DRAFT→COMPLETED`,
++  `CANCELLED→*`, `ACTIVE→DRAFT`, самопереходы);
++- `assertDeletable` по каждому статусу (ACTIVE отклонён, прочие разрешены).
++
++**Интеграционные (реальная БД — критерий выхода фазы 1 «интеграционные тесты ядра»):**
++- `create` → строка со `status = DRAFT`;
++- каждый легальный переход персистится;
++- нелегальный переход → `ROOM_TRANSITION_INVALID`;
++- терминальный статус (`COMPLETED`/`CANCELLED`) отклоняет дальнейшие переходы;
++- soft-delete разрешён в `DRAFT`/`COMPLETED`/`CANCELLED`, отклонён в `ACTIVE`
++  (`ROOM_TRANSITION_INVALID`);
++- **конкурентные конкурирующие переходы** (`DRAFT→ACTIVE` vs `DRAFT→CANCELLED` над одной
++  комнатой) — ровно один побеждает, второй получает `ROOM_CONFLICT` (доказывает
++  атомарность условного UPDATE).
++
++## 8. Отклонённые альтернативы (обоснование решений)
++
++- **appSettings/пин/заморозка в этом срезе** — отклонено. Инвариант заморозки REQ-RT-004
++  тестируем и осмыслен только вместе с write-path; принуждать «нет мутации после ACTIVE»
++  над полем, которое никто не пишет, — правило над мёртвой колонкой. Аддитивная миграция
++  позже дешевле. Срез остаётся чистой машиной состояний.
++- **organizerId с FK и REGISTERED-проверкой сейчас** — отклонено: нет таблицы Identity;
++  тянуть Identity вперёд его собственного проектирования — вскипятить океан. Простая
++  `@db.Uuid`-колонка + шов словами.
++- **Ошибка перехода в SDK** — отклонено: lifecycle-переход не пересекает границу
++  app↔core (это не событие контракта). Core-внутренняя доменная ошибка; выравнивание с
++  API-таксономией — при появлении HTTP.
++- **Логика переходов инлайн в сервисе (Подход 2)** — отклонено: сцепляет правила машины
++  с персистентностью, хуже тестируется изолированно.
++- **Generic state-machine библиотека (xstate, Подход 3)** — отклонено: оверкилл на
++  4 состояния / 4 перехода, лишняя зависимость и косвенность (YAGNI).
++- **read-then-write для переходов** — отклонено в пользу атомарного условного UPDATE:
++  read-then-write допускает гонку между проверкой и записью; `WHERE status = :from`
++  делает переход payload-нейтрально атомарным на уровне БД (та же философия, что
++  REQ-RWD-010).
++
++## 9. Критерии выхода среза и ревью
++
++**Критерии выхода:** все тесты §7 зелёные; CI-гейты зелёные (lint + boundary-check,
++type-check, unit/integration, сборка — REQ-DEV-001); первая миграция схемы `room`
++применяется чисто; экспорт `RoomModule`/`RoomService` из `@mymozhem/core`
++зарегистрирован в сервере.
++
++**Двухстадийное ревью (CLAUDE.md §3):** стадия 1 (спек-комплаенс) сверяется против
++перечисленных REQ-* из §1 — headline **REQ-RT-005** и сопутствующие REQ-CORE-002/003/004/006,
++REQ-OPS-002; стадия 2 — качество кода.
++
++## 10. Швы (отложенное, зафиксированное словами)
++
++| Шов | Требование | Закрывается в |
++|---|---|---|
++| Lifecycle-эмит перехода в лог (`public`) | REQ-RT-010 | план Event Log / event-commit |
++| Заморозка appSettings + пин `(appId, manifestVersion)` при ACTIVE | REQ-RT-004 | appSettings-write-path (§7 #2/#3) |
++| FK `organizerId → identity.id` + организатор = REGISTERED | REQ-CORE-003, REQ-ID-005 | план Identity |
++| Авторизация переходов (роли/членство) | REQ-ID-011 и др. | план Membership |
++| HTTP-поверхность + маппинг ошибок в API (без стектрейсов) | REQ-SEC-006 | план с auth |
++| Код комнаты, политики входа | REQ-ID-013, REQ-ID-002 | план Membership |
++| Запечатывание лога в терминальном статусе | REQ-RT-016 | event-commit план |
+diff --git a/docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md b/docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md
+new file mode 100644
+index 0000000..576560c
+--- /dev/null
++++ b/docs/sessions/2026-07-18-room-lifecycle-implementation-plan.md
+@@ -0,0 +1,918 @@
++# Room Lifecycle Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Build the minimal Room aggregate as a CRUD lifecycle state machine (REQ-RT-005): create + status transitions + orthogonal soft-delete, persisted in a dedicated `room` Postgres schema, with a pure state-machine module and a Testcontainers-backed integration test proving atomic, race-safe transitions.
++
++**Architecture:** A dependency-free pure module (`room-state-machine.ts`) owns the transition allow-list and deletability rule; a thin `RoomService` persists via Prisma and enforces transitions with **atomic conditional `UPDATE ... WHERE status = :from`** (zero rows affected → typed conflict), not read-then-write. Two core-internal typed errors (`ROOM_TRANSITION_INVALID`, `ROOM_CONFLICT`). No HTTP surface, no lifecycle-event emission, no appSettings/pin — those are worded seams closed by later plans.
++
++**Tech Stack:** NestJS (module/DI), Prisma 7.8 (PostgreSQL, `multiSchema` — GA, no preview flag), Jest + ts-jest, `@testcontainers/postgresql` for the DB-backed integration lane.
++
++**Design doc:** `docs/sessions/2026-07-18-room-lifecycle-design.md` (approved 2026-07-18). This plan implements it.
++
++## Global Constraints
++
++Every task's requirements implicitly include this section.
++
++- **Headline requirement — REQ-RT-005 (verbatim):** переходы статуса ограничены явной машиной состояний: `DRAFT → ACTIVE → COMPLETED`, `DRAFT → CANCELLED`, `ACTIVE → CANCELLED`; иные переходы запрещены. Мягкое удаление — ортогональный атрибут `deletedAt`, допустимый в `DRAFT`, `COMPLETED`, `CANCELLED` (не в `ACTIVE`); удаление не является статусом.
++- **REQ-CORE-003:** каждый модуль владеет таблицами в отдельной PostgreSQL-схеме (Prisma `multiSchema`). Room живёт в схеме `room`. FK на таблицы других app-модулей запрещён; декларативный FK на core-таблицу допускается без каскадов (здесь не вводится — Identity ещё нет).
++- **REQ-CORE-004:** глобальное мутабельное module-level состояние запрещено. Чистый state-machine модуль — только `const`-таблицы; сервис stateless поверх Prisma.
++- **REQ-CORE-006:** бизнес-логика в сервисах; контроллеров/гейтвеев в этом срезе нет.
++- **REQ-OPS-002:** миграции применяются детерминированно (`prisma migrate deploy`); сид в production не попадает.
++- **REQ-DEV-001:** CI-гейты на каждый PR — lint (+ boundary-check), type-check, unit-тесты, сборка. Все зелёные.
++- **REQ-DEV-002:** один lockfile на монорепо (`pnpm-lock.yaml`); зависимости добавляются через pnpm, lockfile коммитится.
++- **REQ-DEV-006:** частичные уникальные индексы — только SQL-миграцией без preview `partialIndexes`. В этом срезе частичных индексов НЕТ; preview-фичи Prisma не включаются.
++- **Typed errors are core-internal**, not SDK: room lifecycle не пересекает границу app↔core в этом срезе. Маппинг в API-ответ без стектрейсов (REQ-SEC-006) — шов на будущую HTTP-поверхность.
++- **Code comments in English** (matching existing `.ts` files); doc/spec prose in Russian.
++- **Node ≥ 24, TypeScript strict.** Prisma generator `prisma-client-js`, URL из `prisma.config.ts` (`env('DATABASE_URL')`).
++- **Seams NOT built (record, do not scaffold):** REQ-RT-010 lifecycle-эмит в лог; REQ-RT-004 appSettings/пин/заморозка; REQ-ID-005 organizer=REGISTERED + FK; авторизация переходов; HTTP surface; REQ-ID-013/002 код комнаты/политики; REQ-RT-016 запечатывание лога.
++
++---
++
++## File Structure
++
++- `packages/core/src/room/room.errors.ts` — **create.** Typed core errors + codes.
++- `packages/core/src/room/room-state-machine.ts` — **create.** Pure transition allow-list + guards. No Nest/Prisma deps.
++- `packages/core/src/room/room-state-machine.spec.ts` — **create.** Unit tests (no DB).
++- `packages/core/src/room/room.service.ts` — **create.** Prisma-backed lifecycle operations.
++- `packages/core/src/room/room.service.int-spec.ts` — **create.** Integration tests (Testcontainers).
++- `packages/core/src/room/room.module.ts` — **create.** Nest module wiring `RoomService`.
++- `packages/core/src/testing/postgres.testcontainer.ts` — **create.** Reusable Testcontainers helper (start container → `migrate deploy` → connected `PrismaService`).
++- `packages/core/src/testing/harness.int-spec.ts` — **create.** Smoke test proving harness + migration.
++- `packages/core/prisma/schema.prisma` — **modify.** Add `schemas`, `RoomStatus` enum, `Room` model.
++- `packages/core/prisma/migrations/**` — **create.** First migration (`room_lifecycle`).
++- `packages/core/jest.integration.config.js` — **create.** Integration jest config (`*.int-spec.ts`).
++- `packages/core/tsconfig.json` — **modify.** Exclude test artifacts from the build.
++- `packages/core/package.json` — **modify.** Add `test:int` script + testcontainers devDeps.
++- `packages/core/src/index.ts` — **modify.** Export room module surface.
++- `apps/server/src/app.module.ts` — **modify.** Register `RoomModule`.
++- `turbo.json` — **modify.** Add `test:int` task.
++- `package.json` (root) — **modify.** Add `test:int` script.
++- `.github/workflows/ci.yml` — **modify.** Run `test:int`.
++
++---
++
++## Task 1: Room domain errors + pure state machine
++
++**Files:**
++- Create: `packages/core/src/room/room.errors.ts`
++- Create: `packages/core/src/room/room-state-machine.ts`
++- Test: `packages/core/src/room/room-state-machine.spec.ts`
++
++**Interfaces:**
++- Produces:
++  - `type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED'`
++  - `canTransition(from: RoomStatus, to: RoomStatus): boolean`
++  - `assertTransition(from: RoomStatus, to: RoomStatus): void` — throws `RoomTransitionError`
++  - `isDeletable(status: RoomStatus): boolean`
++  - `assertDeletable(status: RoomStatus): void` — throws `RoomTransitionError`
++  - `class RoomError extends Error { code: RoomErrorCode }`, `RoomTransitionError`, `RoomConflictError`
++  - `ROOM_ERROR_CODES = { ROOM_TRANSITION_INVALID, ROOM_CONFLICT }`
++
++- [ ] **Step 1: Write the failing test**
++
++Create `packages/core/src/room/room-state-machine.spec.ts`:
++
++```ts
++import {
++  canTransition,
++  assertTransition,
++  isDeletable,
++  assertDeletable,
++  type RoomStatus,
++} from './room-state-machine';
++import { RoomTransitionError } from './room.errors';
++
++const LEGAL: Array<[RoomStatus, RoomStatus]> = [
++  ['DRAFT', 'ACTIVE'],
++  ['DRAFT', 'CANCELLED'],
++  ['ACTIVE', 'COMPLETED'],
++  ['ACTIVE', 'CANCELLED'],
++];
++
++const ILLEGAL: Array<[RoomStatus, RoomStatus]> = [
++  ['DRAFT', 'COMPLETED'],
++  ['ACTIVE', 'DRAFT'],
++  ['COMPLETED', 'ACTIVE'],
++  ['COMPLETED', 'CANCELLED'],
++  ['CANCELLED', 'ACTIVE'],
++  ['DRAFT', 'DRAFT'],
++  ['ACTIVE', 'ACTIVE'],
++];
++
++describe('room-state-machine transitions', () => {
++  it.each(LEGAL)('allows %s → %s', (from, to) => {
++    expect(canTransition(from, to)).toBe(true);
++    expect(() => assertTransition(from, to)).not.toThrow();
++  });
++
++  it.each(ILLEGAL)('rejects %s → %s', (from, to) => {
++    expect(canTransition(from, to)).toBe(false);
++    expect(() => assertTransition(from, to)).toThrow(RoomTransitionError);
++  });
++
++  it('throws with code ROOM_TRANSITION_INVALID', () => {
++    try {
++      assertTransition('DRAFT', 'COMPLETED');
++      throw new Error('should have thrown');
++    } catch (e) {
++      expect((e as RoomTransitionError).code).toBe('ROOM_TRANSITION_INVALID');
++    }
++  });
++});
++
++describe('room-state-machine deletability', () => {
++  it.each<[RoomStatus, boolean]>([
++    ['DRAFT', true],
++    ['COMPLETED', true],
++    ['CANCELLED', true],
++    ['ACTIVE', false],
++  ])('isDeletable(%s) === %s', (status, expected) => {
++    expect(isDeletable(status)).toBe(expected);
++  });
++
++  it('assertDeletable rejects ACTIVE with ROOM_TRANSITION_INVALID', () => {
++    expect(() => assertDeletable('ACTIVE')).toThrow(RoomTransitionError);
++    expect(() => assertDeletable('DRAFT')).not.toThrow();
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `pnpm --filter @mymozhem/core exec jest room/room-state-machine -c jest.config.js`
++Expected: FAIL — cannot find module `./room-state-machine` / `./room.errors`.
++
++- [ ] **Step 3: Write the errors module**
++
++Create `packages/core/src/room/room.errors.ts`:
++
++```ts
++// Core-internal typed domain errors for the Room lifecycle. NOT part of the SDK
++// contract (these do not cross the app↔core boundary in this slice). When an HTTP
++// surface for the organizer lands, these map to typed API responses without
++// stack traces (REQ-SEC-006).
++export const ROOM_ERROR_CODES = {
++  ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
++  ROOM_CONFLICT: 'ROOM_CONFLICT',
++} as const;
++
++export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
++
++export class RoomError extends Error {
++  constructor(
++    readonly code: RoomErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
++
++// State-machine violation: illegal transition, or soft-delete of an ACTIVE room.
++export class RoomTransitionError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_TRANSITION_INVALID, message);
++  }
++}
++
++// Atomic conditional UPDATE affected zero rows: not-found, concurrent change,
++// already terminal, or already deleted.
++export class RoomConflictError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_CONFLICT, message);
++  }
++}
++```
++
++- [ ] **Step 4: Write the state-machine module**
++
++Create `packages/core/src/room/room-state-machine.ts`:
++
++```ts
++import { RoomTransitionError } from './room.errors';
++
++// Domain status type. Prisma's generated `RoomStatus` enum (Task 2) mirrors these
++// exact string members; the two are structurally interchangeable. This module stays
++// Prisma-free so it is a pure, dependency-light leaf (unit-testable without a DB).
++export type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
++
++// Allow-list (REQ-RT-005). COMPLETED and CANCELLED are terminal — no outgoing edges.
++const ROOM_TRANSITIONS: ReadonlyArray<readonly [RoomStatus, RoomStatus]> = [
++  ['DRAFT', 'ACTIVE'],
++  ['DRAFT', 'CANCELLED'],
++  ['ACTIVE', 'COMPLETED'],
++  ['ACTIVE', 'CANCELLED'],
++];
++
++// Soft-delete allowed in DRAFT/COMPLETED/CANCELLED, forbidden in ACTIVE (REQ-RT-005).
++const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
++  'DRAFT',
++  'COMPLETED',
++  'CANCELLED',
++]);
++
++export function canTransition(from: RoomStatus, to: RoomStatus): boolean {
++  return ROOM_TRANSITIONS.some(([f, t]) => f === from && t === to);
++}
++
++export function assertTransition(from: RoomStatus, to: RoomStatus): void {
++  if (!canTransition(from, to)) {
++    throw new RoomTransitionError(`Illegal room transition: ${from} -> ${to}`);
++  }
++}
++
++export function isDeletable(status: RoomStatus): boolean {
++  return DELETABLE_STATUSES.has(status);
++}
++
++export function assertDeletable(status: RoomStatus): void {
++  if (!isDeletable(status)) {
++    throw new RoomTransitionError(`Room in status ${status} cannot be soft-deleted`);
++  }
++}
++```
++
++- [ ] **Step 5: Run test to verify it passes**
++
++Run: `pnpm --filter @mymozhem/core exec jest room/room-state-machine -c jest.config.js`
++Expected: PASS — all `it.each` cases green.
++
++- [ ] **Step 6: Commit**
++
++```bash
++git add packages/core/src/room/room.errors.ts \
++        packages/core/src/room/room-state-machine.ts \
++        packages/core/src/room/room-state-machine.spec.ts
++git commit -m "feat(core): room state machine + typed errors (REQ-RT-005)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 2: Room Prisma model + first migration (schema `room`)
++
++**Files:**
++- Modify: `packages/core/prisma/schema.prisma`
++- Create: `packages/core/prisma/migrations/<timestamp>_room_lifecycle/migration.sql` (via CLI)
++- Create: `packages/core/prisma/migrations/migration_lock.toml` (via CLI)
++
++**Interfaces:**
++- Produces: Prisma model `Room { id, organizerId, status, deletedAt, createdAt, updatedAt }` in schema `room`; generated client type `RoomStatus` (`DRAFT|ACTIVE|COMPLETED|CANCELLED`). Consumed by Task 4 (`RoomService`) and Task 3 (harness applies the migration).
++
++This task is scaffolding (no red-green unit test); it is exercised end-to-end by Task 3's smoke test, which applies this migration to a fresh container and asserts the table exists.
++
++- [ ] **Step 1: Edit the schema**
++
++Replace the contents of `packages/core/prisma/schema.prisma` with:
++
++```prisma
++generator client {
++  provider = "prisma-client-js"
++}
++
++datasource db {
++  provider = "postgresql"
++  schemas  = ["room"]
++}
++
++enum RoomStatus {
++  DRAFT
++  ACTIVE
++  COMPLETED
++  CANCELLED
++
++  @@schema("room")
++}
++
++// Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
++// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
++// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
++// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
++model Room {
++  id          String     @id @default(uuid()) @db.Uuid
++  organizerId String     @db.Uuid
++  status      RoomStatus @default(DRAFT)
++  deletedAt   DateTime?
++  createdAt   DateTime   @default(now())
++  updatedAt   DateTime   @updatedAt
++
++  @@schema("room")
++}
++```
++
++- [ ] **Step 2: Verify the schema is valid**
++
++Run: `pnpm exec prisma validate`
++Expected: `The schema at packages/core/prisma/schema.prisma is valid 🚀` (no preview-feature error — multiSchema is GA in Prisma 7).
++
++- [ ] **Step 3: Start an ephemeral local Postgres for migration authoring**
++
++`prisma migrate dev` needs a database to diff against and record the migration. Use a throwaway container with a published host port (docker-compose's Postgres has no host port by design):
++
++```bash
++docker run --rm -d --name mm-migrate \
++  -e POSTGRES_USER=mm -e POSTGRES_PASSWORD=mm -e POSTGRES_DB=mm \
++  -p 5432:5432 postgres:17
++# wait until ready
++until docker exec mm-migrate pg_isready -U mm >/dev/null 2>&1; do sleep 1; done
++```
++
++- [ ] **Step 4: Create and apply the migration**
++
++```bash
++DATABASE_URL="postgresql://mm:mm@localhost:5432/mm" \
++  pnpm exec prisma migrate dev --name room_lifecycle
++```
++
++Expected: creates `packages/core/prisma/migrations/<timestamp>_room_lifecycle/migration.sql`, applies it, and runs `prisma generate`. The SQL must contain `CREATE SCHEMA IF NOT EXISTS "room"`, `CREATE TYPE "room"."RoomStatus"`, and `CREATE TABLE "room"."Room"`.
++
++- [ ] **Step 5: Tear down the authoring container**
++
++```bash
++docker stop mm-migrate
++```
++
++- [ ] **Step 6: Verify generate + typecheck**
++
++Run: `pnpm exec prisma generate && pnpm --filter @mymozhem/core run typecheck`
++Expected: client generated; typecheck PASS (the `Room` model is now on `PrismaClient`).
++
++- [ ] **Step 7: Commit**
++
++```bash
++git add packages/core/prisma/schema.prisma packages/core/prisma/migrations
++git commit -m "feat(core): Room model + first migration in schema room (REQ-RT-005, REQ-CORE-003, REQ-OPS-002)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 3: Integration test harness (Testcontainers) + smoke test
++
++**Files:**
++- Modify: `packages/core/package.json` (devDeps + `test:int` script)
++- Create: `packages/core/jest.integration.config.js`
++- Create: `packages/core/src/testing/postgres.testcontainer.ts`
++- Create: `packages/core/src/testing/harness.int-spec.ts`
++- Modify: `packages/core/tsconfig.json` (exclude test artifacts from build)
++- Modify: `turbo.json` (add `test:int` task)
++- Modify: `package.json` (root `test:int` script)
++
++**Interfaces:**
++- Produces: `startTestDb(): Promise<TestDb>` where `TestDb = { prisma: PrismaService; stop: () => Promise<void> }`. Consumed by Tasks 4 and 5. `pnpm --filter @mymozhem/core run test:int` runs the `*.int-spec.ts` lane.
++
++- [ ] **Step 1: Add Testcontainers devDependencies**
++
++```bash
++pnpm --filter @mymozhem/core add -D testcontainers @testcontainers/postgresql
++```
++
++Expected: both added under `devDependencies`; root `pnpm-lock.yaml` updated (REQ-DEV-002).
++
++- [ ] **Step 2: Add the integration jest config**
++
++Create `packages/core/jest.integration.config.js`:
++
++```js
++// Integration lane: DB-backed tests (*.int-spec.ts) against an ephemeral
++// Testcontainers Postgres. Separate from unit `jest.config.js` (*.spec.ts) so unit
++// runs stay fast and DB-free. `.int-spec.ts` does NOT match the unit `**/*.spec.ts`.
++module.exports = {
++  preset: 'ts-jest',
++  testEnvironment: 'node',
++  roots: ['<rootDir>/src'],
++  testMatch: ['**/*.int-spec.ts'],
++  testTimeout: 120000, // container pull + start
++  maxWorkers: 1, // one shared container per file; avoid parallel DB contention
++};
++```
++
++- [ ] **Step 3: Add the `test:int` script (core)**
++
++In `packages/core/package.json`, add to `scripts`:
++
++```json
++"test:int": "jest -c jest.integration.config.js"
++```
++
++- [ ] **Step 4: Write the Testcontainers helper**
++
++Create `packages/core/src/testing/postgres.testcontainer.ts`:
++
++```ts
++import { execSync } from 'node:child_process';
++import { join } from 'node:path';
++import { PostgreSqlContainer } from '@testcontainers/postgresql';
++import { PrismaService } from '../prisma/prisma.service';
++
++// packages/core/src/testing -> repo root (four levels up).
++const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
++
++export interface TestDb {
++  prisma: PrismaService;
++  stop: () => Promise<void>;
++}
++
++// Starts a throwaway Postgres, applies the committed migration with `migrate deploy`
++// (REQ-OPS-002), and returns a connected PrismaService. NEVER points at a shared or
++// production DB — the container is ephemeral and isolated by construction.
++export async function startTestDb(): Promise<TestDb> {
++  const container = await new PostgreSqlContainer('postgres:17').start();
++  const url = container.getConnectionUri();
++  process.env.DATABASE_URL = url; // PrismaService reads this at construction
++
++  execSync('pnpm exec prisma migrate deploy', {
++    cwd: REPO_ROOT,
++    env: { ...process.env, DATABASE_URL: url },
++    stdio: 'inherit',
++  });
++
++  const prisma = new PrismaService();
++  await prisma.onModuleInit();
++
++  return {
++    prisma,
++    stop: async () => {
++      await prisma.onModuleDestroy();
++      await container.stop();
++    },
++  };
++}
++```
++
++- [ ] **Step 5: Write the smoke integration test (failing first)**
++
++Create `packages/core/src/testing/harness.int-spec.ts`:
++
++```ts
++import { startTestDb, type TestDb } from './postgres.testcontainer';
++
++describe('integration harness', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('applies the migration and can round-trip a Room row', async () => {
++    const created = await db.prisma.room.create({
++      data: { organizerId: '00000000-0000-0000-0000-000000000001' },
++    });
++    expect(created.status).toBe('DRAFT');
++    expect(created.deletedAt).toBeNull();
++
++    const found = await db.prisma.room.findUnique({ where: { id: created.id } });
++    expect(found?.id).toBe(created.id);
++  });
++});
++```
++
++- [ ] **Step 6: Run the smoke test to verify it passes**
++
++Run: `pnpm --filter @mymozhem/core run test:int -- harness`
++Expected: PASS (container starts, migration applies, insert/select round-trips). Requires a running Docker daemon.
++
++- [ ] **Step 7: Exclude test artifacts from the build**
++
++Replace `packages/core/tsconfig.json` with:
++
++```json
++{
++  "extends": "../../tsconfig.base.json",
++  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
++  "include": ["src"],
++  "exclude": ["src/**/*.spec.ts", "src/**/*.int-spec.ts", "src/testing/**"]
++}
++```
++
++Run: `pnpm --filter @mymozhem/core run build`
++Expected: PASS; `dist/` contains no `testing/` output and no compiled specs.
++
++- [ ] **Step 8: Register the `test:int` turbo task**
++
++In `turbo.json`, add to `tasks`:
++
++```json
++"test:int": { "dependsOn": ["^build"] }
++```
++
++- [ ] **Step 9: Add the root `test:int` script**
++
++In root `package.json` `scripts`, add:
++
++```json
++"test:int": "turbo run test:int"
++```
++
++- [ ] **Step 10: Commit**
++
++```bash
++git add packages/core/package.json packages/core/jest.integration.config.js \
++        packages/core/src/testing packages/core/tsconfig.json \
++        turbo.json package.json pnpm-lock.yaml
++git commit -m "test(core): Testcontainers integration harness + smoke test (REQ-OPS-002, REQ-DEV-001)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 4: RoomService — create, transitions, soft-delete
++
++**Files:**
++- Create: `packages/core/src/room/room.service.ts`
++- Test: `packages/core/src/room/room.service.int-spec.ts`
++
++**Interfaces:**
++- Consumes: `PrismaService` (`packages/core/src/prisma/prisma.service.ts`); pure module (`assertTransition`, `assertDeletable`, `RoomStatus`); `RoomConflictError` (Task 1); `startTestDb` (Task 3).
++- Produces:
++  - `class RoomService { create(organizerId: string): Promise<Room>; transition(roomId: string, to: RoomStatus): Promise<Room>; activate/complete/cancel(roomId: string): Promise<Room>; softDelete(roomId: string): Promise<Room> }`
++  (`Room` is the Prisma-generated row type.)
++
++- [ ] **Step 1: Write the failing integration test**
++
++Create `packages/core/src/room/room.service.int-spec.ts`:
++
++```ts
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { RoomService } from './room.service';
++import { RoomTransitionError, RoomConflictError } from './room.errors';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++
++describe('RoomService lifecycle', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new RoomService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('create() yields a DRAFT room', async () => {
++    const room = await service.create(ORG);
++    expect(room.status).toBe('DRAFT');
++    expect(room.deletedAt).toBeNull();
++    expect(room.organizerId).toBe(ORG);
++  });
++
++  it('persists each legal transition', async () => {
++    const a = await service.create(ORG);
++    expect((await service.activate(a.id)).status).toBe('ACTIVE');
++    expect((await service.complete(a.id)).status).toBe('COMPLETED');
++
++    const b = await service.create(ORG);
++    expect((await service.cancel(b.id)).status).toBe('CANCELLED');
++
++    const c = await service.create(ORG);
++    await service.activate(c.id);
++    expect((await service.cancel(c.id)).status).toBe('CANCELLED');
++  });
++
++  it('rejects an illegal transition with ROOM_TRANSITION_INVALID', async () => {
++    const room = await service.create(ORG);
++    await expect(service.complete(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++    // unchanged
++    const reread = await db.prisma.room.findUnique({ where: { id: room.id } });
++    expect(reread?.status).toBe('DRAFT');
++  });
++
++  it('rejects further transitions from a terminal status', async () => {
++    const room = await service.create(ORG);
++    await service.cancel(room.id);
++    await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++  });
++
++  it('rejects transition of a missing room with ROOM_CONFLICT', async () => {
++    await expect(
++      service.activate('00000000-0000-0000-0000-0000000000ff'),
++    ).rejects.toBeInstanceOf(RoomConflictError);
++  });
++
++  it('soft-deletes in DRAFT/COMPLETED/CANCELLED, refuses in ACTIVE', async () => {
++    const draft = await service.create(ORG);
++    expect((await service.softDelete(draft.id)).deletedAt).not.toBeNull();
++
++    const active = await service.create(ORG);
++    await service.activate(active.id);
++    await expect(service.softDelete(active.id)).rejects.toBeInstanceOf(RoomTransitionError);
++
++    const cancelled = await service.create(ORG);
++    await service.cancel(cancelled.id);
++    expect((await service.softDelete(cancelled.id)).deletedAt).not.toBeNull();
++  });
++
++  it('a soft-deleted room is inert (transitions conflict)', async () => {
++    const room = await service.create(ORG);
++    await service.softDelete(room.id);
++    await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
++  });
++});
++```
++
++- [ ] **Step 2: Run test to verify it fails**
++
++Run: `pnpm --filter @mymozhem/core run test:int -- room.service`
++Expected: FAIL — cannot find module `./room.service`.
++
++- [ ] **Step 3: Implement RoomService**
++
++Create `packages/core/src/room/room.service.ts`:
++
++```ts
++import { Injectable } from '@nestjs/common';
++import type { Room } from '@prisma/client';
++import { PrismaService } from '../prisma/prisma.service';
++import { assertTransition, assertDeletable, type RoomStatus } from './room-state-machine';
++import { RoomConflictError } from './room.errors';
++
++@Injectable()
++export class RoomService {
++  constructor(private readonly prisma: PrismaService) {}
++
++  create(organizerId: string): Promise<Room> {
++    // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
++    return this.prisma.room.create({ data: { organizerId } });
++  }
++
++  async transition(roomId: string, to: RoomStatus): Promise<Room> {
++    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
++    if (!current || current.deletedAt !== null) {
++      throw new RoomConflictError(`Room ${roomId} not found or deleted`);
++    }
++    // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
++    assertTransition(current.status as RoomStatus, to);
++    // Atomic guarded update: correctness of the race rests on this WHERE, not on the
++    // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
++    const res = await this.prisma.room.updateMany({
++      where: { id: roomId, status: current.status, deletedAt: null },
++      data: { status: to },
++    });
++    if (res.count === 0) {
++      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
++    }
++    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
++  }
++
++  activate(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'ACTIVE');
++  }
++
++  complete(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'COMPLETED');
++  }
++
++  cancel(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'CANCELLED');
++  }
++
++  async softDelete(roomId: string): Promise<Room> {
++    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
++    if (!current || current.deletedAt !== null) {
++      throw new RoomConflictError(`Room ${roomId} not found or already deleted`);
++    }
++    assertDeletable(current.status as RoomStatus);
++    const res = await this.prisma.room.updateMany({
++      where: { id: roomId, deletedAt: null, status: { not: 'ACTIVE' } },
++      data: { deletedAt: new Date() },
++    });
++    if (res.count === 0) {
++      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
++    }
++    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
++  }
++}
++```
++
++- [ ] **Step 4: Run test to verify it passes**
++
++Run: `pnpm --filter @mymozhem/core run test:int -- room.service`
++Expected: PASS — all lifecycle cases green.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add packages/core/src/room/room.service.ts packages/core/src/room/room.service.int-spec.ts
++git commit -m "feat(core): RoomService lifecycle via atomic guarded update (REQ-RT-005, REQ-CORE-006)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 5: Concurrency / atomicity integration test
++
++**Files:**
++- Test: `packages/core/src/room/room.service.int-spec.ts` (add a `describe` block)
++
++**Interfaces:**
++- Consumes: `RoomService`, `startTestDb`, `RoomConflictError` (as above).
++
++- [ ] **Step 1: Add the failing concurrency test**
++
++Append to `packages/core/src/room/room.service.int-spec.ts` (inside the file, a new top-level `describe`):
++
++```ts
++describe('RoomService transition atomicity', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new RoomService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('two competing transitions on one room: exactly one wins, the other conflicts', async () => {
++    const room = await service.create(ORG);
++
++    const results = await Promise.allSettled([
++      service.activate(room.id), // DRAFT -> ACTIVE
++      service.cancel(room.id), // DRAFT -> CANCELLED
++    ]);
++
++    const fulfilled = results.filter((r) => r.status === 'fulfilled');
++    const rejected = results.filter((r) => r.status === 'rejected');
++    expect(fulfilled).toHaveLength(1);
++    expect(rejected).toHaveLength(1);
++    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(RoomConflictError);
++
++    const finalStatus = (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } }))
++      .status;
++    expect(['ACTIVE', 'CANCELLED']).toContain(finalStatus);
++  });
++});
++```
++
++Note: this test imports nothing new — `TestDb`, `startTestDb`, `RoomService`, `RoomConflictError`, and `ORG` are already imported/defined at the top of the file from Task 4.
++
++- [ ] **Step 2: Run test to verify it passes**
++
++Run: `pnpm --filter @mymozhem/core run test:int -- room.service`
++Expected: PASS — the atomic guarded UPDATE lets exactly one transition win; the loser gets `ROOM_CONFLICT`. (If this ever fails intermittently, it means the transition is not atomic — a real defect, not flakiness.)
++
++- [ ] **Step 3: Commit**
++
++```bash
++git add packages/core/src/room/room.service.int-spec.ts
++git commit -m "test(core): prove transition atomicity under concurrency (REQ-RT-005)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 6: RoomModule wiring + core export + server registration
++
++**Files:**
++- Create: `packages/core/src/room/room.module.ts`
++- Modify: `packages/core/src/index.ts`
++- Modify: `apps/server/src/app.module.ts`
++
++**Interfaces:**
++- Consumes: `RoomService` (Task 4), `PrismaModule` (`packages/core/src/prisma/prisma.module.ts`).
++- Produces: `RoomModule` (provides + exports `RoomService`); re-exported from `@mymozhem/core`.
++
++- [ ] **Step 1: Create the module**
++
++Create `packages/core/src/room/room.module.ts`:
++
++```ts
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { RoomService } from './room.service';
++
++@Module({
++  imports: [PrismaModule],
++  providers: [RoomService],
++  exports: [RoomService],
++})
++export class RoomModule {}
++```
++
++- [ ] **Step 2: Export from the core entrypoint**
++
++Add to `packages/core/src/index.ts`:
++
++```ts
++export * from './room/room.errors';
++export * from './room/room-state-machine';
++export * from './room/room.service';
++export * from './room/room.module';
++```
++
++- [ ] **Step 3: Register in the server**
++
++Edit `apps/server/src/app.module.ts` to add `RoomModule`:
++
++```ts
++import { Module } from '@nestjs/common';
++import { AppRegistryModule, HealthModule, PrismaModule, RoomModule } from '@mymozhem/core';
++
++@Module({
++  imports: [PrismaModule, HealthModule, AppRegistryModule, RoomModule],
++})
++export class AppModule {}
++```
++
++- [ ] **Step 4: Verify build, typecheck, unit tests, e2e, boundary-check all green**
++
++Run:
++```bash
++pnpm run build && pnpm run typecheck && pnpm run test && pnpm run lint && pnpm run boundary-check && pnpm run guardrails
++```
++Expected: all PASS. `boundary-check` stays green (RoomService→PrismaService is an internal core dependency; no SDK or cross-module violation). The existing health e2e (which stubs PrismaService) still passes — `RoomModule` imports `PrismaModule`, and `RoomService` is not exercised by the health e2e.
++
++- [ ] **Step 5: Commit**
++
++```bash
++git add packages/core/src/room/room.module.ts packages/core/src/index.ts apps/server/src/app.module.ts
++git commit -m "feat(core): wire RoomModule and register it in the server (REQ-CORE-002)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++---
++
++## Task 7: Run the integration lane in CI
++
++**Files:**
++- Modify: `.github/workflows/ci.yml`
++
++**Interfaces:**
++- Consumes: root `test:int` script (Task 3). GitHub Actions `ubuntu-latest` provides a running Docker daemon, so Testcontainers works without a `services:` block.
++
++- [ ] **Step 1: Add the integration step**
++
++In `.github/workflows/ci.yml`, add a step after `pnpm run test` (and after `prisma generate`, which is already present):
++
++```yaml
++      - run: pnpm run test:int
++        env:
++          # Testcontainers spins up its own ephemeral Postgres via Docker; this is a
++          # placeholder so prisma.config.ts's env('DATABASE_URL') resolves during CLI
++          # config loading. The harness overrides DATABASE_URL with the live container
++          # URL before `migrate deploy` (see postgres.testcontainer.ts).
++          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
++```
++
++- [ ] **Step 2: Verify the workflow file is valid YAML and the step order is correct**
++
++Run: `pnpm dlx yaml-lint .github/workflows/ci.yml` (or visually confirm indentation).
++Expected: the `test:int` step sits inside the `build` job's `steps`, after `pnpm run test`.
++
++- [ ] **Step 3: Commit**
++
++```bash
++git add .github/workflows/ci.yml
++git commit -m "ci: run Testcontainers integration lane (REQ-DEV-001)
++
++Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
++```
++
++- [ ] **Step 4: Push the branch and confirm CI is green**
++
++```bash
++git push -u origin phase-1-room-lifecycle
++```
++Then confirm the CI run passes (build + unit + build + boundary + guardrails + **test:int**). Do not merge here — merge/finish is handled by the finishing-a-development-branch skill after review.
++
++---
++
++## Self-Review
++
++**1. Spec coverage (design doc §1 → task):**
++- REQ-RT-005 (state machine + soft-delete orthogonality) → Task 1 (pure SM), Task 4 (service enforcement), Task 5 (atomicity). ✔
++- REQ-CORE-002 (Room domain) → Task 6 (module registered in core domains). ✔
++- REQ-CORE-003 (schema-per-module `room`) → Task 2. ✔
++- REQ-CORE-004 (no global mutable state) → Task 1 (const tables), Task 4 (stateless service); enforced by existing lint/boundary in Task 6. ✔
++- REQ-CORE-006 (logic in services) → Task 4. ✔
++- REQ-OPS-002 (`migrate deploy`) → Task 2 (migration), Task 3 (deploy in harness). ✔
++- REQ-DEV-001 (CI gates) → Task 6 (local full run), Task 7 (CI incl. integration). ✔
++- REQ-DEV-002 (one lockfile) → Task 3 (pnpm add updates root lockfile). ✔
++- Two typed errors (§5) → Task 1. ✔
++- Deferred seams (§10) → none scaffolded; recorded in Global Constraints. ✔
++
++**2. Placeholder scan:** No TBD/TODO; every code and command step is concrete. ✔
++
++**3. Type consistency:** `RoomStatus` union defined in Task 1, mirrored by Prisma enum in Task 2, cast at the service boundary in Task 4. `startTestDb`/`TestDb` defined in Task 3, consumed verbatim in Tasks 4–5. `RoomService` method names (`create`/`transition`/`activate`/`complete`/`cancel`/`softDelete`) consistent across Tasks 4–6. Error classes/codes (`RoomTransitionError`/`RoomConflictError`, `ROOM_TRANSITION_INVALID`/`ROOM_CONFLICT`) consistent Task 1 → 4 → 5. ✔
++
++**Two-stage review (CLAUDE.md §3):** stage 1 (spec-compliance) checks the listed REQ-* above — headline REQ-RT-005; stage 2 checks code quality.
+diff --git a/package.json b/package.json
+index 9f6b974..e6e5403 100644
+--- a/package.json
++++ b/package.json
+@@ -1,20 +1,21 @@
+ {
+   "name": "mymozhem",
+   "private": true,
+   "packageManager": "pnpm@11.1.3",
+   "engines": { "node": ">=24" },
+   "scripts": {
+     "build": "turbo run build",
+     "lint": "turbo run lint",
+     "typecheck": "turbo run typecheck",
+     "test": "turbo run test",
++    "test:int": "turbo run test:int",
+     "boundary-check": "depcruise apps packages --config .dependency-cruiser.cjs",
+     "guardrails": "node scripts/verify-guardrails.mjs"
+   },
+   "devDependencies": {
+     "@eslint/js": "^9.17.0",
+     "dependency-cruiser": "^16.5.0",
+     "dotenv": "^16.4.0",
+     "eslint": "^9.17.0",
+     "prisma": "^7.6.0",
+     "turbo": "^2.3.0",
+diff --git a/packages/core/jest.integration.config.js b/packages/core/jest.integration.config.js
+new file mode 100644
+index 0000000..c642720
+--- /dev/null
++++ b/packages/core/jest.integration.config.js
+@@ -0,0 +1,11 @@
++// Integration lane: DB-backed tests (*.int-spec.ts) against an ephemeral
++// Testcontainers Postgres. Separate from unit `jest.config.js` (*.spec.ts) so unit
++// runs stay fast and DB-free. `.int-spec.ts` does NOT match the unit `**/*.spec.ts`.
++module.exports = {
++  preset: 'ts-jest',
++  testEnvironment: 'node',
++  roots: ['<rootDir>/src'],
++  testMatch: ['**/*.int-spec.ts'],
++  testTimeout: 120000, // container pull + start
++  maxWorkers: 1, // one shared container per file; avoid parallel DB contention
++};
+diff --git a/packages/core/package.json b/packages/core/package.json
+index eef6041..fb4e3b8 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -2,34 +2,37 @@
+   "name": "@mymozhem/core",
+   "version": "0.0.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest",
++    "test:int": "jest -c jest.integration.config.js",
+     "prisma:generate": "prisma generate"
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
++    "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
+     "@types/pg": "^8.11.0",
+     "jest": "^29.7.0",
+     "prisma": "^7.6.0",
++    "testcontainers": "^12.0.4",
+     "ts-jest": "^29.2.5",
+     "typescript": "^5.7.0"
+   }
+ }
+diff --git a/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql b/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql
+new file mode 100644
+index 0000000..86b4ca0
+--- /dev/null
++++ b/packages/core/prisma/migrations/20260718061612_room_lifecycle/migration.sql
+@@ -0,0 +1,17 @@
++-- CreateSchema
++CREATE SCHEMA IF NOT EXISTS "room";
++
++-- CreateEnum
++CREATE TYPE "room"."RoomStatus" AS ENUM ('DRAFT', 'ACTIVE', 'COMPLETED', 'CANCELLED');
++
++-- CreateTable
++CREATE TABLE "room"."Room" (
++    "id" UUID NOT NULL,
++    "organizerId" UUID NOT NULL,
++    "status" "room"."RoomStatus" NOT NULL DEFAULT 'DRAFT',
++    "deletedAt" TIMESTAMP(3),
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "Room_pkey" PRIMARY KEY ("id")
++);
+diff --git a/packages/core/prisma/migrations/migration_lock.toml b/packages/core/prisma/migrations/migration_lock.toml
+new file mode 100644
+index 0000000..044d57c
+--- /dev/null
++++ b/packages/core/prisma/migrations/migration_lock.toml
+@@ -0,0 +1,3 @@
++# Please do not edit this file manually
++# It should be added in your version-control system (e.g., Git)
++provider = "postgresql"
+diff --git a/packages/core/prisma/schema.prisma b/packages/core/prisma/schema.prisma
+index 6eb2dfc..d14053a 100644
+--- a/packages/core/prisma/schema.prisma
++++ b/packages/core/prisma/schema.prisma
+@@ -1,7 +1,32 @@
+ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+ datasource db {
+   provider = "postgresql"
++  schemas  = ["room"]
++}
++
++enum RoomStatus {
++  DRAFT
++  ACTIVE
++  COMPLETED
++  CANCELLED
++
++  @@schema("room")
++}
++
++// Room — core CRUD lifecycle entity (ADR-005: not event-sourced). State machine
++// in room-state-machine.ts (REQ-RT-005). organizerId is a plain column for now;
++// declarative FK to identity.id + REGISTERED check are deferred (REQ-ID-005, no
++// Identity table yet). appSettings/pin/freeze (REQ-RT-004) deferred to the next plan.
++model Room {
++  id          String     @id @default(uuid()) @db.Uuid
++  organizerId String     @db.Uuid
++  status      RoomStatus @default(DRAFT)
++  deletedAt   DateTime?
++  createdAt   DateTime   @default(now())
++  updatedAt   DateTime   @updatedAt
++
++  @@schema("room")
+ }
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 4c67845..d530392 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -1,9 +1,13 @@
+ export * from './config/config.schema';
+ export * from './prisma/prisma.service';
+ export * from './prisma/prisma.module';
+ export * from './health/health.controller';
+ export * from './health/health.module';
+ export * from './app-registry/app-registry';
+ export * from './app-registry/app-registry.tokens';
+ export * from './app-registry/app-registry.service';
+ export * from './app-registry/app-registry.module';
++export * from './room/room.errors';
++export * from './room/room-state-machine';
++export * from './room/room.service';
++export * from './room/room.module';
+diff --git a/packages/core/src/room/room-state-machine.spec.ts b/packages/core/src/room/room-state-machine.spec.ts
+new file mode 100644
+index 0000000..fe81551
+--- /dev/null
++++ b/packages/core/src/room/room-state-machine.spec.ts
+@@ -0,0 +1,77 @@
++import {
++  canTransition,
++  assertTransition,
++  isDeletable,
++  assertDeletable,
++  type RoomStatus,
++} from './room-state-machine';
++import { RoomTransitionError } from './room.errors';
++
++const ALL_STATUSES: readonly RoomStatus[] = ['DRAFT', 'ACTIVE', 'COMPLETED', 'CANCELLED'];
++
++// Restated independently from REQ-RT-005 — deliberately NOT imported from the
++// production table, which would make every assertion below tautological.
++const LEGAL: Array<[RoomStatus, RoomStatus]> = [
++  ['DRAFT', 'ACTIVE'],
++  ['DRAFT', 'CANCELLED'],
++  ['ACTIVE', 'COMPLETED'],
++  ['ACTIVE', 'CANCELLED'],
++];
++
++const isLegal = (from: RoomStatus, to: RoomStatus): boolean =>
++  LEGAL.some(([f, t]) => f === from && t === to);
++
++// Derived as the complement of LEGAL over the full 4x4 product rather than hand-listed,
++// so the suite also proves the allow-list holds nothing EXTRA — terminal-state escapes
++// and self-transitions included.
++const ILLEGAL: Array<[RoomStatus, RoomStatus]> = ALL_STATUSES.flatMap((from) =>
++  ALL_STATUSES.filter((to) => !isLegal(from, to)).map(
++    (to): [RoomStatus, RoomStatus] => [from, to],
++  ),
++);
++
++describe('room-state-machine transitions', () => {
++  it('covers the whole 4x4 product between LEGAL and ILLEGAL', () => {
++    expect(LEGAL.length + ILLEGAL.length).toBe(ALL_STATUSES.length ** 2);
++  });
++
++  it.each(LEGAL)('allows %s → %s', (from, to) => {
++    expect(canTransition(from, to)).toBe(true);
++    expect(() => assertTransition(from, to)).not.toThrow();
++  });
++
++  it.each(ILLEGAL)('rejects %s → %s', (from, to) => {
++    expect(canTransition(from, to)).toBe(false);
++    expect(() => assertTransition(from, to)).toThrow(RoomTransitionError);
++  });
++
++  it('throws with code ROOM_TRANSITION_INVALID', () => {
++    expect(() => assertTransition('DRAFT', 'COMPLETED')).toThrow(
++      expect.objectContaining({ code: 'ROOM_TRANSITION_INVALID' }),
++    );
++  });
++});
++
++describe('room-state-machine deletability', () => {
++  it.each<[RoomStatus, boolean]>([
++    ['DRAFT', true],
++    ['COMPLETED', true],
++    ['CANCELLED', true],
++    ['ACTIVE', false],
++  ])('isDeletable(%s) === %s', (status, expected) => {
++    expect(isDeletable(status)).toBe(expected);
++  });
++
++  it('assertDeletable rejects ACTIVE with ROOM_TRANSITION_INVALID', () => {
++    expect(() => assertDeletable('ACTIVE')).toThrow(
++      expect.objectContaining({ code: 'ROOM_TRANSITION_INVALID' }),
++    );
++  });
++
++  it.each<[RoomStatus]>([['DRAFT'], ['COMPLETED'], ['CANCELLED']])(
++    'assertDeletable permits %s',
++    (status) => {
++      expect(() => assertDeletable(status)).not.toThrow();
++    },
++  );
++});
+diff --git a/packages/core/src/room/room-state-machine.ts b/packages/core/src/room/room-state-machine.ts
+new file mode 100644
+index 0000000..6214ae3
+--- /dev/null
++++ b/packages/core/src/room/room-state-machine.ts
+@@ -0,0 +1,44 @@
++import { RoomTransitionError } from './room.errors';
++
++// Domain status type. The `RoomStatus` enum in the Prisma `room` schema mirrors these
++// exact string members, so a row's status is assignable here by a cast at the service
++// boundary. This module stays Prisma-free so it is a pure, dependency-light leaf
++// (unit-testable without a DB).
++export type RoomStatus = 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
++
++// Allow-list (REQ-RT-005), keyed by source status: adding a member to RoomStatus is a
++// compile error here until its outgoing edges are declared. COMPLETED and CANCELLED are
++// terminal — stated as empty sets in the data, not only in prose.
++const ROOM_TRANSITIONS: Readonly<Record<RoomStatus, ReadonlySet<RoomStatus>>> = {
++  DRAFT: new Set<RoomStatus>(['ACTIVE', 'CANCELLED']),
++  ACTIVE: new Set<RoomStatus>(['COMPLETED', 'CANCELLED']),
++  COMPLETED: new Set<RoomStatus>(),
++  CANCELLED: new Set<RoomStatus>(),
++};
++
++// Soft-delete allowed in DRAFT/COMPLETED/CANCELLED, forbidden in ACTIVE (REQ-RT-005).
++const DELETABLE_STATUSES: ReadonlySet<RoomStatus> = new Set<RoomStatus>([
++  'DRAFT',
++  'COMPLETED',
++  'CANCELLED',
++]);
++
++export function canTransition(from: RoomStatus, to: RoomStatus): boolean {
++  return ROOM_TRANSITIONS[from].has(to);
++}
++
++export function assertTransition(from: RoomStatus, to: RoomStatus): void {
++  if (!canTransition(from, to)) {
++    throw new RoomTransitionError(`Illegal room transition: ${from} -> ${to}`);
++  }
++}
++
++export function isDeletable(status: RoomStatus): boolean {
++  return DELETABLE_STATUSES.has(status);
++}
++
++export function assertDeletable(status: RoomStatus): void {
++  if (!isDeletable(status)) {
++    throw new RoomTransitionError(`Room in status ${status} cannot be soft-deleted`);
++  }
++}
+diff --git a/packages/core/src/room/room.errors.ts b/packages/core/src/room/room.errors.ts
+new file mode 100644
+index 0000000..01ad41a
+--- /dev/null
++++ b/packages/core/src/room/room.errors.ts
+@@ -0,0 +1,35 @@
++// Core-internal typed domain errors for the Room lifecycle. NOT part of the SDK
++// contract (these do not cross the app↔core boundary in this slice). When an HTTP
++// surface for the organizer lands, these map to typed API responses without
++// stack traces (REQ-SEC-006).
++export const ROOM_ERROR_CODES = {
++  ROOM_TRANSITION_INVALID: 'ROOM_TRANSITION_INVALID',
++  ROOM_CONFLICT: 'ROOM_CONFLICT',
++} as const;
++
++export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[keyof typeof ROOM_ERROR_CODES];
++
++export class RoomError extends Error {
++  constructor(
++    readonly code: RoomErrorCode,
++    message: string,
++  ) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
++
++// State-machine violation: illegal transition, or soft-delete of an ACTIVE room.
++export class RoomTransitionError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_TRANSITION_INVALID, message);
++  }
++}
++
++// Atomic conditional UPDATE affected zero rows: not-found, concurrent change,
++// already terminal, or already deleted.
++export class RoomConflictError extends RoomError {
++  constructor(message: string) {
++    super(ROOM_ERROR_CODES.ROOM_CONFLICT, message);
++  }
++}
+diff --git a/packages/core/src/room/room.module.ts b/packages/core/src/room/room.module.ts
+new file mode 100644
+index 0000000..63098ed
+--- /dev/null
++++ b/packages/core/src/room/room.module.ts
+@@ -0,0 +1,10 @@
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { RoomService } from './room.service';
++
++@Module({
++  imports: [PrismaModule],
++  providers: [RoomService],
++  exports: [RoomService],
++})
++export class RoomModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+new file mode 100644
+index 0000000..afa263e
+--- /dev/null
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -0,0 +1,128 @@
++import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
++import { RoomService } from './room.service';
++import { RoomError, RoomTransitionError, RoomConflictError } from './room.errors';
++
++const ORG = '00000000-0000-0000-0000-000000000001';
++
++describe('RoomService lifecycle', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new RoomService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  afterEach(async () => {
++    await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
++  });
++
++  it('create() yields a DRAFT room', async () => {
++    const room = await service.create(ORG);
++    expect(room.status).toBe('DRAFT');
++    expect(room.deletedAt).toBeNull();
++    expect(room.organizerId).toBe(ORG);
++  });
++
++  it('persists each legal transition', async () => {
++    const a = await service.create(ORG);
++    expect((await service.activate(a.id)).status).toBe('ACTIVE');
++    expect((await service.complete(a.id)).status).toBe('COMPLETED');
++
++    const b = await service.create(ORG);
++    expect((await service.cancel(b.id)).status).toBe('CANCELLED');
++
++    const c = await service.create(ORG);
++    await service.activate(c.id);
++    expect((await service.cancel(c.id)).status).toBe('CANCELLED');
++  });
++
++  it('rejects an illegal transition with ROOM_TRANSITION_INVALID', async () => {
++    const room = await service.create(ORG);
++    await expect(service.complete(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++    // unchanged
++    const reread = await db.prisma.room.findUnique({ where: { id: room.id } });
++    expect(reread?.status).toBe('DRAFT');
++  });
++
++  it('rejects further transitions from a terminal status', async () => {
++    const room = await service.create(ORG);
++    await service.cancel(room.id);
++    await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomTransitionError);
++  });
++
++  it('rejects transition of a missing room with ROOM_CONFLICT', async () => {
++    await expect(
++      service.activate('00000000-0000-0000-0000-0000000000ff'),
++    ).rejects.toBeInstanceOf(RoomConflictError);
++  });
++
++  it('soft-deletes in DRAFT/COMPLETED/CANCELLED, refuses in ACTIVE', async () => {
++    const draft = await service.create(ORG);
++    expect((await service.softDelete(draft.id)).deletedAt).not.toBeNull();
++
++    const active = await service.create(ORG);
++    await service.activate(active.id);
++    await expect(service.softDelete(active.id)).rejects.toBeInstanceOf(RoomTransitionError);
++
++    const cancelled = await service.create(ORG);
++    await service.cancel(cancelled.id);
++    expect((await service.softDelete(cancelled.id)).deletedAt).not.toBeNull();
++  });
++
++  it('a soft-deleted room is inert (transitions conflict)', async () => {
++    const room = await service.create(ORG);
++    await service.softDelete(room.id);
++    await expect(service.activate(room.id)).rejects.toBeInstanceOf(RoomConflictError);
++  });
++});
++
++describe('RoomService transition atomicity', () => {
++  let db: TestDb;
++  let service: RoomService;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++    service = new RoomService(db.prisma);
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  // Deliberately NOT racing activate() vs cancel(): if the two calls happen to
++  // serialize instead of interleave, the second one reads ACTIVE, and
++  // ACTIVE -> CANCELLED is a *legal* edge — both would succeed and the test would
++  // fail with no defect present. That pairing is schedule-dependent and cannot
++  // prove atomicity.
++  //
++  // Racing cancel() vs cancel() on one DRAFT room has exactly one winner under
++  // every possible schedule:
++  //   - Interleaved: both read DRAFT, both pass assertTransition, both issue the
++  //     guarded UPDATE; one affects 1 row, the loser affects 0 rows -> RoomConflictError.
++  //   - Serialized: the loser reads CANCELLED, which is terminal, so
++  //     assertTransition itself throws -> RoomTransitionError.
++  // Either outcome is a legitimate proof that only one CANCELLED transition ever
++  // lands; which specific error class the loser gets depends on the (unobservable)
++  // schedule. Do not tighten the assertion below to one subclass — that would
++  // reintroduce the same flakiness this test is designed to avoid.
++  it('two competing cancels on one room: exactly one wins, the other conflicts', async () => {
++    const room = await service.create(ORG);
++
++    const results = await Promise.allSettled([service.cancel(room.id), service.cancel(room.id)]);
++
++    const fulfilled = results.filter((r) => r.status === 'fulfilled');
++    const rejected = results.filter((r) => r.status === 'rejected');
++    expect(fulfilled).toHaveLength(1);
++    expect(rejected).toHaveLength(1);
++    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(RoomError);
++
++    const finalStatus = (await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } }))
++      .status;
++    expect(finalStatus).toBe('CANCELLED');
++  });
++});
+diff --git a/packages/core/src/room/room.service.ts b/packages/core/src/room/room.service.ts
+new file mode 100644
+index 0000000..5d43987
+--- /dev/null
++++ b/packages/core/src/room/room.service.ts
+@@ -0,0 +1,62 @@
++import { Injectable } from '@nestjs/common';
++import type { Room } from '@prisma/client';
++import { PrismaService } from '../prisma/prisma.service';
++import { assertTransition, assertDeletable, type RoomStatus } from './room-state-machine';
++import { RoomConflictError } from './room.errors';
++
++@Injectable()
++export class RoomService {
++  constructor(private readonly prisma: PrismaService) {}
++
++  create(organizerId: string): Promise<Room> {
++    // Organizer is a plain id here; REGISTERED check + FK deferred (REQ-ID-005).
++    return this.prisma.room.create({ data: { organizerId } });
++  }
++
++  async transition(roomId: string, to: RoomStatus): Promise<Room> {
++    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
++    if (!current || current.deletedAt !== null) {
++      throw new RoomConflictError(`Room ${roomId} not found or deleted`);
++    }
++    // State-machine legality first — precise ROOM_TRANSITION_INVALID for an existing room.
++    assertTransition(current.status as RoomStatus, to);
++    // Atomic guarded update: correctness of the race rests on this WHERE, not on the
++    // read above (REQ-RT-005; same DB-invariant philosophy as REQ-RWD-010).
++    const res = await this.prisma.room.updateMany({
++      where: { id: roomId, status: current.status, deletedAt: null },
++      data: { status: to },
++    });
++    if (res.count === 0) {
++      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
++    }
++    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
++  }
++
++  activate(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'ACTIVE');
++  }
++
++  complete(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'COMPLETED');
++  }
++
++  cancel(roomId: string): Promise<Room> {
++    return this.transition(roomId, 'CANCELLED');
++  }
++
++  async softDelete(roomId: string): Promise<Room> {
++    const current = await this.prisma.room.findUnique({ where: { id: roomId } });
++    if (!current || current.deletedAt !== null) {
++      throw new RoomConflictError(`Room ${roomId} not found or already deleted`);
++    }
++    assertDeletable(current.status as RoomStatus);
++    const res = await this.prisma.room.updateMany({
++      where: { id: roomId, deletedAt: null, status: { not: 'ACTIVE' } },
++      data: { deletedAt: new Date() },
++    });
++    if (res.count === 0) {
++      throw new RoomConflictError(`Room ${roomId} changed concurrently`);
++    }
++    return this.prisma.room.findUniqueOrThrow({ where: { id: roomId } });
++  }
++}
+diff --git a/packages/core/src/testing/harness.int-spec.ts b/packages/core/src/testing/harness.int-spec.ts
+new file mode 100644
+index 0000000..6248166
+--- /dev/null
++++ b/packages/core/src/testing/harness.int-spec.ts
+@@ -0,0 +1,24 @@
++import { startTestDb, type TestDb } from './postgres.testcontainer';
++
++describe('integration harness', () => {
++  let db: TestDb;
++
++  beforeAll(async () => {
++    db = await startTestDb();
++  }, 120000);
++
++  afterAll(async () => {
++    await db.stop();
++  });
++
++  it('applies the migration and can round-trip a Room row', async () => {
++    const created = await db.prisma.room.create({
++      data: { organizerId: '00000000-0000-0000-0000-000000000001' },
++    });
++    expect(created.status).toBe('DRAFT');
++    expect(created.deletedAt).toBeNull();
++
++    const found = await db.prisma.room.findUnique({ where: { id: created.id } });
++    expect(found?.id).toBe(created.id);
++  });
++});
+diff --git a/packages/core/src/testing/postgres.testcontainer.ts b/packages/core/src/testing/postgres.testcontainer.ts
+new file mode 100644
+index 0000000..f14b507
+--- /dev/null
++++ b/packages/core/src/testing/postgres.testcontainer.ts
+@@ -0,0 +1,38 @@
++import { execSync } from 'node:child_process';
++import { join } from 'node:path';
++import { PostgreSqlContainer } from '@testcontainers/postgresql';
++import { PrismaService } from '../prisma/prisma.service';
++
++// packages/core/src/testing -> repo root (four levels up).
++const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
++
++export interface TestDb {
++  prisma: PrismaService;
++  stop: () => Promise<void>;
++}
++
++// Starts a throwaway Postgres, applies the committed migration with `migrate deploy`
++// (REQ-OPS-002), and returns a connected PrismaService. NEVER points at a shared or
++// production DB — the container is ephemeral and isolated by construction.
++export async function startTestDb(): Promise<TestDb> {
++  const container = await new PostgreSqlContainer('postgres:17').start();
++  const url = container.getConnectionUri();
++  process.env.DATABASE_URL = url; // PrismaService reads this at construction
++
++  execSync('pnpm exec prisma migrate deploy', {
++    cwd: REPO_ROOT,
++    env: { ...process.env, DATABASE_URL: url },
++    stdio: 'inherit',
++  });
++
++  const prisma = new PrismaService();
++  await prisma.onModuleInit();
++
++  return {
++    prisma,
++    stop: async () => {
++      await prisma.onModuleDestroy();
++      await container.stop();
++    },
++  };
++}
+diff --git a/packages/core/tsconfig.json b/packages/core/tsconfig.json
+index 6fcd57f..8887e7a 100644
+--- a/packages/core/tsconfig.json
++++ b/packages/core/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "extends": "../../tsconfig.base.json",
+   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+-  "include": ["src"]
++  "include": ["src"],
++  "exclude": ["src/**/*.spec.ts", "src/**/*.int-spec.ts", "src/testing/**"]
+ }
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 5d9d4ed..6e71338 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -99,35 +99,41 @@ importers:
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+       zod:
+         specifier: ^4.0.0
+         version: 4.4.3
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
++      '@testcontainers/postgresql':
++        specifier: ^12.0.4
++        version: 12.0.4
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/node':
+         specifier: ^24.0.0
+         version: 24.13.3
+       '@types/pg':
+         specifier: ^8.11.0
+         version: 8.20.0
+       jest:
+         specifier: ^29.7.0
+         version: 29.7.0(@types/node@24.13.3)
+       prisma:
+         specifier: ^7.6.0
+         version: 7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)
++      testcontainers:
++        specifier: ^12.0.4
++        version: 12.0.4
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
+   packages/sdk:
+     dependencies:
+       semver:
+@@ -313,20 +319,23 @@ packages:
+     engines: {node: '>=6.9.0'}
+ 
+   '@babel/traverse@7.29.7':
+     resolution: {integrity: sha512-EhlfNQtZ+NK22w5BM61ciuiq1m58ed33Wr1Xan//ZRTy6hgjnwyCffRYwzsGXdASJSUJ1guZILsErh1eQcl+zw==}
+     engines: {node: '>=6.9.0'}
+ 
+   '@babel/types@7.29.7':
+     resolution: {integrity: sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA==}
+     engines: {node: '>=6.9.0'}
+ 
++  '@balena/dockerignore@1.0.2':
++    resolution: {integrity: sha512-wMue2Sy4GAVTk6Ic4tJVcnfdau+gx2EnG7S+uAEe+TWJFqE4YoWN4/H8MSLj4eYJKxGg26lZwboEniNiNwZQ6Q==}
++
+   '@bcoe/v8-coverage@0.2.3':
+     resolution: {integrity: sha512-0hYQ8SB4Db5zvZB4axdMHGwEaQjkZzFjQiN9LVYvIFB2nSUHW9tYpxWriPrWDASIxiaXax83REcLxuSdnGPZtw==}
+ 
+   '@borewit/text-codec@0.2.2':
+     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+ 
+   '@electric-sql/pglite-socket@0.1.1':
+     resolution: {integrity: sha512-p2hoXw3Z3LQHwTeikdZNsFBOvXGqKY2hk51BBw+8NKND8eoH+8LFOtW9Z8CQKmTJ2qqGYu82ipqiyFZOTTXNfw==}
+     hasBin: true
+     peerDependencies:
+@@ -395,20 +404,34 @@ packages:
+ 
+   '@fastify/forwarded@3.0.1':
+     resolution: {integrity: sha512-JqDochHFqXs3C3Ml3gOY58zM7OqO9ENqPo0UqAjAjH8L01fRZqwX9iLeX34//kiJubF7r2ZQHtBRU36vONbLlw==}
+ 
+   '@fastify/merge-json-schemas@0.2.1':
+     resolution: {integrity: sha512-OA3KGBCy6KtIvLf8DINC5880o5iBlDX4SxzLQS8HorJAbqluzLRn80UXU0bxZn7UOFhFgpRJDasfwn9nG4FG4A==}
+ 
+   '@fastify/proxy-addr@5.1.0':
+     resolution: {integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==}
+ 
++  '@grpc/grpc-js@1.14.4':
++    resolution: {integrity: sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ==}
++    engines: {node: '>=12.10.0'}
++
++  '@grpc/proto-loader@0.7.15':
++    resolution: {integrity: sha512-tMXdRCfYVixjuFK+Hk0Q1s38gV9zDiDJfWL3h1rv4Qc39oILCu1TRTDt7+fGUI8K4G1Fj125Hx/ru3azECWTyQ==}
++    engines: {node: '>=6'}
++    hasBin: true
++
++  '@grpc/proto-loader@0.8.1':
++    resolution: {integrity: sha512-wtF6h+DY6M3YaDBPAmvuuA6jV8Sif9MjtOI5euKFWRgCDl5PeDpPsHR9u2l6St5ceY8AZgoNDww5+HvEsXFsGg==}
++    engines: {node: '>=6'}
++    hasBin: true
++
+   '@hono/node-server@1.19.11':
+     resolution: {integrity: sha512-dr8/3zEaB+p0D2n/IUrlPF1HZm586qgJNXK1a9fhg/PzdtkK7Ksd5l312tJX2yBuALqDYBlG20QEbayqPyxn+g==}
+     engines: {node: '>=18.14.1'}
+     peerDependencies:
+       hono: ^4
+ 
+   '@humanfs/core@0.19.2':
+     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
+     engines: {node: '>=18.18.0'}
+ 
+@@ -421,20 +444,24 @@ packages:
+     engines: {node: '>=18.18.0'}
+ 
+   '@humanwhocodes/module-importer@1.0.1':
+     resolution: {integrity: sha512-bxveV4V8v5Yb4ncFTT3rPSgZBOpCkjfK0y4oVVVJwIuDVBRMDXrPyXRL988i5ap9m9bnyEEjWfm5WkBmtffLfA==}
+     engines: {node: '>=12.22'}
+ 
+   '@humanwhocodes/retry@0.4.3':
+     resolution: {integrity: sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ==}
+     engines: {node: '>=18.18'}
+ 
++  '@isaacs/cliui@8.0.2':
++    resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
++    engines: {node: '>=12'}
++
+   '@istanbuljs/load-nyc-config@1.1.0':
+     resolution: {integrity: sha512-VjeHSlIzpv/NyD3N0YuHfXOPDIixcA1q2ZV98wsMqcYlPmv2n3Yb2lYP9XMElnaFVXg5A7YLTeLu6V84uQDjmQ==}
+     engines: {node: '>=8'}
+ 
+   '@istanbuljs/schema@0.1.6':
+     resolution: {integrity: sha512-+Sg6GCR/wy1oSmQDFq4LQDAhm3ETKnorxN+y5nbLULOR3P0c14f2Wurzj3/xqPXtasLFfHd5iRFQ7AJt4KH2cw==}
+     engines: {node: '>=8'}
+ 
+   '@jest/console@29.7.0':
+     resolution: {integrity: sha512-5Ni4CU7XHQi32IJ398EEP4RrB8eV09sXP2ROqD4bksHrnTree52PsxvX8tpL8LvTZ3pFzXyPbNQReSN41CAhOg==}
+@@ -511,23 +538,29 @@ packages:
+   '@jridgewell/resolve-uri@3.1.2':
+     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
+     engines: {node: '>=6.0.0'}
+ 
+   '@jridgewell/sourcemap-codec@1.5.5':
+     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+ 
+   '@jridgewell/trace-mapping@0.3.31':
+     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+ 
++  '@js-sdsl/ordered-map@4.4.2':
++    resolution: {integrity: sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==}
++
+   '@kurkle/color@0.3.4':
+     resolution: {integrity: sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==}
+ 
++  '@kwsites/file-exists@1.1.1':
++    resolution: {integrity: sha512-m9/5YGR18lIwxSFDwfE3oA7bWuq9kdau6ugN4H2rJeyhFQZcG9AgSHkQtSD15a8WvTgfz9aikZMrKPHvbpqFiw==}
++
+   '@lukeed/csprng@1.1.0':
+     resolution: {integrity: sha512-Z7C/xXCiGWsg0KuKsHTKJxbWhpI3Vs5GwLfOean7MGyVFGqdRgBbAjOCh6u4bbjPc/8MJ2pZmK/0DLdCbivLDA==}
+     engines: {node: '>=8'}
+ 
+   '@nestjs/common@11.1.28':
+     resolution: {integrity: sha512-bRImsxibie+AM7xjdwcrm/gr5YeacI65kSBNzTufa1Ib5iwziaY/lqMtRh9THq6pbV4e1HP9aI2ZxGUumnmaoQ==}
+     peerDependencies:
+       class-transformer: '>=0.4.1'
+       class-validator: '>=0.13.2'
+       reflect-metadata: ^0.1.12 || ^0.2.0
+@@ -578,20 +611,24 @@ packages:
+       '@nestjs/platform-express': ^11.0.0
+     peerDependenciesMeta:
+       '@nestjs/microservices':
+         optional: true
+       '@nestjs/platform-express':
+         optional: true
+ 
+   '@pinojs/redact@0.4.0':
+     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
+ 
++  '@pkgjs/parseargs@0.11.0':
++    resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
++    engines: {node: '>=14'}
++
+   '@prisma/adapter-pg@7.8.0':
+     resolution: {integrity: sha512-ygb3UkerK3v8MDpXVgCISdRNDozpxh6+JVJgiIGbSr5KBgz10LLf5ejUskPGoXlsIjxsOu6nuy1JVQr2EKGSlg==}
+ 
+   '@prisma/client-runtime-utils@7.8.0':
+     resolution: {integrity: sha512-5NQZztQ0oY/ADFkmd9gPuweH5A1/CCY8YQPorLLO0Mu6a87mY5gsnDkzmFmIHs9NFaLnZojzgddFVN4RpKYrdw==}
+ 
+   '@prisma/client@7.8.0':
+     resolution: {integrity: sha512-HFp3Dawv/3sU3JtlPha90IB+48lS7zHiH4LKZPjmcE8YH5P9DOXGPvo8dqOtO7MqLDd1p2hOWMcFlRT1DMblHw==}
+     engines: {node: ^20.19 || ^22.12 || >=24.0}
+     peerDependencies:
+@@ -641,20 +678,47 @@ packages:
+     engines: {bun: '>=1.3.6', node: '>=22.0.0'}
+ 
+   '@prisma/studio-core@0.27.3':
+     resolution: {integrity: sha512-AADjNFPdsrglxHQVTmHFqv6DuKQZ5WY4p5/gVFY017twvNrSwpLJ9lqUbYYxEu2W7nbvVxTZA8deJ8LseNALsw==}
+     engines: {node: ^20.19 || ^22.12 || >=24.0, pnpm: '8'}
+     peerDependencies:
+       '@types/react': ^18.0.0 || ^19.0.0
+       react: ^18.0.0 || ^19.0.0
+       react-dom: ^18.0.0 || ^19.0.0
+ 
++  '@protobufjs/aspromise@1.1.2':
++    resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
++
++  '@protobufjs/base64@1.1.2':
++    resolution: {integrity: sha512-AZkcAA5vnN/v4PDqKyMR5lx7hZttPDgClv83E//FMNhR2TMcLUhfRUBHCmSl0oi9zMgDDqRUJkSxO3wm85+XLg==}
++
++  '@protobufjs/codegen@2.0.5':
++    resolution: {integrity: sha512-zgXFLzW3Ap33e6d0Wlj4MGIm6Ce8O89n/apUaGNB/jx+hw+ruWEp7EwGUshdLKVRCxZW12fp9r40E1mQrf/34g==}
++
++  '@protobufjs/eventemitter@1.1.1':
++    resolution: {integrity: sha512-vW1GmwMZNnL+gMRaovlh9yZX74kc+TTU3FObkkurpMaRtBfLP3ldjS9KQWlwZgraRE0+dheEEoAxdzcJQ8eXZg==}
++
++  '@protobufjs/fetch@1.1.1':
++    resolution: {integrity: sha512-GpptLrs57adMSuHi3VNj0mAF8dwh36LMaYF6XyJ6JMWlVsc+t42tm1HSEDmOs3A8fC9yyeisgLhsTVQokOZ0zw==}
++
++  '@protobufjs/float@1.0.2':
++    resolution: {integrity: sha512-Ddb+kVXlXst9d+R9PfTIxh1EdNkgoRe5tOX6t01f1lYWOvJnSPDBlG241QLzcyPdoNTsblLUdujGSE4RzrTZGQ==}
++
++  '@protobufjs/path@1.1.2':
++    resolution: {integrity: sha512-6JOcJ5Tm08dOHAbdR3GrvP+yUUfkjG5ePsHYczMFLq3ZmMkAD98cDgcT2iA1lJ9NVwFd4tH/iSSoe44YWkltEA==}
++
++  '@protobufjs/pool@1.1.0':
++    resolution: {integrity: sha512-0kELaGSIDBKvcgS4zkjz1PeddatrjYcmMWOlAuAPwAeccUrPHdUqo/J6LiymHHEiJT5NrF1UVwxY14f+fy4WQw==}
++
++  '@protobufjs/utf8@1.1.2':
++    resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
++
+   '@radix-ui/primitive@1.1.3':
+     resolution: {integrity: sha512-JTF99U/6XIjCBo0wqkU5sK10glYe27MRRsfwoiq5zzOEZLHU3A3KCMa5X/azekYRCJ0HlwI0crAXS/5dEHTzDg==}
+ 
+   '@radix-ui/react-compose-refs@1.1.2':
+     resolution: {integrity: sha512-z4eqJvfiNnFMHIIvXP3CY57y2WJs5g2v3X0zm9mEJkrkNv4rDxu+sg9Jh8EkXyeqBkB7SOcboo9dMVqhyrACIg==}
+     peerDependencies:
+       '@types/react': '*'
+       react: ^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc
+     peerDependenciesMeta:
+       '@types/react':
+@@ -727,20 +791,23 @@ packages:
+ 
+   '@sinonjs/commons@3.0.1':
+     resolution: {integrity: sha512-K3mCHKQ9sVh8o1C9cxkwxaOmXoAMlDxC1mYyHrjqOWEcBjYr76t96zL2zlj5dUGZ3HSw240X1qgH3Mjf1yJWpQ==}
+ 
+   '@sinonjs/fake-timers@10.3.0':
+     resolution: {integrity: sha512-V4BG07kuYSUkTCSBHG8G8TNhM+F19jXFWnQtzj+we8DrkpSBCee9Z3Ms8yiGer/dlmhe35/Xdgyo3/0rQKg7YA==}
+ 
+   '@standard-schema/spec@1.1.0':
+     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+ 
++  '@testcontainers/postgresql@12.0.4':
++    resolution: {integrity: sha512-a/pLU6j5lpKKAlUTPwqweqMGhOSjgTSb6HBX69TOrXn32ifU37nnQDmNFTj8ddOAw+BQL9oTRkeOxVbZkqhgZA==}
++
+   '@tokenizer/inflate@0.4.1':
+     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
+     engines: {node: '>=18'}
+ 
+   '@tokenizer/token@0.3.0':
+     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
+ 
+   '@turbo/darwin-64@2.10.5':
+     resolution: {integrity: sha512-ENvPwy3x5yS7MwNYHeWjqOBXkwIMp39Pd+/zXC6PoiNzF8EIvvLZOZZ+ny6L9x4WgS5vxUii2LM5gM+zjPdnWw==}
+     cpu: [x64]
+@@ -776,20 +843,26 @@ packages:
+ 
+   '@types/babel__generator@7.27.0':
+     resolution: {integrity: sha512-ufFd2Xi92OAVPYsy+P4n7/U7e68fex0+Ee8gSG9KX7eo084CWiQ4sdxktvdl0bOPupXtVJPY19zk6EwWqUQ8lg==}
+ 
+   '@types/babel__template@7.4.4':
+     resolution: {integrity: sha512-h/NUaSyG5EyxBIp8YRxo4RMe2/qQgvyowRwVMzhYhBCONbW8PUsg4lkFMrhgZhUe5z3L3MiLDuvyJ/CaPa2A8A==}
+ 
+   '@types/babel__traverse@7.28.0':
+     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
+ 
++  '@types/docker-modem@3.0.6':
++    resolution: {integrity: sha512-yKpAGEuKRSS8wwx0joknWxsmLha78wNMe9R2S3UNsVOkZded8UqOrV8KoeDXoXsjndxwyF3eIhyClGbO1SEhEg==}
++
++  '@types/dockerode@4.0.1':
++    resolution: {integrity: sha512-cmUpB+dPN955PxBEuXE3f6lKO1hHiIGYJA46IVF3BJpNsZGvtBDcRnlrHYHtOH/B6vtDOyl2kZ2ShAu3mgc27Q==}
++
+   '@types/estree@1.0.9':
+     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+ 
+   '@types/graceful-fs@4.1.9':
+     resolution: {integrity: sha512-olP3sd1qOEe5dXTSaFvQG+02VdRXcdytWLAZsAq1PecU8uqQAhkrnbli7DagjtXKW/Bl7YJbUsa8MPcuc8LHEQ==}
+ 
+   '@types/istanbul-lib-coverage@2.0.6':
+     resolution: {integrity: sha512-2QF/t/auWm0lsy8XtKVPG19v3sSOQlJe/YHZgfjb/KBBHOGSV+J2q/S671rcq9uTBrLAXmZpqJiaQbMT+zNU1w==}
+ 
+   '@types/istanbul-lib-report@3.0.3':
+@@ -797,32 +870,44 @@ packages:
+ 
+   '@types/istanbul-reports@3.0.4':
+     resolution: {integrity: sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ==}
+ 
+   '@types/jest@29.5.14':
+     resolution: {integrity: sha512-ZN+4sdnLUbo8EVvVc2ao0GFW6oVrQRPn4K2lglySj7APvSrgzxHiNNK99us4WDMi57xxA2yggblIAMNhXOotLQ==}
+ 
+   '@types/json-schema@7.0.15':
+     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+ 
++  '@types/node@18.19.130':
++    resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
++
+   '@types/node@24.13.3':
+     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+ 
+   '@types/pg@8.20.0':
+     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
+ 
+   '@types/react@19.2.17':
+     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
+ 
+   '@types/semver@7.7.1':
+     resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
+ 
++  '@types/ssh2-streams@0.1.13':
++    resolution: {integrity: sha512-faHyY3brO9oLEA0QlcO8N2wT7R0+1sHWZvQ+y3rMLwdY1ZyS1z0W3t65j9PqT4HmQ6ALzNe7RZlNuCNE0wBSWA==}
++
++  '@types/ssh2@0.5.52':
++    resolution: {integrity: sha512-lbLLlXxdCZOSJMCInKH2+9V/77ET2J6NPQHpFI0kda61Dd1KglJs+fPQBchizmzYSOJBgdTajhPqBO1xxLywvg==}
++
++  '@types/ssh2@1.15.5':
++    resolution: {integrity: sha512-N1ASjp/nXH3ovBHddRJpli4ozpk6UdDYIX4RJWFa9L1YKnzdhTlVmiGHm4DZnj/jLbqZpes4aeR30EFGQtvhQQ==}
++
+   '@types/stack-utils@2.0.3':
+     resolution: {integrity: sha512-9aEbYZ3TbYMznPdcdr3SmIrLXwC/AKZXQeCf9Pgao5CKb8CyHuEX5jzWPTkvregvhRJHcpRO6BFoGW9ycaOkYw==}
+ 
+   '@types/yargs-parser@21.0.3':
+     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
+ 
+   '@types/yargs@17.0.35':
+     resolution: {integrity: sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==}
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0':
+@@ -877,20 +962,24 @@ packages:
+     resolution: {integrity: sha512-aJUGVB3+U0htrrCjoA8qukw8cm8fNCGAxK/tVoS70k8aeb7DETKeFozRiVFIwEeN9WJLsjaP3ph8I60tY2XZoQ==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+     peerDependencies:
+       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
+       typescript: '>=4.8.4 <6.1.0'
+ 
+   '@typescript-eslint/visitor-keys@8.64.0':
+     resolution: {integrity: sha512-mrtuL8Nsn6gi2H4mo5KMTp823M+3Q19Ew/i+Zlikq20tIMm99C3Ez0dCmkWWnxut20esQvTg8aUSEhMcAOXhEw==}
+     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+ 
++  abort-controller@3.0.0:
++    resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
++    engines: {node: '>=6.5'}
++
+   abstract-logging@2.0.1:
+     resolution: {integrity: sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==}
+ 
+   acorn-jsx-walk@2.0.0:
+     resolution: {integrity: sha512-uuo6iJj4D4ygkdzd6jPtcxs8vZgDX9YFIkqczGImoypX2fQ4dVImmu3UzA4ynixCIMTrEOWW+95M2HuBaCEOVA==}
+ 
+   acorn-jsx@5.3.2:
+     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
+     peerDependencies:
+       acorn: ^6.0.0 || ^7.0.0 || ^8.0.0
+@@ -923,49 +1012,82 @@ packages:
+     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
+ 
+   ansi-escapes@4.3.2:
+     resolution: {integrity: sha512-gKXj5ALrKWQLsYG9jlTRmR/xKluxHV+Z9QEwNIgCfM1/uwPMCuzVVnh5mwTd+OuBZcwSIMbqssNWRm1lE51QaQ==}
+     engines: {node: '>=8'}
+ 
+   ansi-regex@5.0.1:
+     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
+     engines: {node: '>=8'}
+ 
++  ansi-regex@6.2.2:
++    resolution: {integrity: sha512-Bq3SmSpyFHaWjPk8If9yc6svM8c56dB5BAtW4Qbw5jHTwwXXcTLoRMkpDJp6VL0XzlWaCHTXrkFURMYmD0sLqg==}
++    engines: {node: '>=12'}
++
+   ansi-styles@4.3.0:
+     resolution: {integrity: sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==}
+     engines: {node: '>=8'}
+ 
+   ansi-styles@5.2.0:
+     resolution: {integrity: sha512-Cxwpt2SfTzTtXcfOlzGEee8O+c+MmUgGrNiBcXnuWxuFJHe6a5Hz7qwhwe5OgaSYI0IJvkLqWX1ASG+cJOkEiA==}
+     engines: {node: '>=10'}
+ 
++  ansi-styles@6.2.3:
++    resolution: {integrity: sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg==}
++    engines: {node: '>=12'}
++
+   anymatch@3.1.3:
+     resolution: {integrity: sha512-KMReFUr0B4t+D+OBkjR3KYqvocp2XaSzO55UcB6mgQMd3KbcE+mWTyvVV7D/zsdEbNnV6acZUutkiHQXvTr1Rw==}
+     engines: {node: '>= 8'}
+ 
++  archiver-utils@5.0.2:
++    resolution: {integrity: sha512-wuLJMmIBQYCsGZgYLTy5FIB2pF6Lfb6cXMSF8Qywwk3t20zWnAi7zLcQFdKQmIB8wyZpY5ER38x08GbwtR2cLA==}
++    engines: {node: '>= 14'}
++
++  archiver@7.0.1:
++    resolution: {integrity: sha512-ZcbTaIqJOfCc03QwD468Unz/5Ir8ATtvAHsK+FdXbDIbGfihqh9mrvdcYunQzqn4HrvWWaFyaxJhGZagaJJpPQ==}
++    engines: {node: '>= 14'}
++
+   argparse@1.0.10:
+     resolution: {integrity: sha512-o5Roy6tNG4SL/FOkCAN6RzjiakZS25RLYFrcMttJqbdd8BWrnA+fGz57iN5Pb06pvBGvl5gQ0B48dJlslXvoTg==}
+ 
+   argparse@2.0.1:
+     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
+ 
++  asn1@0.2.6:
++    resolution: {integrity: sha512-ix/FxPn0MDjeyJ7i/yoHGFt/EX6LyNbxSEhPPXODPL+KB0VPk86UYfL0lMdy+KCnv+fmvIzySwaK5COwqVbWTQ==}
++
++  async-lock@1.4.1:
++    resolution: {integrity: sha512-Az2ZTpuytrtqENulXwO3GGv1Bztugx6TT37NIo7imr/Qo0gsYiGtSdBa2B6fsXhTpVZDNfu1Qn3pk531e3q+nQ==}
++
++  async@3.2.6:
++    resolution: {integrity: sha512-htCUDlxyyCLMgaM3xXg0C0LW2xqfuQ6p05pCEIsXuyQ+a1koYKTuBMzRNwmybfLgvJDMd0r1LTn4+E0Ti6C2AA==}
++
+   atomic-sleep@1.0.0:
+     resolution: {integrity: sha512-kNOjDqAh7px0XWNI+4QbzoiR/nTkHAWNud2uvnJquD1/x5a7EQZMJT0AczqK0Qn67oY/TTQ1LbUKajZpp3I9tQ==}
+     engines: {node: '>=8.0.0'}
+ 
+   avvio@9.3.0:
+     resolution: {integrity: sha512-g2tQ7LE7oOSqDfwEm3M+ZCMTJc7KiZCdJ4UwyZJb5ckTKyYu50OYmvv0mCFXPuYXoM4zkSt8zM9XQ9KCvxA74A==}
+ 
+   aws-ssl-profiles@1.1.2:
+     resolution: {integrity: sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==}
+     engines: {node: '>= 6.0.0'}
+ 
++  b4a@1.8.1:
++    resolution: {integrity: sha512-aiqre1Nr0B/6DgE2N5vwTc+2/oQZ4Wh1t4NznYY4E00y8LCt6NqdRv81so00oo27D8MVKTpUa/MwUUtBLXCoDw==}
++    peerDependencies:
++      react-native-b4a: '*'
++    peerDependenciesMeta:
++      react-native-b4a:
++        optional: true
++
+   babel-jest@29.7.0:
+     resolution: {integrity: sha512-BrvGY3xZSwEcCzKvKsCi2GgHqDqsYkOP4/by5xCgIwGXQxIEh+8ew3gmrE1y7XRR6LHZIj6yLYnUi/mm2KXKBg==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+     peerDependencies:
+       '@babel/core': ^7.8.0
+ 
+   babel-plugin-istanbul@6.1.1:
+     resolution: {integrity: sha512-Y1IQok9821cC9onCx5otgFfRm7Lm+I+wwxOx738M/WLPZ9Q42m4IG5W0FNX8WLL2gYMZo3JkuXIH2DOpWM+qwA==}
+     engines: {node: '>=8'}
+ 
+@@ -984,54 +1106,121 @@ packages:
+     peerDependencies:
+       '@babel/core': ^7.0.0
+ 
+   balanced-match@1.0.2:
+     resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
+ 
+   balanced-match@4.0.4:
+     resolution: {integrity: sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==}
+     engines: {node: 18 || 20 || >=22}
+ 
++  bare-events@2.9.1:
++    resolution: {integrity: sha512-Z0oHEHAFDZkffN8Qc39zNZjQlMDkPJRyyyZieU1VH7u8c5S+qHZ2S8ixdKIAxEjfHO7FJxXmJWgteOghVanIsg==}
++    peerDependencies:
++      bare-abort-controller: '*'
++    peerDependenciesMeta:
++      bare-abort-controller:
++        optional: true
++
++  bare-fs@4.7.4:
++    resolution: {integrity: sha512-y1kC+ffIx/tPLdTE693uNjHfzTfr+ravR5tvWlMXe25nELbkqV400S71qHDwbkAQ1FVEZobB1NFRzFbCCcyBCQ==}
++    engines: {bare: '>=1.16.0'}
++    peerDependencies:
++      bare-buffer: '*'
++    peerDependenciesMeta:
++      bare-buffer:
++        optional: true
++
++  bare-path@3.1.1:
++    resolution: {integrity: sha512-JprUlveX3QjApC1cTpsUOiscADftCGVWkzitbHsRqv84hzYwYHw2mbluddsq5TvI8mH/8Ov1f4BiMAdcB0oYnQ==}
++
++  bare-stream@2.13.3:
++    resolution: {integrity: sha512-Kc+brLqvEqGkjyfiwJmImAOqLZL7OsoLKuavx+hJjgVV3nLTOjloJyPMFxjUPerGGHrNH0fLU06jjykMLWrERQ==}
++    peerDependencies:
++      bare-abort-controller: '*'
++      bare-buffer: '*'
++      bare-events: '*'
++    peerDependenciesMeta:
++      bare-abort-controller:
++        optional: true
++      bare-buffer:
++        optional: true
++      bare-events:
++        optional: true
++
++  bare-url@2.4.5:
++    resolution: {integrity: sha512-K+y9xF1tN+CdPu4qWwr0QiK1Al07eFPGYK5M2pDXcmHdMdgC/tT/bpmMe1hrmRHaidKLkXrC+cRNYf3XVDUhSQ==}
++
++  base64-js@1.5.1:
++    resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
++
+   baseline-browser-mapping@2.10.43:
+     resolution: {integrity: sha512-AjYpR78kDWAY3Efj+cDTFH9t9SCoL7OoTp1BOb0mQV7S+6CiLwnWM3FyxhJtdPufDFKzmCSFoUncKjWgJEZTCQ==}
+     engines: {node: '>=6.0.0'}
+     hasBin: true
+ 
++  bcrypt-pbkdf@1.0.2:
++    resolution: {integrity: sha512-qeFIXtP4MSoi6NLqO12WfqARWWuCKi2Rn/9hJLEmtB5yTNr9DqFWkJRCf2qShWzPeAMRnOgCrq0sg/KLv5ES9w==}
++
+   better-result@2.9.2:
+     resolution: {integrity: sha512-WIFoBPCdnTOdk9inkE1ZRvCZ4P0CpSkAiLlchC65N7n9DcjZ3NhqkBOlafzpOVnO8ixyi37kicmSJ3ENhPZl7Q==}
+ 
++  bl@4.1.0:
++    resolution: {integrity: sha512-1W07cM9gS6DcLperZfFSj+bWLtaPGSOHWhPiGzXmvVJbRLdG82sH/Kn8EtW1VqWVA54AKf2h5k5BbnIbwF3h6w==}
++
+   brace-expansion@1.1.16:
+     resolution: {integrity: sha512-IDw48K2/2kRkg9LdJxurvq3lV3aBgq0REY89duEqFRthjlPdXHKMj7EnQOXVckxzgisinf3nHfrcE2FufFLXMw==}
+ 
++  brace-expansion@2.1.2:
++    resolution: {integrity: sha512-w5JZcKgdhDOgOwm8H+KgbosopHMuGcl6qbulwjtz3SM7I7P3yW1eAjzMPLrIE+NQ9vjgANKHWeMHnrT0OXW1oA==}
++
+   brace-expansion@5.0.7:
+     resolution: {integrity: sha512-7oFy703dxfY3/NLxC1fh2SUCQ0H9rmAY+5EpDVfXjUTTs+HEwR2nYaqLv+GWcTsumwxPfiz6CzCNkwXwBUwqCA==}
+     engines: {node: 18 || 20 || >=22}
+ 
+   braces@3.0.3:
+     resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
+     engines: {node: '>=8'}
+ 
+   browserslist@4.28.6:
+     resolution: {integrity: sha512-FQBYNK15VMslhLHpA7+n+n1GOlF1kId2xcCg7/j95f24AOF6VDYMNH4mFxF7KuaTdv627faazpOAjFzMrfJOUw==}
+     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
+     hasBin: true
+ 
+   bs-logger@0.2.6:
+     resolution: {integrity: sha512-pd8DCoxmbgc7hyPKOvxtqNcjYoOsABPQdcCUjGp3d42VR2CX1ORhk2A87oqqu5R1kk+76nsxZupkmyd+MVtCog==}
+     engines: {node: '>= 6'}
+ 
+   bser@2.1.1:
+     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
+ 
++  buffer-crc32@1.0.0:
++    resolution: {integrity: sha512-Db1SbgBS/fg/392AblrMJk97KggmvYhr4pB5ZIMTWtaivCPMWLkmb7m21cJvpvgK+J3nsU2CmmixNBZx4vFj/w==}
++    engines: {node: '>=8.0.0'}
++
+   buffer-from@1.1.2:
+     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
+ 
++  buffer@5.7.1:
++    resolution: {integrity: sha512-EHcyIPBQ4BSGlvjB16k5KgAJ27CIsHY/2JBmCRReo48y9rQ3MaUzWX3KVlBa4U7MyX02HdVj0K7C3WaB3ju7FQ==}
++
++  buffer@6.0.3:
++    resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
++
++  buildcheck@0.0.7:
++    resolution: {integrity: sha512-lHblz4ahamxpTmnsk+MNTRWsjYKv965MwOrSJyeD588rR3Jcu7swE+0wN5F+PbL5cjgu/9ObkhfzEPuofEMwLA==}
++    engines: {node: '>=10.0.0'}
++
++  byline@5.0.0:
++    resolution: {integrity: sha512-s6webAy+R4SR8XVuJWt2V2rGvhnrhxN+9S15GNuTK3wKPOXFF6RNc+8ug2XhH+2s4f+uudG4kUVYmYOQWL2g0Q==}
++    engines: {node: '>=0.10.0'}
++
+   c12@3.3.4:
+     resolution: {integrity: sha512-cM0ApFQSBXuourJejzwv/AuPRvAxordTyParRVcHjjtXirtkzM0uK2L9TTn9s0cXZbG7E55jCivRQzoxYmRAlA==}
+     peerDependencies:
+       magicast: '*'
+     peerDependenciesMeta:
+       magicast:
+         optional: true
+ 
+   callsites@3.1.0:
+     resolution: {integrity: sha512-P8BjAsXvZS+VIDUI11hHCQEv74YT67YUi5JJFNWIqL235sBmjX4+qx9Muvls5ivyNENctx46xQLQ3aTuE7ssaQ==}
+@@ -1057,20 +1246,23 @@ packages:
+     engines: {node: '>=10'}
+ 
+   chart.js@4.5.1:
+     resolution: {integrity: sha512-GIjfiT9dbmHRiYi6Nl2yFCq7kkwdkp1W/lp2J99rX0yo9tgJGn3lKQATztIjb5tVtevcBtIdICNWqlq5+E8/Pw==}
+     engines: {pnpm: '>=8'}
+ 
+   chokidar@5.0.0:
+     resolution: {integrity: sha512-TQMmc3w+5AxjpL8iIiwebF73dRDF4fBIieAqGn9RGCWaEVwQ6Fb2cGe31Yns0RRIzii5goJ1Y7xbMwo1TxMplw==}
+     engines: {node: '>= 20.19.0'}
+ 
++  chownr@1.1.4:
++    resolution: {integrity: sha512-jJ0bqzaylmJtVnNgzTeSOs8DPavpbYgEr/b0YL8/2GO3xJEhInFmhKMUnEJQjZumK7KXGFhUy89PrsJWlakBVg==}
++
+   ci-info@3.9.0:
+     resolution: {integrity: sha512-NIxF55hv4nSqQswkAeiOi1r83xy8JldOFDTWiug55KBu9Jnblncd2U6ViHmYgHf01TPZS77NJBhBMKdWj9HQMQ==}
+     engines: {node: '>=8'}
+ 
+   cjs-module-lexer@1.4.3:
+     resolution: {integrity: sha512-9z8TZaGM1pfswYeXrUpzPrkx8UnWYdhJclsiYMm6x/w5+nN+8Tf/LnAgfLGQCm59qAOxU8WwHEq2vNwF6i4j+Q==}
+ 
+   cliui@8.0.1:
+     resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
+     engines: {node: '>=12'}
+@@ -1086,33 +1278,53 @@ packages:
+     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
+     engines: {node: '>=7.0.0'}
+ 
+   color-name@1.1.4:
+     resolution: {integrity: sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==}
+ 
+   commander@13.1.0:
+     resolution: {integrity: sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==}
+     engines: {node: '>=18'}
+ 
++  compress-commons@6.0.2:
++    resolution: {integrity: sha512-6FqVXeETqWPoGcfzrXb37E50NP0LXT8kAMu5ooZayhWWdgEY4lBEEcbQNXtkuKQsGduxiIcI4gOTsxTmuq/bSg==}
++    engines: {node: '>= 14'}
++
+   concat-map@0.0.1:
+     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
+ 
+   confbox@0.2.4:
+     resolution: {integrity: sha512-ysOGlgTFbN2/Y6Cg3Iye8YKulHw+R2fNXHrgSmXISQdMnomY6eNDprVdW9R5xBguEqI954+S6709UyiO7B+6OQ==}
+ 
+   convert-source-map@2.0.0:
+     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
+ 
+   cookie@1.1.1:
+     resolution: {integrity: sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==}
+     engines: {node: '>=18'}
+ 
++  core-util-is@1.0.3:
++    resolution: {integrity: sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==}
++
++  cpu-features@0.0.10:
++    resolution: {integrity: sha512-9IkYqtX3YHPCzoVg1Py+o9057a3i0fp7S530UWokCSaFVTc7CwXPRiOjRjBQQ18ZCNafx78YfnG+HALxtVmOGA==}
++    engines: {node: '>=10.0.0'}
++
++  crc-32@1.2.2:
++    resolution: {integrity: sha512-ROmzCKrTnOwybPcJApAA6WBWij23HVfGVNKqqrZpuyZOHqK2CwHSvpGuyt/UNNvaIjEd8X5IFGp4Mh+Ie1IHJQ==}
++    engines: {node: '>=0.8'}
++    hasBin: true
++
++  crc32-stream@6.0.0:
++    resolution: {integrity: sha512-piICUB6ei4IlTv1+653yq5+KoqfBYmj9bw6LqXoOneTMDXk5nM1qt12mFW1caG3LlJXEKW1Bp0WggEmIfQB34g==}
++    engines: {node: '>= 14'}
++
+   create-jest@29.7.0:
+     resolution: {integrity: sha512-Adz2bdH0Vq3F53KEMJOoftQFutWCukm6J24wbPWRO4k1kMY7gS7ds/uoJkNuV8wDCtWWnuwGcJwpWcih+zEW1Q==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+     hasBin: true
+ 
+   cross-spawn@7.0.6:
+     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
+     engines: {node: '>= 8'}
+ 
+   csstype@3.2.3:
+@@ -1166,45 +1378,66 @@ packages:
+     resolution: {integrity: sha512-ugFTXCtDZunbzasqBxrK93Ik/DRYsO6S/fedkWEMKqt04xZ4csmnmwGDBAb07QWNaGMAmnTIemsYZCksjATwsA==}
+ 
+   detect-newline@3.1.0:
+     resolution: {integrity: sha512-TLz+x/vEXm/Y7P7wn1EJFNLxYpUD4TgMosxY6fAVJUnJMbupHBOncxyWUG9OpTaH9EBD7uFI5LfEgmMOc54DsA==}
+     engines: {node: '>=8'}
+ 
+   diff-sequences@29.6.3:
+     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+ 
++  docker-compose@1.4.2:
++    resolution: {integrity: sha512-rPHigTKGaEHpkUmfd69QgaOp+Os5vGJwG/Ry8lcr8W/382AmI+z/D7qoa9BybKIkqNppaIbs8RYeHSevdQjWww==}
++    engines: {node: '>= 6.0.0'}
++
++  docker-modem@5.0.7:
++    resolution: {integrity: sha512-XJgGhoR/CLpqshm4d3L7rzH6t8NgDFUIIpztYlLHIApeJjMZKYJMz2zxPsYxnejq5h3ELYSw/RBsi3t5h7gNTA==}
++    engines: {node: '>= 8.0'}
++
++  dockerode@5.0.1:
++    resolution: {integrity: sha512-avsq/xk4YPIrn0CgleX5bjT9Y8IT1p9PxrNQ++RBQ2WEyFfHCTDsT9kmyxz+H/axnjAwg8wJWEIuPGOUuNupiA==}
++    engines: {node: '>= 14.17'}
++
+   dotenv@16.6.1:
+     resolution: {integrity: sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==}
+     engines: {node: '>=12'}
+ 
+   dotenv@17.4.2:
+     resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
+     engines: {node: '>=12'}
+ 
++  eastasianwidth@0.2.0:
++    resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
++
+   effect@3.20.0:
+     resolution: {integrity: sha512-qMLfDJscrNG8p/aw+IkT9W7fgj50Z4wG5bLBy0Txsxz8iUHjDIkOgO3SV0WZfnQbNG2VJYb0b+rDLMrhM4+Krw==}
+ 
+   electron-to-chromium@1.5.392:
+     resolution: {integrity: sha512-1yQq3VQCZRwsnYc67Oc+1fge6Lwtn0hzi6zmEVkB61Zx21kTbwJAW4dFLadl5Rc1tKhG/kSpYXnfiAhu0f0a1g==}
+ 
+   emittery@0.13.1:
+     resolution: {integrity: sha512-DeWwawk6r5yR9jFgnDKYt4sLS0LmHJJi3ZOnb5/JdbYwj3nW+FxQnHIjhBKz8YLC7oRNPVM9NQ47I3CVx34eqQ==}
+     engines: {node: '>=12'}
+ 
+   emoji-regex@8.0.0:
+     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
+ 
++  emoji-regex@9.2.2:
++    resolution: {integrity: sha512-L18DaJsXSUk2+42pv8mLs5jJT2hqFkFE4j21wOmgbUqsZ2hL72NsUU785g9RXgo3s0ZNgVl42TiHp3ZtOv/Vyg==}
++
+   empathic@2.0.0:
+     resolution: {integrity: sha512-i6UzDscO/XfAcNYD75CfICkmfLedpyPDdozrLMmQc5ORaQcdMoc21OnlEylMIqI7U8eniKrPMxxtj8k0vhmJhA==}
+     engines: {node: '>=14'}
+ 
++  end-of-stream@1.4.5:
++    resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
++
+   enhanced-resolve@5.24.2:
+     resolution: {integrity: sha512-rpsZEGT1jFuve6QlpyRp9ckQ+kN61hvF9BzCPyMdaKTm8UJce96KBn3sorXOFXlzjPrs3Vc4T1NsSroZ3PxlFw==}
+     engines: {node: '>=10.13.0'}
+ 
+   env-paths@3.0.0:
+     resolution: {integrity: sha512-dtJUTepzMW3Lm/NPxRf3wP4642UWhjL2sQxc+ym2YMj1m/H2zDNQOlezafzkHwn6sMstjHTwG6iQQsctDW/b1A==}
+     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+ 
+   error-ex@1.3.4:
+     resolution: {integrity: sha512-sqQamAnR14VgCr1A618A3sGrygcpK+HEbenA/HiEAkkUwcZIIB/tgWqHFxWgOyDh4nB4JCRimh79dR5Ywc9MDQ==}
+@@ -1269,20 +1502,31 @@ packages:
+     engines: {node: '>=4.0'}
+ 
+   estraverse@5.3.0:
+     resolution: {integrity: sha512-MMdARuVEQziNTeJD8DgMqmhwR11BRQ/cBP+pLtYdSTnf3MIO8fFeiINEbX36ZdNlfU/7A9f3gUw49B3oQsvwBA==}
+     engines: {node: '>=4.0'}
+ 
+   esutils@2.0.3:
+     resolution: {integrity: sha512-kVscqXk4OCp68SZ0dkgEKVi6/8ij300KBWTJq32P/dYeWTSwK41WyTxalN1eRmA5Z9UU/LX9D7FWSmV9SAYx6g==}
+     engines: {node: '>=0.10.0'}
+ 
++  event-target-shim@5.0.1:
++    resolution: {integrity: sha512-i/2XbnSz/uxRCU6+NdVJgKWDTM427+MqYbkQzD321DuCQJUqOuJKIA0IM2+W2xtYHdKOmZ4dR6fExsd4SXL+WQ==}
++    engines: {node: '>=6'}
++
++  events-universal@1.0.1:
++    resolution: {integrity: sha512-LUd5euvbMLpwOF8m6ivPCbhQeSiYVNb8Vs0fQ8QjXo0JTkEHpz8pxdQf0gStltaPpw0Cca8b39KxvK9cfKRiAw==}
++
++  events@3.3.0:
++    resolution: {integrity: sha512-mQw+2fkQbALzQ7V0MY0IqdnXNOeTtP4r0lN9z7AAawCXgqea7bDii20AYrIBrFd/Hx0M2Ocz6S111CaFkUcb0Q==}
++    engines: {node: '>=0.8.x'}
++
+   execa@5.1.1:
+     resolution: {integrity: sha512-8uSpZZocAZRBAPIEINJj3Lo9HyGitllczc27Eh5YYojjMFMn8yHMDMaUHE2Jqfq05D/wucwI4JGURyXt1vchyg==}
+     engines: {node: '>=10'}
+ 
+   exit@0.1.2:
+     resolution: {integrity: sha512-Zk/eNKV2zbjpKzrsQ+n1G6poVbErQxJ0LBOJXaKZ1EViLzH+hrLu9cdXI4zw9dBQJslwBEpbQ2P1oS7nDxs6jQ==}
+     engines: {node: '>= 0.8.0'}
+ 
+   expect@29.7.0:
+     resolution: {integrity: sha512-2Zks0hf1VLFYI1kbh0I5jP3KHHyCHpkfyHBzsSXRFgl/Bg9mWYfMW8oD+PdMPlEwy5HNsR9JutYy6pMeOh61nw==}
+@@ -1294,20 +1538,23 @@ packages:
+   fast-check@3.23.2:
+     resolution: {integrity: sha512-h5+1OzzfCC3Ef7VbtKdcv7zsstUQwUDlYpUTvjeUsJAssPgLn7QzbboPtL5ro04Mq0rPOsMzl7q5hIbRs2wD1A==}
+     engines: {node: '>=8.0.0'}
+ 
+   fast-decode-uri-component@1.0.1:
+     resolution: {integrity: sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg==}
+ 
+   fast-deep-equal@3.1.3:
+     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
+ 
++  fast-fifo@1.3.2:
++    resolution: {integrity: sha512-/d9sfos4yxzpwkDkuN7k2SqFKtYNmCTzgfEpz82x34IM9/zc8KGxQoXg1liNC/izpRM/MBdt44Nmx41ZWqk+FQ==}
++
+   fast-json-stable-stringify@2.1.0:
+     resolution: {integrity: sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw==}
+ 
+   fast-json-stringify@7.0.1:
+     resolution: {integrity: sha512-eRSayARSbbwlBjpP4vnTTIRD5QPcIrmihPxDeN1DtKnHPg66UuJLx+8hlK1kaFdjvzyQ/dzALoi4vwAQ+T+iZA==}
+ 
+   fast-levenshtein@2.0.6:
+     resolution: {integrity: sha512-DCXu6Ifhqcks7TZKY3Hxp3y6qphY5SJZmrWMDrKcERSOXWQdMhU9Ig/PYrzyw/ul9jOIyh0N4M0tbC5hodg8dw==}
+ 
+   fast-querystring@1.1.2:
+@@ -1374,20 +1621,23 @@ packages:
+     resolution: {integrity: sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw==}
+     engines: {node: '>=16'}
+ 
+   flatted@3.4.2:
+     resolution: {integrity: sha512-PjDse7RzhcPkIJwy5t7KPWQSZ9cAbzQXcafsetQoD7sOJRQlGikNbx7yZp2OotDnJyrDcbyRq3Ttb18iYOqkxA==}
+ 
+   foreground-child@3.3.1:
+     resolution: {integrity: sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==}
+     engines: {node: '>=14'}
+ 
++  fs-constants@1.0.0:
++    resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
++
+   fs.realpath@1.0.0:
+     resolution: {integrity: sha512-OO0pH2lK6a0hZnAdau5ItzHPI6pUlvI7jMVnxUQRtw4owF2wk8lOSabtGDCTP4Ggrg2MbGnWO9X8K1t4+fGMDw==}
+ 
+   fsevents@2.3.3:
+     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
+     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+     os: [darwin]
+ 
+   function-bind@1.1.2:
+     resolution: {integrity: sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==}
+@@ -1403,32 +1653,41 @@ packages:
+     resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==}
+     engines: {node: 6.* || 8.* || >= 10.*}
+ 
+   get-package-type@0.1.0:
+     resolution: {integrity: sha512-pjzuKtY64GYfWizNAJ0fr9VqttZkNiK2iS430LtIHzjBEr6bX8Am2zm4sW4Ro5wjWW5cAlRL1qAMTcXbjNAO2Q==}
+     engines: {node: '>=8.0.0'}
+ 
+   get-port-please@3.2.0:
+     resolution: {integrity: sha512-I9QVvBw5U/hw3RmWpYKRumUeaDgxTPd401x364rLmWBJcOQ753eov1eTgzDqRG9bqFIfDc7gfzcQEWrUri3o1A==}
+ 
++  get-port@5.1.1:
++    resolution: {integrity: sha512-g/Q1aTSDOxFpchXC4i8ZWvxA1lnPqx/JHqcpIw0/LX9T8x/GBbi6YnlN5nhaKIFkT8oFsscUKgDJYxfwfS6QsQ==}
++    engines: {node: '>=8'}
++
+   get-stream@6.0.1:
+     resolution: {integrity: sha512-ts6Wi+2j3jQjqi70w5AlN8DFnkSwC+MqmxEzdEALB2qXZYV3X/b1CTfgPLGJNMeAWxdPfU8FO1ms3NUfaHCPYg==}
+     engines: {node: '>=10'}
+ 
+   giget@3.3.0:
+     resolution: {integrity: sha512-gzi2D96p+AMfDcmJHGDj3KJ9NRiwvlFAU5yfa3ROwWZmFUjX4P43x3BcyRaOMMLto1vUo7C+86+MFhYTl6Ryiw==}
+     hasBin: true
+ 
+   glob-parent@6.0.2:
+     resolution: {integrity: sha512-XxwI8EOhVQgWp6iDL+3b0r86f4d6AX6zSU55HfB4ydCEuXLXc5FcYeOu+nnGftS4TEju/11rt4KJPTMgbfmv4A==}
+     engines: {node: '>=10.13.0'}
+ 
++  glob@10.5.0:
++    resolution: {integrity: sha512-DfXN8DfhJ7NH3Oe7cFmu3NCu1wKbkReJ8TorzSAFbSKrlNaQSKfIzqYqVY8zlbs2NLBbWpRiU52GX2PbaBVNkg==}
++    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
++    hasBin: true
++
+   glob@7.2.3:
+     resolution: {integrity: sha512-nFR0zLpU2YCaRxwoCJvL6UvCH2JFyFVIvwTLsIf21AuHlMskA1hhTdk+LlYJtOlYt9v6dvszD2BGRqBL+iQK9Q==}
+     deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+ 
+   global-directory@4.0.1:
+     resolution: {integrity: sha512-wHTUcDUoZ1H5/0iVqEudYW4/kAlN5cZ3j/bXn0Dpbizl9iaUVeWSHqiOjsgk6OW2bkLclbBjzewBz6weQ1zA2Q==}
+     engines: {node: '>=18'}
+ 
+   globals@14.0.0:
+     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
+@@ -1552,20 +1811,23 @@ packages:
+     resolution: {integrity: sha512-lJJV/5dYS+RcL8uQdBDW9c9uWFLLBNRyFhnAKXw5tVqLlKZ4RMGZKv+YQ/IA3OhD+RpbJa1LLFM1FQPGyIXvOA==}
+     engines: {node: '>=12'}
+ 
+   is-property@1.0.2:
+     resolution: {integrity: sha512-Ks/IoX00TtClbGQr4TWXemAnktAQvYB7HzcCxDGqEZU6oCmb2INHuOoKxbtR+HFkmYWBKv/dOZtGRiAjDhj92g==}
+ 
+   is-stream@2.0.1:
+     resolution: {integrity: sha512-hFoiJiTl63nn+kstHGBtewWSKnQLpyb155KHheA1l39uvtO9nWIop1p3udqPcUd/xbF1VLMO4n7OI6p7RbngDg==}
+     engines: {node: '>=8'}
+ 
++  isarray@1.0.0:
++    resolution: {integrity: sha512-VLghIWNM6ELQzo7zwmcg0NmTVyWKYjvIeM83yjp0wRDTmUnrM678fQbcKBo6n2CJEF0szoG//ytg+TKla89ALQ==}
++
+   isexe@2.0.0:
+     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
+ 
+   istanbul-lib-coverage@3.2.2:
+     resolution: {integrity: sha512-O8dpsF+r0WV/8MNRKfnmrtCWhuKjxrq2w+jpzBL5UZKTi2LeVWnWOmWRxFlesJONmc+wLAGvKQZEOanko0LFTg==}
+     engines: {node: '>=8'}
+ 
+   istanbul-lib-instrument@5.2.1:
+     resolution: {integrity: sha512-pzqtp31nLv/XFOzXGuvhCb8qhjmTVo5vjVk19XE4CRlSWz0KoeJ3bw9XsA7nOp9YBf4qHjwBxkDzKcME/J29Yg==}
+     engines: {node: '>=8'}
+@@ -1583,20 +1845,23 @@ packages:
+     engines: {node: '>=10'}
+ 
+   istanbul-reports@3.2.0:
+     resolution: {integrity: sha512-HGYWWS/ehqTV3xN10i23tkPkpH46MLCIMFNCaaKNavAXTF1RkqxawEPtnjnGZ6XKSInBKkiOA5BKS+aZiY3AvA==}
+     engines: {node: '>=8'}
+ 
+   iterare@1.2.1:
+     resolution: {integrity: sha512-RKYVTCjAnRthyJes037NX/IiqeidgN1xc3j1RjFfECFp28A1GVwK9nA+i0rJPaHqSZwygLzRnFlzUuHFoWWy+Q==}
+     engines: {node: '>=6'}
+ 
++  jackspeak@3.4.3:
++    resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
++
+   jest-changed-files@29.7.0:
+     resolution: {integrity: sha512-fEArFiwf1BpQ+4bXSprcDc3/x4HSzL4al2tozwVpDFpsxALjLYdyiIK4e5Vz66GQJIbXJ82+35PtysofptNX2w==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+ 
+   jest-circus@29.7.0:
+     resolution: {integrity: sha512-3E1nCMgipcTkCocFwM90XXQab9bS+GMsjdpmPrlelaxwD93Ad8iVEjX/vvHPdLPnFf+L40u+5+iutRdA1N9myw==}
+     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+ 
+   jest-cli@29.7.0:
+     resolution: {integrity: sha512-OVVobw2IubN/GSYsxETi+gOe7Ka59EFMR/twOU3Jb2GnKKeMGJB5SGUUrEz3SFVmJASUdZUzy83sLNNQ2gZslg==}
+@@ -1762,20 +2027,24 @@ packages:
+     engines: {node: '>=6'}
+     hasBin: true
+ 
+   keyv@4.5.4:
+     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
+ 
+   kleur@3.0.3:
+     resolution: {integrity: sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w==}
+     engines: {node: '>=6'}
+ 
++  lazystream@1.0.1:
++    resolution: {integrity: sha512-b94GiNHQNy6JNTrt5w6zNyffMrNkXZb3KTkCZJb2V1xaEGCk093vkZ2jk3tpaeP33/OiXC+WvK9AxUebnf5nbw==}
++    engines: {node: '>= 0.6.3'}
++
+   leven@3.1.0:
+     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
+     engines: {node: '>=6'}
+ 
+   levn@0.4.1:
+     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
+     engines: {node: '>= 0.8.0'}
+ 
+   light-my-request@6.6.0:
+     resolution: {integrity: sha512-CHYbu8RtboSIoVsHZ6Ye4cj4Aw/yg2oAFimlF7mNvfDV192LR7nDiKtSIfCuLT7KokPSTn/9kfVLm5OGN0A28A==}
+@@ -1788,29 +2057,38 @@ packages:
+     engines: {node: '>=13.2.0'}
+ 
+   locate-path@5.0.0:
+     resolution: {integrity: sha512-t7hw9pI+WvuwNJXwk5zVHpyhIqzg2qTlklJOf0mVxGSbe3Fp2VieZcduNYjaLDoy6p9uGpQEGWG87WpMKlNq8g==}
+     engines: {node: '>=8'}
+ 
+   locate-path@6.0.0:
+     resolution: {integrity: sha512-iPZK6eYjbxRu3uB4/WZ3EsEIMJFMqAoopl3R+zuq0UjcAm/MO6KCweDgPfP3elTztoKP3KtnVHxTn2NHBSDVUw==}
+     engines: {node: '>=10'}
+ 
++  lodash.camelcase@4.3.0:
++    resolution: {integrity: sha512-TwuEnCnxbc3rAvhf/LbG7tJUDzhqXyFnv3dtzLOPgCG/hODL7WFnsbwktkD7yUV0RrreP/l1PALq/YSg6VvjlA==}
++
+   lodash.memoize@4.1.2:
+     resolution: {integrity: sha512-t7j+NzmgnQzTAYXcsHYLgimltOV1MXHtlOWf6GjL9Kj8GK5FInw5JotxvbOs+IvV1/Dzo04/fCGfLVs7aXb4Ag==}
+ 
+   lodash.merge@4.6.2:
+     resolution: {integrity: sha512-0KpjqXRVvrYyCsX1swR/XTK0va6VQkQM6MNo7PqW77ByjAhoARA8EfrP1N4+KlKj8YS0ZUCtRT/YUuhyYDujIQ==}
+ 
++  lodash@4.18.1:
++    resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
++
+   long@5.3.2:
+     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
+ 
++  lru-cache@10.4.3:
++    resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
++
+   lru-cache@5.1.1:
+     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+ 
+   lru.min@1.1.4:
+     resolution: {integrity: sha512-DqC6n3QQ77zdFpCMASA1a3Jlb64Hv2N2DciFGkO/4L9+q/IpIAuRlKOvCXabtRW6cQf8usbmM6BE/TOPysCdIA==}
+     engines: {bun: '>=1.0.0', deno: '>=1.30.0', node: '>=8.0.0'}
+ 
+   make-dir@4.0.0:
+     resolution: {integrity: sha512-hXdUTZYIVOt1Ex//jAQi+wTZZpUpwBj/0QsOzqegb3rGMMeJiSEu5xLHnYfBrRV4RH2+OCSOO95Is/7x1WJ4bw==}
+     engines: {node: '>=10'}
+@@ -1840,34 +2118,57 @@ packages:
+     resolution: {integrity: sha512-VP79XUPxV2CigYP3jWwAUFSku2aKqBH7uTAapFWCBqutsbmDo96KY5o8uh6U+/YSIn5OxJnXp73beVkpqMIGhA==}
+     engines: {node: '>=18'}
+ 
+   minimatch@10.2.5:
+     resolution: {integrity: sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg==}
+     engines: {node: 18 || 20 || >=22}
+ 
+   minimatch@3.1.5:
+     resolution: {integrity: sha512-VgjWUsnnT6n+NUk6eZq77zeFdpW2LWDzP6zFGrCbHXiYNul5Dzqk2HHQ5uFH2DNW5Xbp8+jVzaeNt94ssEEl4w==}
+ 
++  minimatch@5.1.9:
++    resolution: {integrity: sha512-7o1wEA2RyMP7Iu7GNba9vc0RWWGACJOCZBJX2GJWip0ikV+wcOsgVuY9uE8CPiyQhkGFSlhuSkZPavN7u1c2Fw==}
++    engines: {node: '>=10'}
++
++  minimatch@9.0.9:
++    resolution: {integrity: sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg==}
++    engines: {node: '>=16 || 14 >=14.17'}
++
+   minimist@1.2.8:
+     resolution: {integrity: sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==}
+ 
++  minipass@7.1.3:
++    resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
++    engines: {node: '>=16 || 14 >=14.17'}
++
++  mkdirp-classic@0.5.3:
++    resolution: {integrity: sha512-gKLcREMhtuZRwRAfqP3RFW+TK4JqApVBtOIftVgjuABpAtpxhPGaDcfvbhNvD0B8iD1oUr/txX35NjcaY6Ns/A==}
++
++  mkdirp@3.0.1:
++    resolution: {integrity: sha512-+NsyUUAZDmo6YVHzL/stxSu3t9YS1iljliy3BSDrXJ/dkn1KYdmtZODGGjLcc9XLgVVpH4KshHB8XmZgMhaBXg==}
++    engines: {node: '>=10'}
++    hasBin: true
++
+   ms@2.1.3:
+     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
+ 
+   mysql2@3.15.3:
+     resolution: {integrity: sha512-FBrGau0IXmuqg4haEZRBfHNWB5mUARw6hNwPDXXGg0XzVJ50mr/9hb267lvpVMnhZ1FON3qNd4Xfcez1rbFwSg==}
+     engines: {node: '>= 8.0'}
+ 
+   named-placeholders@1.1.6:
+     resolution: {integrity: sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==}
+     engines: {node: '>=8.0.0'}
+ 
++  nan@2.28.0:
++    resolution: {integrity: sha512-fTsDz99OTq2sVePhGdp4qQhggZFtKr64ZNVyVajRKtMOkJxYekplBh577PiJB12v/D3s2E5cGtOI45LWp6rnLQ==}
++
+   natural-compare@1.4.0:
+     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+ 
+   neo-async@2.6.2:
+     resolution: {integrity: sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==}
+ 
+   node-int64@0.4.0:
+     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
+ 
+   node-releases@2.0.51:
+@@ -1913,20 +2214,23 @@ packages:
+     engines: {node: '>=8'}
+ 
+   p-locate@5.0.0:
+     resolution: {integrity: sha512-LaNjtRWUBY++zB5nE/NwcaoMylSPk+S+ZHNB1TzdbMJMny6dynpAGt7X/tl/QYq3TIeE6nxHppbo2LGymrG5Pw==}
+     engines: {node: '>=10'}
+ 
+   p-try@2.2.0:
+     resolution: {integrity: sha512-R4nPAVTAU0B9D35/Gk3uJf/7XYbQcyohSKdvAxIRSNghFl4e71hVoGnBNQz9cWaXxO2I10KTC+3jMdvvoKw6dQ==}
+     engines: {node: '>=6'}
+ 
++  package-json-from-dist@1.0.1:
++    resolution: {integrity: sha512-UEZIS3/by4OC8vL3P2dTXRETpebLI2NiI5vIrjaD/5UtrkFX/tNbwjTSRAGC/+7CAo2pIcBaRgWmcBBHcsaCIw==}
++
+   parent-module@1.0.1:
+     resolution: {integrity: sha512-GQ2EWRpQV8/o+Aw8YqtfZZPfNRWZYkbidE9k5rpl/hC3vtHHBfGm2Ifi6qWV+coDGkrUKZAxE3Lot5kcsRlh+g==}
+     engines: {node: '>=6'}
+ 
+   parse-json@5.2.0:
+     resolution: {integrity: sha512-ayCKvm/phCGxOkYRSCM82iDwct8/EonSEgCSxWxD7ve6jHggsFl4fZVQBPRNgQoKiuV/odhFrGzQXZwbifC8Rg==}
+     engines: {node: '>=8'}
+ 
+   path-exists@4.0.0:
+     resolution: {integrity: sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==}
+@@ -1936,20 +2240,24 @@ packages:
+     resolution: {integrity: sha512-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg==}
+     engines: {node: '>=0.10.0'}
+ 
+   path-key@3.1.1:
+     resolution: {integrity: sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==}
+     engines: {node: '>=8'}
+ 
+   path-parse@1.0.7:
+     resolution: {integrity: sha512-LDJzPVEEEPR+y48z93A0Ed0yXb8pAByGWo/k5YYdYgpY2/2EsOsksJrq7lOHxryrVOn1ejG6oAp8ahvOIQD8sw==}
+ 
++  path-scurry@1.11.1:
++    resolution: {integrity: sha512-Xa4Nw17FS9ApQFJ9umLiJS4orGjm7ZzwUrwamcGQuHSzDyth9boKDaycYdDcZDuqYATXw4HFXgaqWTctW/v1HA==}
++    engines: {node: '>=16 || 14 >=14.18'}
++
+   path-to-regexp@8.4.2:
+     resolution: {integrity: sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA==}
+ 
+   pathe@2.0.3:
+     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
+ 
+   perfect-debounce@2.1.0:
+     resolution: {integrity: sha512-LjgdTytVFXeUgtHZr9WYViYSM/g8MkcTPYDlPa3cDqMirHjKiSZPYd6DoL7pK8AJQr+uWkQvCjHNdiMqsrJs+g==}
+ 
+   pg-cloudflare@1.4.0:
+@@ -2056,33 +2364,51 @@ packages:
+     hasBin: true
+     peerDependencies:
+       better-sqlite3: '>=9.0.0'
+       typescript: '>=5.4.0'
+     peerDependenciesMeta:
+       better-sqlite3:
+         optional: true
+       typescript:
+         optional: true
+ 
++  process-nextick-args@2.0.1:
++    resolution: {integrity: sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==}
++
+   process-warning@4.0.1:
+     resolution: {integrity: sha512-3c2LzQ3rY9d0hc1emcsHhfT9Jwz0cChib/QN89oME2R451w5fy3f0afAhERFZAwrbDU43wk12d0ORBpDVME50Q==}
+ 
+   process-warning@5.0.0:
+     resolution: {integrity: sha512-a39t9ApHNx2L4+HBnQKqxxHNs1r7KF+Intd8Q/g1bUh6q0WIp9voPXJ/x0j+ZL45KF1pJd9+q2jLIRMfvEshkA==}
+ 
++  process@0.11.10:
++    resolution: {integrity: sha512-cdGef/drWFoydD1JsMzuFf8100nZl+GT+yacc2bEced5f9Rjk4z+WtFUTBu9PhOi9j/jfmBPu0mMEY4wIdAF8A==}
++    engines: {node: '>= 0.6.0'}
++
+   prompts@2.4.2:
+     resolution: {integrity: sha512-NxNv/kLguCA7p3jE8oL2aEBsrJWgAakBpgmgK6lpPWV+WuOmY6r2/zbAVnP+T8bQlA0nzHXSJSJW0Hq7ylaD2Q==}
+     engines: {node: '>= 6'}
+ 
+   proper-lockfile@4.1.2:
+     resolution: {integrity: sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA==}
+ 
++  properties-reader@3.0.1:
++    resolution: {integrity: sha512-WPn+h9RGEExOKdu4bsF4HksG/uzd3cFq3MFtq8PsFeExPse5Ha/VOjQNyHhjboBFwGXGev6muJYTSPAOkROq2g==}
++    engines: {node: '>=18'}
++
++  protobufjs@7.6.5:
++    resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
++    engines: {node: '>=12.0.0'}
++
++  pump@3.0.4:
++    resolution: {integrity: sha512-VS7sjc6KR7e1ukRFhQSY5LM2uBWAUPiOPa/A3mkKmiMwSmRFUITt0xuj+/lesgnCv+dPIEYlkzrcyXgquIHMcA==}
++
+   punycode@2.3.1:
+     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
+     engines: {node: '>=6'}
+ 
+   pure-rand@6.1.0:
+     resolution: {integrity: sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==}
+ 
+   quick-format-unescaped@4.0.4:
+     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
+ 
+@@ -2094,20 +2420,34 @@ packages:
+     peerDependencies:
+       react: ^19.2.7
+ 
+   react-is@18.3.1:
+     resolution: {integrity: sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg==}
+ 
+   react@19.2.7:
+     resolution: {integrity: sha512-HNe9WslTbXmFK8o8cmwgAeJFSBvt1bPdHCVKtaaV+WlAN36mpT4hcRpwbf3fY56ar2oIXzsBpOAiIRHAdY0OlQ==}
+     engines: {node: '>=0.10.0'}
+ 
++  readable-stream@2.3.8:
++    resolution: {integrity: sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA==}
++
++  readable-stream@3.6.2:
++    resolution: {integrity: sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA==}
++    engines: {node: '>= 6'}
++
++  readable-stream@4.7.0:
++    resolution: {integrity: sha512-oIGGmcpTLwPga8Bn6/Z75SVaH1z5dUut2ibSyAMVhmUggWpmDn2dapB0n7f8nwaSiRtepAsfJyfXIO5DCVAODg==}
++    engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
++
++  readdir-glob@1.1.3:
++    resolution: {integrity: sha512-v05I2k7xN8zXvPD9N+z/uhXPaj0sUFCe2rcWZIpBsqxfP7xXFQ0tipAd/wjj1YxWyWtUS5IDJpOG82JKt2EAVA==}
++
+   readdirp@5.0.0:
+     resolution: {integrity: sha512-9u/XQ1pvrQtYyMpZe7DXKv2p5CNvyVwzUB6uhLAnQwHMSgKMBR62lc7AHljaeteeHXn11XTAaLLUVZYVZyuRBQ==}
+     engines: {node: '>= 20.19.0'}
+ 
+   real-require@0.2.0:
+     resolution: {integrity: sha512-57frrGM/OCTLqLOAh0mhVA9VBMHd+9U7Zb2THMGdBUoZVOtGbJzjxsYGDJ3A9AYYCP4hn6y1TVbaOfzWtm5GFg==}
+     engines: {node: '>= 12.13.0'}
+ 
+   real-require@1.0.0:
+     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
+@@ -2166,20 +2506,26 @@ packages:
+   reusify@1.1.0:
+     resolution: {integrity: sha512-g6QUff04oZpHs0eG5p83rFLhHeV00ug/Yf9nZM6fLeUrPguBTkTQOdpAWWspMh55TZfVQDPaN3NQJfbVRAxdIw==}
+     engines: {iojs: '>=1.0.0', node: '>=0.10.0'}
+ 
+   rfdc@1.4.1:
+     resolution: {integrity: sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==}
+ 
+   rxjs@7.8.2:
+     resolution: {integrity: sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA==}
+ 
++  safe-buffer@5.1.2:
++    resolution: {integrity: sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==}
++
++  safe-buffer@5.2.1:
++    resolution: {integrity: sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==}
++
+   safe-regex2@5.1.1:
+     resolution: {integrity: sha512-mOSBvHGDZMuIEZMdOz/aCEYDCv0E7nfcNsIhUF+/P+xC7Hyf3FkvymqgPbg9D1EdSGu+uKbJgy09K/RKKc7kJA==}
+     hasBin: true
+ 
+   safe-regex@2.1.1:
+     resolution: {integrity: sha512-rx+x8AMzKb5Q5lQ95Zoi6ZbJqwCLkqi3XuJXp5P3rT8OEc6sZCJG5AE5dU3lsgRr/F4Bs31jSlVN+j5KrsGu9A==}
+ 
+   safe-stable-stringify@2.5.0:
+     resolution: {integrity: sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==}
+     engines: {node: '>=10'}
+@@ -2233,50 +2579,77 @@ packages:
+   sonic-boom@4.2.1:
+     resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
+ 
+   source-map-support@0.5.13:
+     resolution: {integrity: sha512-SHSKFHadjVA5oR4PPqhtAVdcBWwRYVd6g6cAXnIbRiIwc2EhPrTuKUBdSLvlEKyIP3GCf89fltvcZiP9MMFA1w==}
+ 
+   source-map@0.6.1:
+     resolution: {integrity: sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==}
+     engines: {node: '>=0.10.0'}
+ 
++  split-ca@1.0.1:
++    resolution: {integrity: sha512-Q5thBSxp5t8WPTTJQS59LrGqOZqOsrhDGDVm8azCqIBjSBd7nd9o2PM+mDulQQkh8h//4U6hFZnc/mul8t5pWQ==}
++
+   split2@4.2.0:
+     resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
+     engines: {node: '>= 10.x'}
+ 
+   sprintf-js@1.0.3:
+     resolution: {integrity: sha512-D9cPgkvLlV3t3IzL0D0YLvGA9Ahk4PcvVwUbN0dSGr1aP0Nrt4AEnTUbuGvquEC0mA64Gqt1fzirlRs5ibXx8g==}
+ 
+   sqlstring@2.3.3:
+     resolution: {integrity: sha512-qC9iz2FlN7DQl3+wjwn3802RTyjCx7sDvfQEXchwa6CWOx07/WVfh91gBmQ9fahw8snwGEWU3xGzOt4tFyHLxg==}
+     engines: {node: '>= 0.6'}
+ 
++  ssh-remote-port-forward@1.0.4:
++    resolution: {integrity: sha512-x0LV1eVDwjf1gmG7TTnfqIzf+3VPRz7vrNIjX6oYLbeCrf/PeVY6hkT68Mg+q02qXxQhrLjB0jfgvhevoCRmLQ==}
++
++  ssh2@1.17.0:
++    resolution: {integrity: sha512-wPldCk3asibAjQ/kziWQQt1Wh3PgDFpC0XpwclzKcdT1vql6KeYxf5LIt4nlFkUeR8WuphYMKqUA56X4rjbfgQ==}
++    engines: {node: '>=10.16.0'}
++
+   stack-utils@2.0.6:
+     resolution: {integrity: sha512-XlkWvfIm6RmsWtNJx+uqtKLS8eqFbxUg0ZzLXqY0caEy9l7hruX8IpiDnjsLavoBgqCCR71TqWO8MaXYheJ3RQ==}
+     engines: {node: '>=10'}
+ 
+   std-env@3.10.0:
+     resolution: {integrity: sha512-5GS12FdOZNliM5mAOxFRg7Ir0pWz8MdpYm6AY6VPkGpbA7ZzmbzNcBJQ0GPvvyWgcY7QAhCgf9Uy89I03faLkg==}
+ 
++  streamx@2.28.0:
++    resolution: {integrity: sha512-1Yowhzjf0ivGMrTIkY9hav5TxobO9qIVqUE41fiCGMGgc3CLlf4MY+9AHmZqBWgDTue0fY9zWjYFVyf6Diuobw==}
++
+   string-length@4.0.2:
+     resolution: {integrity: sha512-+l6rNN5fYHNhZZy41RXsYptCjA2Igmq4EG7kZAYFQI1E1VTXarr6ZPXBg6eq7Y6eK4FEhY6AJlyuFIb/v/S0VQ==}
+     engines: {node: '>=10'}
+ 
+   string-width@4.2.3:
+     resolution: {integrity: sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g==}
+     engines: {node: '>=8'}
+ 
++  string-width@5.1.2:
++    resolution: {integrity: sha512-HnLOCR3vjcY8beoNLtcjZ5/nxn2afmME6lhrDrebokqMap+XbeW8n9TXpPDOqdGK5qcI3oT0GKTW6wC7EMiVqA==}
++    engines: {node: '>=12'}
++
++  string_decoder@1.1.1:
++    resolution: {integrity: sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg==}
++
++  string_decoder@1.3.0:
++    resolution: {integrity: sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA==}
++
+   strip-ansi@6.0.1:
+     resolution: {integrity: sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A==}
+     engines: {node: '>=8'}
+ 
++  strip-ansi@7.2.0:
++    resolution: {integrity: sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==}
++    engines: {node: '>=12'}
++
+   strip-bom@3.0.0:
+     resolution: {integrity: sha512-vavAMRXOgBVNF6nyEEmL3DBK19iRpDcoIwW+swQ+CbGiu7lju6t+JklA1MHweoWtadgt4ISVUsXLyDq34ddcwA==}
+     engines: {node: '>=4'}
+ 
+   strip-bom@4.0.0:
+     resolution: {integrity: sha512-3xurFv5tEgii33Zi8Jtp55wEIILR9eh34FAW00PZf+JnSsTmV/ioewSgQl97JHvgjoRGwPShsWm+IdrxB35d0w==}
+     engines: {node: '>=8'}
+ 
+   strip-final-newline@2.0.0:
+     resolution: {integrity: sha512-BrpvfNAE3dcvq7ll3xVumzjKjZQ5tI1sEUIKr3Uoks0XUl45St3FlatVqef9prk4jRDzhW6WZg+3bk93y6pLjA==}
+@@ -2299,35 +2672,61 @@ packages:
+     engines: {node: '>=10'}
+ 
+   supports-preserve-symlinks-flag@1.0.0:
+     resolution: {integrity: sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w==}
+     engines: {node: '>= 0.4'}
+ 
+   tapable@2.3.3:
+     resolution: {integrity: sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==}
+     engines: {node: '>=6'}
+ 
++  tar-fs@2.1.5:
++    resolution: {integrity: sha512-OboTd8mmMhZDNPV+UjQcK9yKAatXu2aJ+r1w4im1Otd4M4fl2hwvdoXUxIYHFTHWK/3y3FarBP70v3vwmGlOxw==}
++
++  tar-fs@3.1.3:
++    resolution: {integrity: sha512-/hU4AXnIdZu+Gvl1pk0oI5f5HxWsCJRtY2aFaJdk9VvyL48DWU6iU5WAIPG+wIi1YvWA6eTJvIviP/tMAZZNwQ==}
++
++  tar-stream@2.2.0:
++    resolution: {integrity: sha512-ujeqbceABgwMZxEJnk2HDY2DlnUZ+9oEcb1KzTVfYHio0UE6dG71n60d8D2I4qNvleWrrXpmjpt7vZeF1LnMZQ==}
++    engines: {node: '>=6'}
++
++  tar-stream@3.2.0:
++    resolution: {integrity: sha512-ojzvCvVaNp6aOTFmG7jaRD0meowIAuPc3cMMhSgKiVWws1GyHbGd/xvnyuRKcKlMpt3qvxx6r0hreCNITP9hIg==}
++
+   teamcity-service-messages@0.1.14:
+     resolution: {integrity: sha512-29aQwaHqm8RMX74u2o/h1KbMLP89FjNiMxD9wbF2BbWOnbM+q+d1sCEC+MqCc4QW3NJykn77OMpTFw/xTHIc0w==}
+ 
++  teex@1.0.1:
++    resolution: {integrity: sha512-eYE6iEI62Ni1H8oIa7KlDU6uQBtqr4Eajni3wX7rpfXD8ysFx8z0+dri+KWEPWpBsxXfxu58x/0jvTVT1ekOSg==}
++
+   test-exclude@6.0.0:
+     resolution: {integrity: sha512-cAGWPIyOHU6zlmg88jwm7VRyXnMN7iV68OGAbYDk/Mh/xC/pzVPlQtY6ngoIH/5/tciuhGfvESU8GrHrcxD56w==}
+     engines: {node: '>=8'}
+ 
++  testcontainers@12.0.4:
++    resolution: {integrity: sha512-QIR/8xF1+F/26cIM+9B4yyxNTbKJxAv3hygZyhPRgZ8Q2AhlPZjDdpXRuk16V37X4bgJRI3hXFhoEICMBA7Adg==}
++
++  text-decoder@1.2.7:
++    resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
++
+   thread-stream@4.2.0:
+     resolution: {integrity: sha512-e2zZ96wSChazBsbENf/Pcm/4swHt2cEKQ92rhUjkL9GCKiTDJIaTBenjE/m9DXi0QBmTMDkFDdOomUy20A1tDQ==}
+     engines: {node: '>=20'}
+ 
+   tinyglobby@0.2.17:
+     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
+     engines: {node: '>=12.0.0'}
+ 
++  tmp@0.2.7:
++    resolution: {integrity: sha512-e0votIpp4Uo2AJYSzVHV6xCcawuiez3DzqDAbrTc3YxBkplN6e+dM13ZeIcZnDg/QpSuU2zfZ3rzwY8ukEnaXw==}
++    engines: {node: '>=14.14'}
++
+   tmpl@1.0.5:
+     resolution: {integrity: sha512-3f0uOEAQwIqGuWW2MVzYg8fV/QNnc/IpuJNG837rLuczAaLVHslWHZQj4IGiEl5Hs3kkbhwL9Ab7Hrsmuj+Smw==}
+ 
+   to-regex-range@5.0.1:
+     resolution: {integrity: sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ==}
+     engines: {node: '>=8.0'}
+ 
+   toad-cache@3.7.4:
+     resolution: {integrity: sha512-m1TdR/rvT7kgGJZhspNtXdsdYk0fddFpJJFlG5s+UkPFo6lkLoZ3YLOaovPYjq1R75NP5JfeTlSHaOsE09peCg==}
+     engines: {node: '>=20'}
+@@ -2377,20 +2776,23 @@ packages:
+     resolution: {integrity: sha512-NoZ4roiN7LnbKn9QqE1amc9DJfzvZXxF4xDavcOWt1BPkdx+m+0gJuPM+S0vCe7zTJMYUP0R8pO2XMr+Y8oLIg==}
+     engines: {node: '>=6'}
+ 
+   tslib@2.8.1:
+     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
+ 
+   turbo@2.10.5:
+     resolution: {integrity: sha512-07Y/C7OUp23l4P92PJoYtFNbHjLhftrZH5Ce7dbczS4kX2Re+wtbXvZLoxn/pUtzgsQaRCBaRuZPJp4zmAn0WQ==}
+     hasBin: true
+ 
++  tweetnacl@0.14.5:
++    resolution: {integrity: sha512-KXXFFdAbFXY4geFIwoyNK+f5Z1b7swfXABfL7HXCmoIWMKU3dmS26672A4EeQtDzLKy7SXmfBu51JolvEKwtGA==}
++
+   type-check@0.4.0:
+     resolution: {integrity: sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==}
+     engines: {node: '>= 0.8.0'}
+ 
+   type-detect@4.0.8:
+     resolution: {integrity: sha512-0fr/mIH1dlO+x7TlcMy+bIDqKPsw/70tVyeHW787goQjhmqaZe10uwLujubK9q9Lg6Fiho1KUKDYz0Z7k7g5/g==}
+     engines: {node: '>=4'}
+ 
+   type-fest@0.21.3:
+     resolution: {integrity: sha512-t0rzBq87m3fVcduHDUFhKmyyX+9eo6WQjZvf51Ea/M0Q7+T374Jp1aUiyUl0GKxp8M/OETVHSDvmkyPgvX+X2w==}
+@@ -2418,32 +2820,42 @@ packages:
+     hasBin: true
+ 
+   uid@2.0.2:
+     resolution: {integrity: sha512-u3xV3X7uzvi5b1MncmZo3i2Aw222Zk1keqLA1YkHldREkAhAqi65wuPfe7lHx8H/Wzy+8CE7S7uS3jekIM5s8g==}
+     engines: {node: '>=8'}
+ 
+   uint8array-extras@1.5.0:
+     resolution: {integrity: sha512-rvKSBiC5zqCCiDZ9kAOszZcDvdAHwwIKJG33Ykj43OKcWsnmcBRL09YTU4nOeHZ8Y2a7l1MgTd08SBe9A8Qj6A==}
+     engines: {node: '>=18'}
+ 
++  undici-types@5.26.5:
++    resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
++
+   undici-types@7.18.2:
+     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
+ 
++  undici@8.7.0:
++    resolution: {integrity: sha512-N7iQtfyLhIMOFgQubvmLV26svHpO0bqKnAiWotTQCVKCmWrcGbBotPuW1x+xwYZ2VHdSTVUfPQQnlEt1/LouTQ==}
++    engines: {node: '>=22.19.0'}
++
+   update-browserslist-db@1.2.3:
+     resolution: {integrity: sha512-Js0m9cx+qOgDxo0eMiFGEueWztz+d4+M3rGlmKPT+T4IS/jP4ylw3Nwpu6cpTTP8R1MAC1kF4VbdLt3ARf209w==}
+     hasBin: true
+     peerDependencies:
+       browserslist: '>= 4.21.0'
+ 
+   uri-js@4.4.1:
+     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
+ 
++  util-deprecate@1.0.2:
++    resolution: {integrity: sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==}
++
+   v8-to-istanbul@9.3.0:
+     resolution: {integrity: sha512-kiGUalWN+rgBJ/1OHZsBtU4rXZOfj/7rKQxULKlIzwzQSvMJUUNgPwJEEh7gU6xEVxC0ahoOBvN2YI8GH6FNgA==}
+     engines: {node: '>=10.12.0'}
+ 
+   valibot@1.2.0:
+     resolution: {integrity: sha512-mm1rxUsmOxzrwnX5arGS+U4T25RdvpPjPN4yR0u9pUBov9+zGVtO84tif1eY4r6zWxVxu3KzIyknJy3rxfRZZg==}
+     peerDependencies:
+       typescript: '>=5'
+     peerDependenciesMeta:
+       typescript:
+@@ -2466,53 +2878,66 @@ packages:
+     resolution: {integrity: sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==}
+     engines: {node: '>=0.10.0'}
+ 
+   wordwrap@1.0.0:
+     resolution: {integrity: sha512-gvVzJFlPycKc5dZN4yPkP8w7Dc37BtP1yczEneOb4uq34pXZcvrtRTmWV8W+Ume+XCxKgbjM+nevkyFPMybd4Q==}
+ 
+   wrap-ansi@7.0.0:
+     resolution: {integrity: sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q==}
+     engines: {node: '>=10'}
+ 
++  wrap-ansi@8.1.0:
++    resolution: {integrity: sha512-si7QWI6zUMq56bESFvagtmzMdGOtoxfR+Sez11Mobfc7tm+VkUckk9bW2UeffTGVUbOksxmSw0AA2gs8g71NCQ==}
++    engines: {node: '>=12'}
++
+   wrappy@1.0.2:
+     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
+ 
+   write-file-atomic@4.0.2:
+     resolution: {integrity: sha512-7KxauUdBmSdWnmpaGFg+ppNjKF8uNLry8LyzjauQDOVONfFLNKrKvQOxZ/VuTIcS/gge/YNahf5RIIQWTSarlg==}
+     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
+ 
+   xtend@4.0.2:
+     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
+     engines: {node: '>=0.4'}
+ 
+   y18n@5.0.8:
+     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
+     engines: {node: '>=10'}
+ 
+   yallist@3.1.1:
+     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
+ 
++  yaml@2.9.0:
++    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
++    engines: {node: '>= 14.6'}
++    hasBin: true
++
+   yargs-parser@21.1.1:
+     resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
+     engines: {node: '>=12'}
+ 
+   yargs@17.7.3:
+     resolution: {integrity: sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==}
+     engines: {node: '>=12'}
+ 
+   yocto-queue@0.1.0:
+     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
+     engines: {node: '>=10'}
+ 
+   zeptomatch@2.1.0:
+     resolution: {integrity: sha512-KiGErG2J0G82LSpniV0CtIzjlJ10E04j02VOudJsPyPwNZgGnRKQy7I1R7GMyg/QswnE4l7ohSGrQbQbjXPPDA==}
+ 
++  zip-stream@6.0.1:
++    resolution: {integrity: sha512-zK7YHHz4ZXpW89AHXUPbQVGKI7uvkd3hzusTdotCg1UxyaVtg0zFJSTfW/Dq5f7OBBVnq6cZIaC8Ti4hb6dtCA==}
++    engines: {node: '>= 14'}
++
+   zod@4.4.3:
+     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+ 
+ snapshots:
+ 
+   '@babel/code-frame@7.29.7':
+     dependencies:
+       '@babel/helper-validator-identifier': 7.29.7
+       js-tokens: 4.0.0
+       picocolors: 1.1.1
+@@ -2691,20 +3116,22 @@ snapshots:
+       '@babel/types': 7.29.7
+       debug: 4.4.3
+     transitivePeerDependencies:
+       - supports-color
+ 
+   '@babel/types@7.29.7':
+     dependencies:
+       '@babel/helper-string-parser': 7.29.7
+       '@babel/helper-validator-identifier': 7.29.7
+ 
++  '@balena/dockerignore@1.0.2': {}
++
+   '@bcoe/v8-coverage@0.2.3': {}
+ 
+   '@borewit/text-codec@0.2.2': {}
+ 
+   '@electric-sql/pglite-socket@0.1.1(@electric-sql/pglite@0.4.1)':
+     dependencies:
+       '@electric-sql/pglite': 0.4.1
+ 
+   '@electric-sql/pglite-tools@0.3.1(@electric-sql/pglite@0.4.1)':
+     dependencies:
+@@ -2784,40 +3211,68 @@ snapshots:
+ 
+   '@fastify/merge-json-schemas@0.2.1':
+     dependencies:
+       dequal: 2.0.3
+ 
+   '@fastify/proxy-addr@5.1.0':
+     dependencies:
+       '@fastify/forwarded': 3.0.1
+       ipaddr.js: 2.4.0
+ 
++  '@grpc/grpc-js@1.14.4':
++    dependencies:
++      '@grpc/proto-loader': 0.8.1
++      '@js-sdsl/ordered-map': 4.4.2
++
++  '@grpc/proto-loader@0.7.15':
++    dependencies:
++      lodash.camelcase: 4.3.0
++      long: 5.3.2
++      protobufjs: 7.6.5
++      yargs: 17.7.3
++
++  '@grpc/proto-loader@0.8.1':
++    dependencies:
++      lodash.camelcase: 4.3.0
++      long: 5.3.2
++      protobufjs: 7.6.5
++      yargs: 17.7.3
++
+   '@hono/node-server@1.19.11(hono@4.12.30)':
+     dependencies:
+       hono: 4.12.30
+ 
+   '@humanfs/core@0.19.2':
+     dependencies:
+       '@humanfs/types': 0.15.0
+ 
+   '@humanfs/node@0.16.8':
+     dependencies:
+       '@humanfs/core': 0.19.2
+       '@humanfs/types': 0.15.0
+       '@humanwhocodes/retry': 0.4.3
+ 
+   '@humanfs/types@0.15.0': {}
+ 
+   '@humanwhocodes/module-importer@1.0.1': {}
+ 
+   '@humanwhocodes/retry@0.4.3': {}
+ 
++  '@isaacs/cliui@8.0.2':
++    dependencies:
++      string-width: 5.1.2
++      string-width-cjs: string-width@4.2.3
++      strip-ansi: 7.2.0
++      strip-ansi-cjs: strip-ansi@6.0.1
++      wrap-ansi: 8.1.0
++      wrap-ansi-cjs: wrap-ansi@7.0.0
++
+   '@istanbuljs/load-nyc-config@1.1.0':
+     dependencies:
+       camelcase: 5.3.1
+       find-up: 4.1.0
+       get-package-type: 0.1.0
+       js-yaml: 3.15.0
+       resolve-from: 5.0.0
+ 
+   '@istanbuljs/schema@0.1.6': {}
+ 
+@@ -2995,22 +3450,30 @@ snapshots:
+ 
+   '@jridgewell/resolve-uri@3.1.2': {}
+ 
+   '@jridgewell/sourcemap-codec@1.5.5': {}
+ 
+   '@jridgewell/trace-mapping@0.3.31':
+     dependencies:
+       '@jridgewell/resolve-uri': 3.1.2
+       '@jridgewell/sourcemap-codec': 1.5.5
+ 
++  '@js-sdsl/ordered-map@4.4.2': {}
++
+   '@kurkle/color@0.3.4': {}
+ 
++  '@kwsites/file-exists@1.1.1':
++    dependencies:
++      debug: 4.4.3
++    transitivePeerDependencies:
++      - supports-color
++
+   '@lukeed/csprng@1.1.0': {}
+ 
+   '@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+     dependencies:
+       file-type: 21.3.4
+       iterare: 1.2.1
+       load-esm: 1.0.3
+       reflect-metadata: 0.2.2
+       rxjs: 7.8.2
+       tslib: 2.8.1
+@@ -3045,20 +3508,23 @@ snapshots:
+       tslib: 2.8.1
+ 
+   '@nestjs/testing@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
+     dependencies:
+       '@nestjs/common': 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core': 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       tslib: 2.8.1
+ 
+   '@pinojs/redact@0.4.0': {}
+ 
++  '@pkgjs/parseargs@0.11.0':
++    optional: true
++
+   '@prisma/adapter-pg@7.8.0':
+     dependencies:
+       '@prisma/driver-adapter-utils': 7.8.0
+       '@types/pg': 8.20.0
+       pg: 8.22.0
+       postgres-array: 3.0.4
+     transitivePeerDependencies:
+       - pg-native
+ 
+   '@prisma/client-runtime-utils@7.8.0': {}
+@@ -3144,20 +3610,40 @@ snapshots:
+   '@prisma/studio-core@0.27.3(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+     dependencies:
+       '@radix-ui/react-toggle': 1.1.10(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+       '@types/react': 19.2.17
+       chart.js: 4.5.1
+       react: 19.2.7
+       react-dom: 19.2.7(react@19.2.7)
+     transitivePeerDependencies:
+       - '@types/react-dom'
+ 
++  '@protobufjs/aspromise@1.1.2': {}
++
++  '@protobufjs/base64@1.1.2': {}
++
++  '@protobufjs/codegen@2.0.5': {}
++
++  '@protobufjs/eventemitter@1.1.1': {}
++
++  '@protobufjs/fetch@1.1.1':
++    dependencies:
++      '@protobufjs/aspromise': 1.1.2
++
++  '@protobufjs/float@1.0.2': {}
++
++  '@protobufjs/path@1.1.2': {}
++
++  '@protobufjs/pool@1.1.0': {}
++
++  '@protobufjs/utf8@1.1.2': {}
++
+   '@radix-ui/primitive@1.1.3': {}
+ 
+   '@radix-ui/react-compose-refs@1.1.2(@types/react@19.2.17)(react@19.2.7)':
+     dependencies:
+       react: 19.2.7
+     optionalDependencies:
+       '@types/react': 19.2.17
+ 
+   '@radix-ui/react-primitive@2.1.3(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+     dependencies:
+@@ -3210,20 +3696,29 @@ snapshots:
+   '@sinonjs/commons@3.0.1':
+     dependencies:
+       type-detect: 4.0.8
+ 
+   '@sinonjs/fake-timers@10.3.0':
+     dependencies:
+       '@sinonjs/commons': 3.0.1
+ 
+   '@standard-schema/spec@1.1.0': {}
+ 
++  '@testcontainers/postgresql@12.0.4':
++    dependencies:
++      testcontainers: 12.0.4
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - bare-buffer
++      - react-native-b4a
++      - supports-color
++
+   '@tokenizer/inflate@0.4.1':
+     dependencies:
+       debug: 4.4.3
+       token-types: 6.1.2
+     transitivePeerDependencies:
+       - supports-color
+ 
+   '@tokenizer/token@0.3.0': {}
+ 
+   '@turbo/darwin-64@2.10.5':
+@@ -3258,20 +3753,31 @@ snapshots:
+ 
+   '@types/babel__template@7.4.4':
+     dependencies:
+       '@babel/parser': 7.29.7
+       '@babel/types': 7.29.7
+ 
+   '@types/babel__traverse@7.28.0':
+     dependencies:
+       '@babel/types': 7.29.7
+ 
++  '@types/docker-modem@3.0.6':
++    dependencies:
++      '@types/node': 24.13.3
++      '@types/ssh2': 1.15.5
++
++  '@types/dockerode@4.0.1':
++    dependencies:
++      '@types/docker-modem': 3.0.6
++      '@types/node': 24.13.3
++      '@types/ssh2': 1.15.5
++
+   '@types/estree@1.0.9': {}
+ 
+   '@types/graceful-fs@4.1.9':
+     dependencies:
+       '@types/node': 24.13.3
+ 
+   '@types/istanbul-lib-coverage@2.0.6': {}
+ 
+   '@types/istanbul-lib-report@3.0.3':
+     dependencies:
+@@ -3281,36 +3787,53 @@ snapshots:
+     dependencies:
+       '@types/istanbul-lib-report': 3.0.3
+ 
+   '@types/jest@29.5.14':
+     dependencies:
+       expect: 29.7.0
+       pretty-format: 29.7.0
+ 
+   '@types/json-schema@7.0.15': {}
+ 
++  '@types/node@18.19.130':
++    dependencies:
++      undici-types: 5.26.5
++
+   '@types/node@24.13.3':
+     dependencies:
+       undici-types: 7.18.2
+ 
+   '@types/pg@8.20.0':
+     dependencies:
+       '@types/node': 24.13.3
+       pg-protocol: 1.15.0
+       pg-types: 2.2.0
+ 
+   '@types/react@19.2.17':
+     dependencies:
+       csstype: 3.2.3
+ 
+   '@types/semver@7.7.1': {}
+ 
++  '@types/ssh2-streams@0.1.13':
++    dependencies:
++      '@types/node': 24.13.3
++
++  '@types/ssh2@0.5.52':
++    dependencies:
++      '@types/node': 24.13.3
++      '@types/ssh2-streams': 0.1.13
++
++  '@types/ssh2@1.15.5':
++    dependencies:
++      '@types/node': 18.19.130
++
+   '@types/stack-utils@2.0.3': {}
+ 
+   '@types/yargs-parser@21.0.3': {}
+ 
+   '@types/yargs@17.0.35':
+     dependencies:
+       '@types/yargs-parser': 21.0.3
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0(@typescript-eslint/parser@8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
+     dependencies:
+@@ -3396,20 +3919,24 @@ snapshots:
+       eslint: 9.39.5(jiti@2.7.0)
+       typescript: 5.9.3
+     transitivePeerDependencies:
+       - supports-color
+ 
+   '@typescript-eslint/visitor-keys@8.64.0':
+     dependencies:
+       '@typescript-eslint/types': 8.64.0
+       eslint-visitor-keys: 5.0.1
+ 
++  abort-controller@3.0.0:
++    dependencies:
++      event-target-shim: 5.0.1
++
+   abstract-logging@2.0.1: {}
+ 
+   acorn-jsx-walk@2.0.0: {}
+ 
+   acorn-jsx@5.3.2(acorn@8.17.0):
+     dependencies:
+       acorn: 8.17.0
+ 
+   acorn-loose@8.5.2:
+     dependencies:
+@@ -3438,46 +3965,84 @@ snapshots:
+       fast-uri: 3.1.3
+       json-schema-traverse: 1.0.0
+       require-from-string: 2.0.2
+ 
+   ansi-escapes@4.3.2:
+     dependencies:
+       type-fest: 0.21.3
+ 
+   ansi-regex@5.0.1: {}
+ 
++  ansi-regex@6.2.2: {}
++
+   ansi-styles@4.3.0:
+     dependencies:
+       color-convert: 2.0.1
+ 
+   ansi-styles@5.2.0: {}
+ 
++  ansi-styles@6.2.3: {}
++
+   anymatch@3.1.3:
+     dependencies:
+       normalize-path: 3.0.0
+       picomatch: 2.3.2
+ 
++  archiver-utils@5.0.2:
++    dependencies:
++      glob: 10.5.0
++      graceful-fs: 4.2.11
++      is-stream: 2.0.1
++      lazystream: 1.0.1
++      lodash: 4.18.1
++      normalize-path: 3.0.0
++      readable-stream: 4.7.0
++
++  archiver@7.0.1:
++    dependencies:
++      archiver-utils: 5.0.2
++      async: 3.2.6
++      buffer-crc32: 1.0.0
++      readable-stream: 4.7.0
++      readdir-glob: 1.1.3
++      tar-stream: 3.2.0
++      zip-stream: 6.0.1
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - bare-buffer
++      - react-native-b4a
++
+   argparse@1.0.10:
+     dependencies:
+       sprintf-js: 1.0.3
+ 
+   argparse@2.0.1: {}
+ 
++  asn1@0.2.6:
++    dependencies:
++      safer-buffer: 2.1.2
++
++  async-lock@1.4.1: {}
++
++  async@3.2.6: {}
++
+   atomic-sleep@1.0.0: {}
+ 
+   avvio@9.3.0:
+     dependencies:
+       '@fastify/error': 4.2.0
+       fastq: 1.20.1
+ 
+   aws-ssl-profiles@1.1.2: {}
+ 
++  b4a@1.8.1: {}
++
+   babel-jest@29.7.0(@babel/core@7.29.7):
+     dependencies:
+       '@babel/core': 7.29.7
+       '@jest/transform': 29.7.0
+       '@types/babel__core': 7.20.5
+       babel-plugin-istanbul: 6.1.1
+       babel-preset-jest: 29.6.3(@babel/core@7.29.7)
+       chalk: 4.1.2
+       graceful-fs: 4.2.11
+       slash: 3.0.0
+@@ -3523,29 +4088,74 @@ snapshots:
+   babel-preset-jest@29.6.3(@babel/core@7.29.7):
+     dependencies:
+       '@babel/core': 7.29.7
+       babel-plugin-jest-hoist: 29.6.3
+       babel-preset-current-node-syntax: 1.2.0(@babel/core@7.29.7)
+ 
+   balanced-match@1.0.2: {}
+ 
+   balanced-match@4.0.4: {}
+ 
++  bare-events@2.9.1: {}
++
++  bare-fs@4.7.4:
++    dependencies:
++      bare-events: 2.9.1
++      bare-path: 3.1.1
++      bare-stream: 2.13.3(bare-events@2.9.1)
++      bare-url: 2.4.5
++      fast-fifo: 1.3.2
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - react-native-b4a
++
++  bare-path@3.1.1: {}
++
++  bare-stream@2.13.3(bare-events@2.9.1):
++    dependencies:
++      b4a: 1.8.1
++      streamx: 2.28.0
++      teex: 1.0.1
++    optionalDependencies:
++      bare-events: 2.9.1
++    transitivePeerDependencies:
++      - react-native-b4a
++
++  bare-url@2.4.5:
++    dependencies:
++      bare-path: 3.1.1
++
++  base64-js@1.5.1: {}
++
+   baseline-browser-mapping@2.10.43: {}
+ 
++  bcrypt-pbkdf@1.0.2:
++    dependencies:
++      tweetnacl: 0.14.5
++
+   better-result@2.9.2: {}
+ 
++  bl@4.1.0:
++    dependencies:
++      buffer: 5.7.1
++      inherits: 2.0.4
++      readable-stream: 3.6.2
++
+   brace-expansion@1.1.16:
+     dependencies:
+       balanced-match: 1.0.2
+       concat-map: 0.0.1
+ 
++  brace-expansion@2.1.2:
++    dependencies:
++      balanced-match: 1.0.2
++
+   brace-expansion@5.0.7:
+     dependencies:
+       balanced-match: 4.0.4
+ 
+   braces@3.0.3:
+     dependencies:
+       fill-range: 7.1.1
+ 
+   browserslist@4.28.6:
+     dependencies:
+@@ -3556,22 +4166,39 @@ snapshots:
+       update-browserslist-db: 1.2.3(browserslist@4.28.6)
+ 
+   bs-logger@0.2.6:
+     dependencies:
+       fast-json-stable-stringify: 2.1.0
+ 
+   bser@2.1.1:
+     dependencies:
+       node-int64: 0.4.0
+ 
++  buffer-crc32@1.0.0: {}
++
+   buffer-from@1.1.2: {}
+ 
++  buffer@5.7.1:
++    dependencies:
++      base64-js: 1.5.1
++      ieee754: 1.2.1
++
++  buffer@6.0.3:
++    dependencies:
++      base64-js: 1.5.1
++      ieee754: 1.2.1
++
++  buildcheck@0.0.7:
++    optional: true
++
++  byline@5.0.0: {}
++
+   c12@3.3.4:
+     dependencies:
+       chokidar: 5.0.0
+       confbox: 0.2.4
+       defu: 6.1.7
+       dotenv: 17.4.2
+       exsolve: 1.1.0
+       giget: 3.3.0
+       jiti: 2.7.0
+       ohash: 2.0.11
+@@ -3596,20 +4223,22 @@ snapshots:
+   char-regex@1.0.2: {}
+ 
+   chart.js@4.5.1:
+     dependencies:
+       '@kurkle/color': 0.3.4
+ 
+   chokidar@5.0.0:
+     dependencies:
+       readdirp: 5.0.0
+ 
++  chownr@1.1.4: {}
++
+   ci-info@3.9.0: {}
+ 
+   cjs-module-lexer@1.4.3: {}
+ 
+   cliui@8.0.1:
+     dependencies:
+       string-width: 4.2.3
+       strip-ansi: 6.0.1
+       wrap-ansi: 7.0.0
+ 
+@@ -3618,28 +4247,51 @@ snapshots:
+   collect-v8-coverage@1.0.3: {}
+ 
+   color-convert@2.0.1:
+     dependencies:
+       color-name: 1.1.4
+ 
+   color-name@1.1.4: {}
+ 
+   commander@13.1.0: {}
+ 
++  compress-commons@6.0.2:
++    dependencies:
++      crc-32: 1.2.2
++      crc32-stream: 6.0.0
++      is-stream: 2.0.1
++      normalize-path: 3.0.0
++      readable-stream: 4.7.0
++
+   concat-map@0.0.1: {}
+ 
+   confbox@0.2.4: {}
+ 
+   convert-source-map@2.0.0: {}
+ 
+   cookie@1.1.1: {}
+ 
++  core-util-is@1.0.3: {}
++
++  cpu-features@0.0.10:
++    dependencies:
++      buildcheck: 0.0.7
++      nan: 2.28.0
++    optional: true
++
++  crc-32@1.2.2: {}
++
++  crc32-stream@6.0.0:
++    dependencies:
++      crc-32: 1.2.2
++      readable-stream: 4.7.0
++
+   create-jest@29.7.0(@types/node@24.13.3):
+     dependencies:
+       '@jest/types': 29.6.3
+       chalk: 4.1.2
+       exit: 0.1.2
+       graceful-fs: 4.2.11
+       jest-config: 29.7.0(@types/node@24.13.3)
+       jest-util: 29.7.0
+       prompts: 2.4.2
+     transitivePeerDependencies:
+@@ -3698,37 +4350,69 @@ snapshots:
+       watskeburt: 4.2.3
+ 
+   dequal@2.0.3: {}
+ 
+   destr@2.0.5: {}
+ 
+   detect-newline@3.1.0: {}
+ 
+   diff-sequences@29.6.3: {}
+ 
++  docker-compose@1.4.2:
++    dependencies:
++      yaml: 2.9.0
++
++  docker-modem@5.0.7:
++    dependencies:
++      debug: 4.4.3
++      readable-stream: 3.6.2
++      split-ca: 1.0.1
++      ssh2: 1.17.0
++    transitivePeerDependencies:
++      - supports-color
++
++  dockerode@5.0.1:
++    dependencies:
++      '@balena/dockerignore': 1.0.2
++      '@grpc/grpc-js': 1.14.4
++      '@grpc/proto-loader': 0.7.15
++      docker-modem: 5.0.7
++      protobufjs: 7.6.5
++      tar-fs: 2.1.5
++    transitivePeerDependencies:
++      - supports-color
++
+   dotenv@16.6.1: {}
+ 
+   dotenv@17.4.2: {}
+ 
++  eastasianwidth@0.2.0: {}
++
+   effect@3.20.0:
+     dependencies:
+       '@standard-schema/spec': 1.1.0
+       fast-check: 3.23.2
+ 
+   electron-to-chromium@1.5.392: {}
+ 
+   emittery@0.13.1: {}
+ 
+   emoji-regex@8.0.0: {}
+ 
++  emoji-regex@9.2.2: {}
++
+   empathic@2.0.0: {}
+ 
++  end-of-stream@1.4.5:
++    dependencies:
++      once: 1.4.0
++
+   enhanced-resolve@5.24.2:
+     dependencies:
+       graceful-fs: 4.2.11
+       tapable: 2.3.3
+ 
+   env-paths@3.0.0: {}
+ 
+   error-ex@1.3.4:
+     dependencies:
+       is-arrayish: 0.2.1
+@@ -3806,20 +4490,30 @@ snapshots:
+       estraverse: 5.3.0
+ 
+   esrecurse@4.3.0:
+     dependencies:
+       estraverse: 5.3.0
+ 
+   estraverse@5.3.0: {}
+ 
+   esutils@2.0.3: {}
+ 
++  event-target-shim@5.0.1: {}
++
++  events-universal@1.0.1:
++    dependencies:
++      bare-events: 2.9.1
++    transitivePeerDependencies:
++      - bare-abort-controller
++
++  events@3.3.0: {}
++
+   execa@5.1.1:
+     dependencies:
+       cross-spawn: 7.0.6
+       get-stream: 6.0.1
+       human-signals: 2.1.0
+       is-stream: 2.0.1
+       merge-stream: 2.0.0
+       npm-run-path: 4.0.1
+       onetime: 5.1.2
+       signal-exit: 3.0.7
+@@ -3838,20 +4532,22 @@ snapshots:
+   exsolve@1.1.0: {}
+ 
+   fast-check@3.23.2:
+     dependencies:
+       pure-rand: 6.1.0
+ 
+   fast-decode-uri-component@1.0.1: {}
+ 
+   fast-deep-equal@3.1.3: {}
+ 
++  fast-fifo@1.3.2: {}
++
+   fast-json-stable-stringify@2.1.0: {}
+ 
+   fast-json-stringify@7.0.1:
+     dependencies:
+       '@fastify/merge-json-schemas': 0.2.1
+       ajv: 8.20.0
+       ajv-formats: 3.0.1(ajv@8.20.0)
+       fast-uri: 4.1.0
+       json-schema-ref-resolver: 3.0.0
+       rfdc: 1.4.1
+@@ -3940,47 +4636,60 @@ snapshots:
+       flatted: 3.4.2
+       keyv: 4.5.4
+ 
+   flatted@3.4.2: {}
+ 
+   foreground-child@3.3.1:
+     dependencies:
+       cross-spawn: 7.0.6
+       signal-exit: 4.1.0
+ 
++  fs-constants@1.0.0: {}
++
+   fs.realpath@1.0.0: {}
+ 
+   fsevents@2.3.3:
+     optional: true
+ 
+   function-bind@1.1.2: {}
+ 
+   generate-function@2.3.1:
+     dependencies:
+       is-property: 1.0.2
+ 
+   gensync@1.0.0-beta.2: {}
+ 
+   get-caller-file@2.0.5: {}
+ 
+   get-package-type@0.1.0: {}
+ 
+   get-port-please@3.2.0: {}
+ 
++  get-port@5.1.1: {}
++
+   get-stream@6.0.1: {}
+ 
+   giget@3.3.0: {}
+ 
+   glob-parent@6.0.2:
+     dependencies:
+       is-glob: 4.0.3
+ 
++  glob@10.5.0:
++    dependencies:
++      foreground-child: 3.3.1
++      jackspeak: 3.4.3
++      minimatch: 9.0.9
++      minipass: 7.1.3
++      package-json-from-dist: 1.0.1
++      path-scurry: 1.11.1
++
+   glob@7.2.3:
+     dependencies:
+       fs.realpath: 1.0.0
+       inflight: 1.0.6
+       inherits: 2.0.4
+       minimatch: 3.1.5
+       once: 1.4.0
+       path-is-absolute: 1.0.1
+ 
+   global-directory@4.0.1:
+@@ -4075,20 +4784,22 @@ snapshots:
+       is-path-inside: 4.0.0
+ 
+   is-number@7.0.0: {}
+ 
+   is-path-inside@4.0.0: {}
+ 
+   is-property@1.0.2: {}
+ 
+   is-stream@2.0.1: {}
+ 
++  isarray@1.0.0: {}
++
+   isexe@2.0.0: {}
+ 
+   istanbul-lib-coverage@3.2.2: {}
+ 
+   istanbul-lib-instrument@5.2.1:
+     dependencies:
+       '@babel/core': 7.29.7
+       '@babel/parser': 7.29.7
+       '@istanbuljs/schema': 0.1.6
+       istanbul-lib-coverage: 3.2.2
+@@ -4120,20 +4831,26 @@ snapshots:
+     transitivePeerDependencies:
+       - supports-color
+ 
+   istanbul-reports@3.2.0:
+     dependencies:
+       html-escaper: 2.0.2
+       istanbul-lib-report: 3.0.1
+ 
+   iterare@1.2.1: {}
+ 
++  jackspeak@3.4.3:
++    dependencies:
++      '@isaacs/cliui': 8.0.2
++    optionalDependencies:
++      '@pkgjs/parseargs': 0.11.0
++
+   jest-changed-files@29.7.0:
+     dependencies:
+       execa: 5.1.1
+       jest-util: 29.7.0
+       p-limit: 3.1.0
+ 
+   jest-circus@29.7.0:
+     dependencies:
+       '@jest/environment': 29.7.0
+       '@jest/expect': 29.7.0
+@@ -4465,20 +5182,24 @@ snapshots:
+   json-stable-stringify-without-jsonify@1.0.1: {}
+ 
+   json5@2.2.3: {}
+ 
+   keyv@4.5.4:
+     dependencies:
+       json-buffer: 3.0.1
+ 
+   kleur@3.0.3: {}
+ 
++  lazystream@1.0.1:
++    dependencies:
++      readable-stream: 2.3.8
++
+   leven@3.1.0: {}
+ 
+   levn@0.4.1:
+     dependencies:
+       prelude-ls: 1.2.1
+       type-check: 0.4.0
+ 
+   light-my-request@6.6.0:
+     dependencies:
+       cookie: 1.1.1
+@@ -4490,26 +5211,32 @@ snapshots:
+   load-esm@1.0.3: {}
+ 
+   locate-path@5.0.0:
+     dependencies:
+       p-locate: 4.1.0
+ 
+   locate-path@6.0.0:
+     dependencies:
+       p-locate: 5.0.0
+ 
++  lodash.camelcase@4.3.0: {}
++
+   lodash.memoize@4.1.2: {}
+ 
+   lodash.merge@4.6.2: {}
+ 
++  lodash@4.18.1: {}
++
+   long@5.3.2: {}
+ 
++  lru-cache@10.4.3: {}
++
+   lru-cache@5.1.1:
+     dependencies:
+       yallist: 3.1.1
+ 
+   lru.min@1.1.4: {}
+ 
+   make-dir@4.0.0:
+     dependencies:
+       semver: 7.8.5
+ 
+@@ -4535,40 +5262,57 @@ snapshots:
+   mimic-function@5.0.1: {}
+ 
+   minimatch@10.2.5:
+     dependencies:
+       brace-expansion: 5.0.7
+ 
+   minimatch@3.1.5:
+     dependencies:
+       brace-expansion: 1.1.16
+ 
++  minimatch@5.1.9:
++    dependencies:
++      brace-expansion: 2.1.2
++
++  minimatch@9.0.9:
++    dependencies:
++      brace-expansion: 2.1.2
++
+   minimist@1.2.8: {}
+ 
++  minipass@7.1.3: {}
++
++  mkdirp-classic@0.5.3: {}
++
++  mkdirp@3.0.1: {}
++
+   ms@2.1.3: {}
+ 
+   mysql2@3.15.3:
+     dependencies:
+       aws-ssl-profiles: 1.1.2
+       denque: 2.1.0
+       generate-function: 2.3.1
+       iconv-lite: 0.7.3
+       long: 5.3.2
+       lru.min: 1.1.4
+       named-placeholders: 1.1.6
+       seq-queue: 0.0.5
+       sqlstring: 2.3.3
+ 
+   named-placeholders@1.1.6:
+     dependencies:
+       lru.min: 1.1.4
+ 
++  nan@2.28.0:
++    optional: true
++
+   natural-compare@1.4.0: {}
+ 
+   neo-async@2.6.2: {}
+ 
+   node-int64@0.4.0: {}
+ 
+   node-releases@2.0.51: {}
+ 
+   normalize-path@3.0.0: {}
+ 
+@@ -4608,39 +5352,46 @@ snapshots:
+   p-locate@4.1.0:
+     dependencies:
+       p-limit: 2.3.0
+ 
+   p-locate@5.0.0:
+     dependencies:
+       p-limit: 3.1.0
+ 
+   p-try@2.2.0: {}
+ 
++  package-json-from-dist@1.0.1: {}
++
+   parent-module@1.0.1:
+     dependencies:
+       callsites: 3.1.0
+ 
+   parse-json@5.2.0:
+     dependencies:
+       '@babel/code-frame': 7.29.7
+       error-ex: 1.3.4
+       json-parse-even-better-errors: 2.3.1
+       lines-and-columns: 1.2.4
+ 
+   path-exists@4.0.0: {}
+ 
+   path-is-absolute@1.0.1: {}
+ 
+   path-key@3.1.1: {}
+ 
+   path-parse@1.0.7: {}
+ 
++  path-scurry@1.11.1:
++    dependencies:
++      lru-cache: 10.4.3
++      minipass: 7.1.3
++
+   path-to-regexp@8.4.2: {}
+ 
+   pathe@2.0.3: {}
+ 
+   perfect-debounce@2.1.0: {}
+ 
+   pg-cloudflare@1.4.0:
+     optional: true
+ 
+   pg-connection-string@2.14.0: {}
+@@ -4745,55 +5496,113 @@ snapshots:
+       postgres: 3.4.7
+     optionalDependencies:
+       typescript: 5.9.3
+     transitivePeerDependencies:
+       - '@types/react'
+       - '@types/react-dom'
+       - magicast
+       - react
+       - react-dom
+ 
++  process-nextick-args@2.0.1: {}
++
+   process-warning@4.0.1: {}
+ 
+   process-warning@5.0.0: {}
+ 
++  process@0.11.10: {}
++
+   prompts@2.4.2:
+     dependencies:
+       kleur: 3.0.3
+       sisteransi: 1.0.5
+ 
+   proper-lockfile@4.1.2:
+     dependencies:
+       graceful-fs: 4.2.11
+       retry: 0.12.0
+       signal-exit: 3.0.7
+ 
++  properties-reader@3.0.1:
++    dependencies:
++      '@kwsites/file-exists': 1.1.1
++      mkdirp: 3.0.1
++    transitivePeerDependencies:
++      - supports-color
++
++  protobufjs@7.6.5:
++    dependencies:
++      '@protobufjs/aspromise': 1.1.2
++      '@protobufjs/base64': 1.1.2
++      '@protobufjs/codegen': 2.0.5
++      '@protobufjs/eventemitter': 1.1.1
++      '@protobufjs/fetch': 1.1.1
++      '@protobufjs/float': 1.0.2
++      '@protobufjs/path': 1.1.2
++      '@protobufjs/pool': 1.1.0
++      '@protobufjs/utf8': 1.1.2
++      '@types/node': 24.13.3
++      long: 5.3.2
++
++  pump@3.0.4:
++    dependencies:
++      end-of-stream: 1.4.5
++      once: 1.4.0
++
+   punycode@2.3.1: {}
+ 
+   pure-rand@6.1.0: {}
+ 
+   quick-format-unescaped@4.0.4: {}
+ 
+   rc9@3.0.1:
+     dependencies:
+       defu: 6.1.7
+       destr: 2.0.5
+ 
+   react-dom@19.2.7(react@19.2.7):
+     dependencies:
+       react: 19.2.7
+       scheduler: 0.27.0
+ 
+   react-is@18.3.1: {}
+ 
+   react@19.2.7: {}
+ 
++  readable-stream@2.3.8:
++    dependencies:
++      core-util-is: 1.0.3
++      inherits: 2.0.4
++      isarray: 1.0.0
++      process-nextick-args: 2.0.1
++      safe-buffer: 5.1.2
++      string_decoder: 1.1.1
++      util-deprecate: 1.0.2
++
++  readable-stream@3.6.2:
++    dependencies:
++      inherits: 2.0.4
++      string_decoder: 1.3.0
++      util-deprecate: 1.0.2
++
++  readable-stream@4.7.0:
++    dependencies:
++      abort-controller: 3.0.0
++      buffer: 6.0.3
++      events: 3.3.0
++      process: 0.11.10
++      string_decoder: 1.3.0
++
++  readdir-glob@1.1.3:
++    dependencies:
++      minimatch: 5.1.9
++
+   readdirp@5.0.0: {}
+ 
+   real-require@0.2.0: {}
+ 
+   real-require@1.0.0: {}
+ 
+   rechoir@0.8.0:
+     dependencies:
+       resolve: 1.22.12
+ 
+@@ -4829,20 +5638,24 @@ snapshots:
+   retry@0.12.0: {}
+ 
+   reusify@1.1.0: {}
+ 
+   rfdc@1.4.1: {}
+ 
+   rxjs@7.8.2:
+     dependencies:
+       tslib: 2.8.1
+ 
++  safe-buffer@5.1.2: {}
++
++  safe-buffer@5.2.1: {}
++
+   safe-regex2@5.1.1:
+     dependencies:
+       ret: 0.5.0
+ 
+   safe-regex@2.1.1:
+     dependencies:
+       regexp-tree: 0.1.27
+ 
+   safe-stable-stringify@2.5.0: {}
+ 
+@@ -4878,47 +5691,89 @@ snapshots:
+     dependencies:
+       atomic-sleep: 1.0.0
+ 
+   source-map-support@0.5.13:
+     dependencies:
+       buffer-from: 1.1.2
+       source-map: 0.6.1
+ 
+   source-map@0.6.1: {}
+ 
++  split-ca@1.0.1: {}
++
+   split2@4.2.0: {}
+ 
+   sprintf-js@1.0.3: {}
+ 
+   sqlstring@2.3.3: {}
+ 
++  ssh-remote-port-forward@1.0.4:
++    dependencies:
++      '@types/ssh2': 0.5.52
++      ssh2: 1.17.0
++
++  ssh2@1.17.0:
++    dependencies:
++      asn1: 0.2.6
++      bcrypt-pbkdf: 1.0.2
++    optionalDependencies:
++      cpu-features: 0.0.10
++      nan: 2.28.0
++
+   stack-utils@2.0.6:
+     dependencies:
+       escape-string-regexp: 2.0.0
+ 
+   std-env@3.10.0: {}
+ 
++  streamx@2.28.0:
++    dependencies:
++      events-universal: 1.0.1
++      fast-fifo: 1.3.2
++      text-decoder: 1.2.7
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - react-native-b4a
++
+   string-length@4.0.2:
+     dependencies:
+       char-regex: 1.0.2
+       strip-ansi: 6.0.1
+ 
+   string-width@4.2.3:
+     dependencies:
+       emoji-regex: 8.0.0
+       is-fullwidth-code-point: 3.0.0
+       strip-ansi: 6.0.1
+ 
++  string-width@5.1.2:
++    dependencies:
++      eastasianwidth: 0.2.0
++      emoji-regex: 9.2.2
++      strip-ansi: 7.2.0
++
++  string_decoder@1.1.1:
++    dependencies:
++      safe-buffer: 5.1.2
++
++  string_decoder@1.3.0:
++    dependencies:
++      safe-buffer: 5.2.1
++
+   strip-ansi@6.0.1:
+     dependencies:
+       ansi-regex: 5.0.1
+ 
++  strip-ansi@7.2.0:
++    dependencies:
++      ansi-regex: 6.2.2
++
+   strip-bom@3.0.0: {}
+ 
+   strip-bom@4.0.0: {}
+ 
+   strip-final-newline@2.0.0: {}
+ 
+   strip-json-comments@3.1.1: {}
+ 
+   strtok3@10.3.5:
+     dependencies:
+@@ -4929,37 +5784,113 @@ snapshots:
+       has-flag: 4.0.0
+ 
+   supports-color@8.1.1:
+     dependencies:
+       has-flag: 4.0.0
+ 
+   supports-preserve-symlinks-flag@1.0.0: {}
+ 
+   tapable@2.3.3: {}
+ 
++  tar-fs@2.1.5:
++    dependencies:
++      chownr: 1.1.4
++      mkdirp-classic: 0.5.3
++      pump: 3.0.4
++      tar-stream: 2.2.0
++
++  tar-fs@3.1.3:
++    dependencies:
++      pump: 3.0.4
++      tar-stream: 3.2.0
++    optionalDependencies:
++      bare-fs: 4.7.4
++      bare-path: 3.1.1
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - bare-buffer
++      - react-native-b4a
++
++  tar-stream@2.2.0:
++    dependencies:
++      bl: 4.1.0
++      end-of-stream: 1.4.5
++      fs-constants: 1.0.0
++      inherits: 2.0.4
++      readable-stream: 3.6.2
++
++  tar-stream@3.2.0:
++    dependencies:
++      b4a: 1.8.1
++      bare-fs: 4.7.4
++      fast-fifo: 1.3.2
++      streamx: 2.28.0
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - bare-buffer
++      - react-native-b4a
++
+   teamcity-service-messages@0.1.14: {}
+ 
++  teex@1.0.1:
++    dependencies:
++      streamx: 2.28.0
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - react-native-b4a
++
+   test-exclude@6.0.0:
+     dependencies:
+       '@istanbuljs/schema': 0.1.6
+       glob: 7.2.3
+       minimatch: 3.1.5
+ 
++  testcontainers@12.0.4:
++    dependencies:
++      '@balena/dockerignore': 1.0.2
++      '@types/dockerode': 4.0.1
++      archiver: 7.0.1
++      async-lock: 1.4.1
++      byline: 5.0.0
++      debug: 4.4.3
++      docker-compose: 1.4.2
++      dockerode: 5.0.1
++      get-port: 5.1.1
++      proper-lockfile: 4.1.2
++      properties-reader: 3.0.1
++      ssh-remote-port-forward: 1.0.4
++      tar-fs: 3.1.3
++      tmp: 0.2.7
++      undici: 8.7.0
++    transitivePeerDependencies:
++      - bare-abort-controller
++      - bare-buffer
++      - react-native-b4a
++      - supports-color
++
++  text-decoder@1.2.7:
++    dependencies:
++      b4a: 1.8.1
++    transitivePeerDependencies:
++      - react-native-b4a
++
+   thread-stream@4.2.0:
+     dependencies:
+       real-require: 1.0.0
+ 
+   tinyglobby@0.2.17:
+     dependencies:
+       fdir: 6.5.0(picomatch@4.0.5)
+       picomatch: 4.0.5
+ 
++  tmp@0.2.7: {}
++
+   tmpl@1.0.5: {}
+ 
+   to-regex-range@5.0.1:
+     dependencies:
+       is-number: 7.0.0
+ 
+   toad-cache@3.7.4: {}
+ 
+   token-types@6.1.2:
+     dependencies:
+@@ -5008,20 +5939,22 @@ snapshots:
+ 
+   turbo@2.10.5:
+     optionalDependencies:
+       '@turbo/darwin-64': 2.10.5
+       '@turbo/darwin-arm64': 2.10.5
+       '@turbo/linux-64': 2.10.5
+       '@turbo/linux-arm64': 2.10.5
+       '@turbo/windows-64': 2.10.5
+       '@turbo/windows-arm64': 2.10.5
+ 
++  tweetnacl@0.14.5: {}
++
+   type-check@0.4.0:
+     dependencies:
+       prelude-ls: 1.2.1
+ 
+   type-detect@4.0.8: {}
+ 
+   type-fest@0.21.3: {}
+ 
+   type-fest@4.41.0: {}
+ 
+@@ -5040,32 +5973,38 @@ snapshots:
+ 
+   uglify-js@3.19.3:
+     optional: true
+ 
+   uid@2.0.2:
+     dependencies:
+       '@lukeed/csprng': 1.1.0
+ 
+   uint8array-extras@1.5.0: {}
+ 
++  undici-types@5.26.5: {}
++
+   undici-types@7.18.2: {}
+ 
++  undici@8.7.0: {}
++
+   update-browserslist-db@1.2.3(browserslist@4.28.6):
+     dependencies:
+       browserslist: 4.28.6
+       escalade: 3.2.0
+       picocolors: 1.1.1
+ 
+   uri-js@4.4.1:
+     dependencies:
+       punycode: 2.3.1
+ 
++  util-deprecate@1.0.2: {}
++
+   v8-to-istanbul@9.3.0:
+     dependencies:
+       '@jridgewell/trace-mapping': 0.3.31
+       '@types/istanbul-lib-coverage': 2.0.6
+       convert-source-map: 2.0.0
+ 
+   valibot@1.2.0(typescript@5.9.3):
+     optionalDependencies:
+       typescript: 5.9.3
+ 
+@@ -5082,43 +6021,57 @@ snapshots:
+   word-wrap@1.2.5: {}
+ 
+   wordwrap@1.0.0: {}
+ 
+   wrap-ansi@7.0.0:
+     dependencies:
+       ansi-styles: 4.3.0
+       string-width: 4.2.3
+       strip-ansi: 6.0.1
+ 
++  wrap-ansi@8.1.0:
++    dependencies:
++      ansi-styles: 6.2.3
++      string-width: 5.1.2
++      strip-ansi: 7.2.0
++
+   wrappy@1.0.2: {}
+ 
+   write-file-atomic@4.0.2:
+     dependencies:
+       imurmurhash: 0.1.4
+       signal-exit: 3.0.7
+ 
+   xtend@4.0.2: {}
+ 
+   y18n@5.0.8: {}
+ 
+   yallist@3.1.1: {}
+ 
++  yaml@2.9.0: {}
++
+   yargs-parser@21.1.1: {}
+ 
+   yargs@17.7.3:
+     dependencies:
+       cliui: 8.0.1
+       escalade: 3.2.0
+       get-caller-file: 2.0.5
+       require-directory: 2.1.1
+       string-width: 4.2.3
+       y18n: 5.0.8
+       yargs-parser: 21.1.1
+ 
+   yocto-queue@0.1.0: {}
+ 
+   zeptomatch@2.1.0:
+     dependencies:
+       grammex: 3.1.13
+       graphmatch: 1.1.1
+ 
++  zip-stream@6.0.1:
++    dependencies:
++      archiver-utils: 5.0.2
++      compress-commons: 6.0.2
++      readable-stream: 4.7.0
++
+   zod@4.4.3: {}
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index 7a7d145..81792a6 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -1,6 +1,13 @@
+ packages:
+   - 'packages/*'
+   - 'apps/*'
++# Build scripts are opt-in. The three testcontainers transitives below stay unbuilt:
++# ssh2 (and its optional cpu-features native accelerator) is only needed for the
++# remote-Docker/SSH port-forward path, which this repo does not use, and protobufjs's
++# postinstall only bootstraps its own CLI. All have working pure-JS fallbacks.
+ allowBuilds:
+   '@prisma/engines': false
++  cpu-features: false
+   prisma: false
++  protobufjs: false
++  ssh2: false
+diff --git a/turbo.json b/turbo.json
+index be2b186..2bd3593 100644
+--- a/turbo.json
++++ b/turbo.json
+@@ -1,9 +1,10 @@
+ {
+   "$schema": "https://turbo.build/schema.json",
+   "tasks": {
+     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+     "typecheck": { "dependsOn": ["^build"] },
+     "test": { "dependsOn": ["^build"] },
++    "test:int": { "dependsOn": ["^build"] },
+     "lint": {}
+   }
+ }

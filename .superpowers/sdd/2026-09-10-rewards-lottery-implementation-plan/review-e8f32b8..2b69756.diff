@@ -1,0 +1,423 @@
+# Review package: e8f32b8..2b69756
+
+## Commits
+2b69756 feat(server,core): composition root фазы 3 — RewardsModule, лотерея+квиз@2, свип; boundary rewards-only-through-di-tokens; lint Math.random
+
+## Files changed
+ .dependency-cruiser.cjs                            | 16 +++++++++++++
+ apps/server/package.json                           |  2 ++
+ apps/server/src/anonymization-guards.module.ts     | 19 ++++++++++++++++
+ apps/server/src/app.module.ts                      | 14 ++++++++++--
+ eslint.config.js                                   | 14 ++++++++++++
+ .../core/src/identity/identity-sweep.module.ts     |  7 +++++-
+ packages/core/src/rewards/rewards.module.ts        | 23 +++++++++++++------
+ packages/core/src/rewards/rewards.service.ts       |  5 ++++-
+ pnpm-lock.yaml                                     |  6 +++++
+ scripts/verify-guardrails.mjs                      | 26 ++++++++++++++++++++++
+ 10 files changed, 121 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/.dependency-cruiser.cjs b/.dependency-cruiser.cjs
+index b09bca6..1abb600 100644
+--- a/.dependency-cruiser.cjs
++++ b/.dependency-cruiser.cjs
+@@ -28,20 +28,36 @@ module.exports = {
+       comment: 'socket.io импортируется только из Realtime-модуля ядра (REQ-RT-006).',
+       severity: 'error',
+       // dist/** — скомпилированное эхо src (CI круизит после build): .d.ts gateway
+       // легально ссылается на типы socket.io; правило проверяет исходники.
+       from: { pathNot: ['^packages/core/src/realtime', '[/\\\\]dist[/\\\\]'] },
+       // Якорь на сам server-пакет (слэш после имени): socket.io-client — тестовый
+       // клиент провода (apps/server/test e2e), а не реализация транспорта;
+       // REQ-RT-006 ограничивает импорт server-библиотеки (решение владельца, Task 8).
+       to: { path: 'node_modules/socket[.]io[/\\\\]' },
+     },
++    {
++      name: 'rewards-only-through-di-tokens',
++      comment:
++        'Ядро не зависит от rewards (REQ-RWD-001): связка — DI-токены AWARD_EFFECT_HANDLER ' +
++        '(app-runtime/effects) и ANONYMIZATION_GUARDS (identity); единственные точки, ' +
++        'импортирующие core/rewards, — barrel index.ts и сам модуль rewards.',
++      severity: 'error',
++      from: {
++        path: '^packages/core/src',
++        // int-spec — миниатюра composition root: интеграционный тест законно
++        // собирает реальный RewardsModule/RewardsService для проверки связки
++        // (guest-sweep.int-spec, app-runtime.int-spec); правило про продакшн-код.
++        pathNot: ['^packages/core/src/rewards', '^packages/core/src/index\\.ts$', '[.]int-spec[.]ts$'],
++      },
++      to: { path: '^packages/core/src/rewards' },
++    },
+     {
+       name: 'no-circular',
+       comment: 'Циклические зависимости запрещены.',
+       severity: 'error',
+       from: {},
+       to: { circular: true },
+     },
+     {
+       name: 'not-to-unresolvable',
+       comment: 'Импорт несуществующего модуля — ошибка (ловит опечатки; делает gate-probe независимым от порядка задач).',
+diff --git a/apps/server/package.json b/apps/server/package.json
+index 7dd5fc8..be63c94 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -8,26 +8,28 @@
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+     "start": "node dist/main.js",
+     "create-room": "node scripts/create-room.mjs"
+   },
+   "dependencies": {
+     "@fastify/cookie": "^11.1.2",
+     "@fastify/cors": "^11.3.0",
+     "@fastify/helmet": "^13.1.0",
++    "@mymozhem/app-lottery": "workspace:*",
+     "@mymozhem/app-quiz": "workspace:*",
+     "@mymozhem/core": "workspace:*",
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@nestjs/platform-fastify": "^11.0.0",
++    "@nestjs/schedule": "^6.1.3",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
+     "jest": "^29.7.0",
+     "socket.io-client": "^4.8.3",
+diff --git a/apps/server/src/anonymization-guards.module.ts b/apps/server/src/anonymization-guards.module.ts
+new file mode 100644
+index 0000000..ac74f95
+--- /dev/null
++++ b/apps/server/src/anonymization-guards.module.ts
+@@ -0,0 +1,19 @@
++import { Global, Module } from '@nestjs/common';
++import { ANONYMIZATION_GUARDS, RewardsAnonymizationGuard, RewardsModule } from '@mymozhem/core';
++
++// Связка identity ↔ rewards по DI-токену (REQ-RWD-001): identity объявляет токен,
++// rewards даёт guard; друг без друга модули не знают. Без RewardsModule массив
++// гардов пуст — приостановки TTL нет, свип работает (design §5).
++@Global()
++@Module({
++  imports: [RewardsModule],
++  providers: [
++    {
++      provide: ANONYMIZATION_GUARDS,
++      useFactory: (guard: RewardsAnonymizationGuard) => [guard],
++      inject: [RewardsAnonymizationGuard],
++    },
++  ],
++  exports: [ANONYMIZATION_GUARDS],
++})
++export class AnonymizationGuardsModule {}
+diff --git a/apps/server/src/app.module.ts b/apps/server/src/app.module.ts
+index 1126b42..84f7425 100644
+--- a/apps/server/src/app.module.ts
++++ b/apps/server/src/app.module.ts
+@@ -1,30 +1,40 @@
+ import { Module } from '@nestjs/common';
++import { ScheduleModule } from '@nestjs/schedule';
+ import { createQuizApp } from '@mymozhem/app-quiz';
++import { createLotteryApp } from '@mymozhem/app-lottery';
+ import {
+   AppRegistryModule,
+   AppRuntimeModule,
+   HealthModule,
+   IdentityModule,
++  IdentitySweepModule,
+   MembershipModule,
+   PrismaModule,
+   RealtimeModule,
++  RewardsModule,
+   RoomModule,
+   TransportModule,
+ } from '@mymozhem/core';
++import { AnonymizationGuardsModule } from './anonymization-guards.module';
+ 
+ const quiz = createQuizApp();
++const lottery = createLotteryApp();
+ 
+ @Module({
+   imports: [
+     PrismaModule,
+     HealthModule,
+-    AppRegistryModule.register([quiz.manifest]),
+-    AppRuntimeModule.register([quiz.runtime]),
++    ScheduleModule.forRoot(), // REQ-ID-010: регламентные джобы; одна реплика (REQ-OPS-005)
++    AppRegistryModule.register([quiz.manifest, lottery.manifest]),
++    AppRuntimeModule.register([quiz.runtime, lottery.runtime]),
+     RoomModule,
+     IdentityModule,
+     MembershipModule,
+     RealtimeModule,
+     TransportModule,
++    RewardsModule, // global: AWARD_EFFECT_HANDLER для app-runtime (REQ-RWD-001)
++    IdentitySweepModule, // TTL-свип гостей (REQ-ID-003/014) с приостановкой (REQ-RWD-013)
++    AnonymizationGuardsModule,
+   ],
+ })
+ export class AppModule {}
+diff --git a/eslint.config.js b/eslint.config.js
+index b6f8384..31aa1bd 100644
+--- a/eslint.config.js
++++ b/eslint.config.js
+@@ -24,11 +24,25 @@ const moduleLevelMutableRule = {
+ };
+ 
+ module.exports = tseslint.config(
+   { ignores: ['**/dist/**', '**/node_modules/**', '.turbo/**'] },
+   js.configs.recommended,
+   ...tseslint.configs.recommended,
+   {
+     files: ['**/*.ts'],
+     rules: moduleLevelMutableRule,
+   },
++  {
++    // REQ-RWD-011 (решение владельца 2026-09-10): случайность app-модулей —
++    // только ctx.randomInt (CSPRNG хоста); Math.random отсекается машиной.
++    files: ['packages/app-*/src/**/*.ts'],
++    rules: {
++      'no-restricted-syntax': [
++        'error',
++        {
++          selector: "CallExpression[callee.object.name='Math'][callee.property.name='random']",
++          message: 'Случайность app-модулей — только ctx.randomInt (CSPRNG хоста, REQ-RWD-011).',
++        },
++      ],
++    },
++  },
+ );
+diff --git a/packages/core/src/identity/identity-sweep.module.ts b/packages/core/src/identity/identity-sweep.module.ts
+index cebb51c..16d29fe 100644
+--- a/packages/core/src/identity/identity-sweep.module.ts
++++ b/packages/core/src/identity/identity-sweep.module.ts
+@@ -24,19 +24,24 @@ class GuestSweepScheduler implements OnApplicationBootstrap, OnApplicationShutdo
+     const interval = setInterval(() => {
+       this.sweep.sweepExpiredGuests().catch((err) => {
+         // Отказ прохода — error-лог, следующий проход повторит; джоба не роняет процесс.
+         this.logger.error('guest sweep failed', err);
+       });
+     }, this.config.CLEANUP_INTERVAL * 1000);
+     this.registry.addInterval('guest-sweep', interval);
+   }
+ 
+   onApplicationShutdown(): void {
+-    this.registry.deleteInterval('guest-sweep');
++    // Симметрия жизненного цикла: onApplicationBootstrap срабатывает на listen(),
++    // а e2e на app.inject() (init + close без listen) интервал не регистрирует —
++    // deleteInterval бросил бы "No Interval was found". Снятие идемпотентно.
++    if (this.registry.doesExist('interval', 'guest-sweep')) {
++      this.registry.deleteInterval('guest-sweep');
++    }
+   }
+ }
+ 
+ @Module({
+   imports: [ConfigModule, IdentityModule],
+   providers: [GuestSweepScheduler],
+ })
+ export class IdentitySweepModule {}
+diff --git a/packages/core/src/rewards/rewards.module.ts b/packages/core/src/rewards/rewards.module.ts
+index de0ece7..aae61ee 100644
+--- a/packages/core/src/rewards/rewards.module.ts
++++ b/packages/core/src/rewards/rewards.module.ts
+@@ -1,20 +1,29 @@
+-import { Module } from '@nestjs/common';
++import { Global, Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { RealtimeModule } from '../realtime/realtime.module';
+ import { AuthModule } from '../auth/auth.module';
++import { AWARD_EFFECT_HANDLER } from '../app-runtime/effects';
+ import { RewardsService } from './rewards.service';
+ import { RewardsController } from './rewards.controller';
+ import { RewardsAnonymizationGuard } from './rewards-anonymization.guard';
+ 
+-// Контур rewards (design 2026-09-10 §2). Handler-провайдер диспетчера эффектов
+-// и @Global — Task 11. AuthModule — TokenService для Bearer-аутентификации
+-// контроллера (прецедент TransportModule). RewardsAnonymizationGuard экспортируется
+-// для связки ANONYMIZATION_GUARDS в composition root (REQ-RWD-013, hook, не импорт).
++// Контур rewards (design 2026-09-10 §2). AuthModule — TokenService для Bearer-
++// аутентификации контроллера (прецедент TransportModule).
++//
++// @Global: AppRuntimeService (AppRuntimeModule, global) опционально инжектирует
++// AWARD_EFFECT_HANDLER; identity-свип — ANONYMIZATION_GUARDS из composition root
++// (apps/server/src/anonymization-guards.module.ts). Ядро rewards не импортирует
++// (boundary rewards-only-through-di-tokens).
++@Global()
+ @Module({
+   imports: [PrismaModule, MembershipModule, RealtimeModule, AuthModule],
+   controllers: [RewardsController],
+-  providers: [RewardsService, RewardsAnonymizationGuard],
+-  exports: [RewardsService, RewardsAnonymizationGuard],
++  providers: [
++    RewardsService,
++    RewardsAnonymizationGuard,
++    { provide: AWARD_EFFECT_HANDLER, useExisting: RewardsService },
++  ],
++  exports: [RewardsService, RewardsAnonymizationGuard, AWARD_EFFECT_HANDLER],
+ })
+ export class RewardsModule {}
+diff --git a/packages/core/src/rewards/rewards.service.ts b/packages/core/src/rewards/rewards.service.ts
+index 7612a9d..2bed424 100644
+--- a/packages/core/src/rewards/rewards.service.ts
++++ b/packages/core/src/rewards/rewards.service.ts
+@@ -1,34 +1,37 @@
+ import { Injectable } from '@nestjs/common';
+ import { Prisma } from '@prisma/client';
+ import type { AppEffect, CreatePrizeRequest } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { MembershipService } from '../membership/membership.service';
+ import { ActorNotMemberError, ActorNotOrganizerError } from '../membership/membership.errors';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { RoomNotActiveError } from '../realtime/realtime.errors';
++import type { AwardEffectHandler } from '../app-runtime/effects';
+ import {
+   AwardUnknownError,
+   PrizeFundExhaustedError,
+   PrizeUnknownError,
+   RewardAlreadyResolvedError,
+ } from './rewards.errors';
+ 
+ // Контур rewards (design 2026-09-10 §2/§3). Два входа:
+ // 1) executeEffects — из диспетчера app-runtime, ВНУТРИ его outbox.run (вложенный
+ //    run запрещён — поэтому tx приходит параметром); отказ → откат всей транзакции.
+ // 2) REST-методы (createPrize/listAwards/fulfill/revoke) — свои outbox.run.
+ // События rewards.* коммитятся в той же транзакции (лог — нотификация и аудит,
+ // ADR-005; таблицы остаются источником состояния).
++// implements AwardEffectHandler: DI-шов REQ-RWD-001 — app-runtime знает только
++// интерфейс; импорт типа rewards → app-runtime/effects разрешён boundary-правилом.
+ @Injectable()
+-export class RewardsService {
++export class RewardsService implements AwardEffectHandler {
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly membership: MembershipService,
+     private readonly eventLog: EventLogService,
+     private readonly outbox: EventOutbox,
+   ) {}
+ 
+   // --- Вход 1: эффекты из app-runtime (чужая транзакция) ---
+ 
+   async executeEffects(
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index dbfd9c6..5ec6c6f 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -37,38 +37,44 @@ importers:
+     dependencies:
+       '@fastify/cookie':
+         specifier: ^11.1.2
+         version: 11.1.2
+       '@fastify/cors':
+         specifier: ^11.3.0
+         version: 11.3.0
+       '@fastify/helmet':
+         specifier: ^13.1.0
+         version: 13.1.0
++      '@mymozhem/app-lottery':
++        specifier: workspace:*
++        version: link:../../packages/app-lottery
+       '@mymozhem/app-quiz':
+         specifier: workspace:*
+         version: link:../../packages/app-quiz
+       '@mymozhem/core':
+         specifier: workspace:*
+         version: link:../../packages/core
+       '@mymozhem/sdk':
+         specifier: workspace:*
+         version: link:../../packages/sdk
+       '@nestjs/common':
+         specifier: ^11.0.0
+         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/core':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/websockets@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@nestjs/platform-fastify':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
++      '@nestjs/schedule':
++        specifier: ^6.1.3
++        version: 6.1.3(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)
+diff --git a/scripts/verify-guardrails.mjs b/scripts/verify-guardrails.mjs
+index 8de7662..e4b629e 100644
+--- a/scripts/verify-guardrails.mjs
++++ b/scripts/verify-guardrails.mjs
+@@ -28,34 +28,60 @@ const mutableProbe = 'scripts/__probe__/mutable.ts';
+ writeFileSync(mutableProbe, 'export let leaked = 1;\nleaked = 2;\n');
+ 
+ // 3) Apps-boundary probe: a file in apps/server deep-importing core's src
+ // internals instead of the package entrypoint (forbidden: apps-only-through-core-entrypoint).
+ const appsProbe = 'apps/server/src/__guardrail_probe__.ts';
+ writeFileSync(
+   appsProbe,
+   "import '../../../packages/core/src/health/health.module';\nexport const probe = 1;\n",
+ );
+ 
++// 4) Rewards-boundary probe: a core domain outside rewards importing rewards
++// (forbidden: rewards-only-through-di-tokens, REQ-RWD-001 — связка только
++// через DI-токены AWARD_EFFECT_HANDLER / ANONYMIZATION_GUARDS). Импорт
++// относительный: пакетный путь '@mymozhem/core/src/…' depcruise не резолвит,
++// и probe ловил бы not-to-unresolvable вместо целевого правила.
++const rewardsProbe = 'packages/core/src/room/__probe-rewards-boundary.ts';
++writeFileSync(
++  rewardsProbe,
++  "import '../rewards/rewards.module';\nexport const probe = 1;\n",
++);
++
++// 5) Math.random probe: случайность app-модуля через Math.random
++// (forbidden: REQ-RWD-011 — только ctx.randomInt, CSPRNG хоста).
++const mathRandomProbe = 'packages/app-quiz/src/__probe-math-random.ts';
++writeFileSync(mathRandomProbe, 'export const x = Math.random();\n');
++
+ try {
+   expectFailure(
+     'sdk → core import (dependency-cruiser)',
+     `pnpm exec depcruise ${boundaryProbe} --config .dependency-cruiser.cjs`,
+   );
+   expectFailure(
+     'module-level mutable export (eslint)',
+     `pnpm exec eslint ${mutableProbe} --no-ignore`,
+   );
+   expectFailure(
+     'apps → core src-internals import (dependency-cruiser)',
+     `pnpm exec depcruise ${appsProbe} --config .dependency-cruiser.cjs`,
+   );
++  expectFailure(
++    'core domain → rewards import (dependency-cruiser)',
++    `pnpm exec depcruise ${rewardsProbe} --config .dependency-cruiser.cjs`,
++  );
++  expectFailure(
++    'Math.random in app module (eslint)',
++    `pnpm exec eslint ${mathRandomProbe}`,
++  );
+ } finally {
+   rmSync(boundaryProbe, { force: true });
+   rmSync('scripts/__probe__', { recursive: true, force: true });
+   rmSync(appsProbe, { force: true });
++  rmSync(rewardsProbe, { force: true });
++  rmSync(mathRandomProbe, { force: true });
+ }
+ 
+ if (process.exitCode) {
+   console.error('\nGuardrails are NOT enforcing. Fix before merge.');
+ } else {
+   console.log('\nAll guardrails verified alive.');
+ }

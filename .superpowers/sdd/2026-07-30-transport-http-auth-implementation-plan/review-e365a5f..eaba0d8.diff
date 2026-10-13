@@ -1,0 +1,622 @@
+# Review package: e365a5f5cfff4f3ae8740b3209384d9844253cb1..HEAD
+
+## Commits
+eaba0d8 feat(core): TokenService issue/verify with hashed refresh families (REQ-ID-007, REQ-ID-016)
+
+## Files changed
+ packages/core/package.json                   |   2 +
+ packages/core/src/auth/auth.constants.ts     |   3 +
+ packages/core/src/auth/auth.errors.ts        |  11 +++
+ packages/core/src/auth/auth.module.ts        |   7 ++
+ packages/core/src/auth/token.service.spec.ts |  58 ++++++++++++++++
+ packages/core/src/auth/token.service.ts      |  76 ++++++++++++++++++++
+ packages/core/src/index.ts                   |   4 ++
+ pnpm-lock.yaml                               | 100 +++++++++++++++++++++++++++
+ 8 files changed, 261 insertions(+)
+
+## Diff
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 8981712..60dc227 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -12,28 +12,30 @@
+     "test:int": "jest -c jest.integration.config.js",
+     "prisma:generate": "prisma generate"
+   },
+   "dependencies": {
+     "@mymozhem/sdk": "workspace:*",
+     "@nestjs/common": "^11.0.0",
+     "@nestjs/core": "^11.0.0",
+     "@prisma/adapter-pg": "^7.6.0",
+     "@prisma/client": "^7.6.0",
+     "ajv": "^8.20.0",
++    "jsonwebtoken": "^9.0.3",
+     "pg": "^8.13.0",
+     "reflect-metadata": "^0.2.2",
+     "rxjs": "^7.8.1",
+     "zod": "^4.0.0"
+   },
+   "devDependencies": {
+     "@nestjs/testing": "^11.0.0",
+     "@testcontainers/postgresql": "^12.0.4",
+     "@types/jest": "^29.5.14",
++    "@types/jsonwebtoken": "^9.0.10",
+     "@types/node": "^24.0.0",
+     "@types/pg": "^8.11.0",
+     "jest": "^29.7.0",
+     "prisma": "^7.6.0",
+     "testcontainers": "^12.0.4",
+     "ts-jest": "^29.2.5",
+     "typescript": "^5.7.0"
+   }
+ }
+diff --git a/packages/core/src/auth/auth.constants.ts b/packages/core/src/auth/auth.constants.ts
+new file mode 100644
+index 0000000..8693943
+--- /dev/null
++++ b/packages/core/src/auth/auth.constants.ts
+@@ -0,0 +1,3 @@
++// Имя refresh-куки. Path=/auth выставляется контроллером — кука не уходит никуда,
++// кроме refresh-эндпоинта (REQ-ID-008).
++export const REFRESH_COOKIE = 'mm_refresh';
+diff --git a/packages/core/src/auth/auth.errors.ts b/packages/core/src/auth/auth.errors.ts
+new file mode 100644
+index 0000000..e29f3ea
+--- /dev/null
++++ b/packages/core/src/auth/auth.errors.ts
+@@ -0,0 +1,11 @@
++// Core-internal auth errors. Наружу фильтр отдаёт один код SESSION_INVALID для всех
++// отказов refresh — reuse/expired/unknown неразличимы снаружи (design §5, принцип REQ-ID-013).
++export const AUTH_ERROR_CODES = { SESSION_INVALID: 'SESSION_INVALID' } as const;
++export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[keyof typeof AUTH_ERROR_CODES];
++
++export class AuthError extends Error {
++  constructor(readonly code: AuthErrorCode, message: string) {
++    super(message);
++    this.name = new.target.name;
++  }
++}
+diff --git a/packages/core/src/auth/auth.module.ts b/packages/core/src/auth/auth.module.ts
+new file mode 100644
+index 0000000..5246b75
+--- /dev/null
++++ b/packages/core/src/auth/auth.module.ts
+@@ -0,0 +1,7 @@
++import { Module } from '@nestjs/common';
++import { PrismaModule } from '../prisma/prisma.module';
++import { ConfigModule } from '../config/config.module';
++import { TokenService } from './token.service';
++
++@Module({ imports: [PrismaModule, ConfigModule], providers: [TokenService], exports: [TokenService] })
++export class AuthModule {}
+diff --git a/packages/core/src/auth/token.service.spec.ts b/packages/core/src/auth/token.service.spec.ts
+new file mode 100644
+index 0000000..a410040
+--- /dev/null
++++ b/packages/core/src/auth/token.service.spec.ts
+@@ -0,0 +1,58 @@
++import { TokenService } from './token.service';
++import { AuthError } from './auth.errors';
++import { TEST_CONFIG } from '../testing/test-config';
++
++const makeService = () => {
++  const sessionCreate = jest.fn().mockImplementation(({ data }) =>
++    Promise.resolve({ id: 'sess-1', ...data }),
++  );
++  const prisma = { session: { create: sessionCreate } };
++  const service = new TokenService(prisma as never, TEST_CONFIG);
++  return { service, sessionCreate };
++};
++
++describe('TokenService.issueGuestTokens (REQ-ID-007/016)', () => {
++  it('signs HS256 access with guest claims and stores only the refresh hash', async () => {
++    const { service, sessionCreate } = makeService();
++    const issued = await service.issueGuestTokens('ident-1', 'room-1');
++
++    const claims = service.verifyAccessToken(issued.accessToken);
++    expect(claims).toMatchObject({ sub: 'ident-1', sid: 'sess-1', kind: 'GUEST', roomId: 'room-1' });
++    expect(issued.expiresIn).toBe(TEST_CONFIG.ACCESS_TOKEN_TTL);
++
++    const stored = sessionCreate.mock.calls[0][0].data;
++    expect(stored.identityId).toBe('ident-1');
++    expect(stored.refreshTokenHash).toMatch(/^[a-f0-9]{64}$/); // SHA-256 hex, не сам токен
++    expect(stored.refreshTokenHash).not.toBe(issued.refreshToken);
++    expect(stored.familyId).toEqual(expect.any(String));
++  });
++
++  it('caps session expiry by min(REFRESH_TOKEN_TTL, GUEST_TTL) (REQ-ID-016)', async () => {
++    const { service, sessionCreate } = makeService();
++    await service.issueGuestTokens('ident-1', 'room-1');
++    const expiresAt: Date = sessionCreate.mock.calls[0][0].data.expiresAt;
++    const expectedMs = Math.min(TEST_CONFIG.REFRESH_TOKEN_TTL, TEST_CONFIG.GUEST_TTL) * 1000;
++    expect(Math.abs(expiresAt.getTime() - (Date.now() + expectedMs))).toBeLessThan(5000);
++  });
++
++  it('issues distinct refresh tokens per call', async () => {
++    const { service } = makeService();
++    const a = await service.issueGuestTokens('i', 'r');
++    const b = await service.issueGuestTokens('i', 'r');
++    expect(a.refreshToken).not.toBe(b.refreshToken);
++  });
++});
++
++describe('TokenService.verifyAccessToken', () => {
++  it('rejects a token signed with another secret', async () => {
++    const { service } = makeService();
++    const { default: jwt } = await import('jsonwebtoken');
++    const foreign = jwt.sign({ sub: 'x', sid: 'y', kind: 'GUEST', roomId: 'r' }, 'wrong-secret-wrong-secret-32bytes!', { algorithm: 'HS256' });
++    expect(() => service.verifyAccessToken(foreign)).toThrow(AuthError);
++  });
++
++  it('rejects a malformed token', () => {
++    const { service } = makeService();
++    expect(() => service.verifyAccessToken('not-a-jwt')).toThrow(AuthError);
++  });
++});
+diff --git a/packages/core/src/auth/token.service.ts b/packages/core/src/auth/token.service.ts
+new file mode 100644
+index 0000000..74cc4a3
+--- /dev/null
++++ b/packages/core/src/auth/token.service.ts
+@@ -0,0 +1,76 @@
++import { createHash, randomBytes, randomUUID } from 'node:crypto';
++import { Inject, Injectable } from '@nestjs/common';
++import jwt from 'jsonwebtoken';
++import { PrismaService } from '../prisma/prisma.service';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { AUTH_ERROR_CODES, AuthError } from './auth.errors';
++
++export interface AccessClaims {
++  sub: string; // identityId
++  sid: string; // session id
++  kind: 'GUEST' | 'REGISTERED';
++  roomId?: string; // guest scope (REQ-ID-016); REGISTERED — без roomId
++}
++
++export interface IssuedTokens {
++  accessToken: string;
++  expiresIn: number;
++  refreshToken: string;
++}
++
++const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
++
++@Injectable()
++export class TokenService {
++  constructor(
++    private readonly prisma: PrismaService,
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
++  ) {}
++
++  // Единственная выдача в этом срезе — гостевая (REQ-ID-016): roomId зашит в claims.
++  async issueGuestTokens(identityId: string, roomId: string): Promise<IssuedTokens> {
++    const refreshToken = randomBytes(32).toString('base64url');
++    const session = await this.prisma.session.create({
++      data: {
++        identityId,
++        refreshTokenHash: sha256(refreshToken),
++        familyId: randomUUID(),
++        expiresAt: this.sessionExpiry(),
++      },
++    });
++    return {
++      accessToken: this.signAccess({ sub: identityId, sid: session.id, kind: 'GUEST', roomId }),
++      expiresIn: this.config.ACCESS_TOKEN_TTL,
++      refreshToken,
++    };
++  }
++
++  // Access — stateless; verify используется будущим realtime-handshake (REQ-RT-009).
++  verifyAccessToken(token: string): AccessClaims {
++    let decoded: jwt.JwtPayload;
++    try {
++      const raw = jwt.verify(token, this.config.JWT_SECRET, { algorithms: ['HS256'] });
++      if (typeof raw === 'string') throw new Error('string payload');
++      decoded = raw;
++    } catch (err) {
++      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, `access verify failed: ${(err as Error).message}`);
++    }
++    if (
++      typeof decoded.sub !== 'string' ||
++      typeof decoded.sid !== 'string' ||
++      (decoded.kind !== 'GUEST' && decoded.kind !== 'REGISTERED')
++    ) {
++      throw new AuthError(AUTH_ERROR_CODES.SESSION_INVALID, 'access claims malformed');
++    }
++    return { sub: decoded.sub, sid: decoded.sid, kind: decoded.kind, roomId: typeof decoded.roomId === 'string' ? decoded.roomId : undefined };
++  }
++
++  protected sessionExpiry(): Date {
++    return new Date(Date.now() + Math.min(this.config.REFRESH_TOKEN_TTL, this.config.GUEST_TTL) * 1000);
++  }
++
++  protected signAccess(claims: AccessClaims): string {
++    return jwt.sign(claims, this.config.JWT_SECRET, { algorithm: 'HS256', expiresIn: this.config.ACCESS_TOKEN_TTL });
++  }
++}
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index e5ba07e..442d9fc 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -14,10 +14,14 @@ export * from './room/room-state-machine';
+ export * from './room/room.service';
+ export * from './room/room.module';
+ export * from './identity/identity.service';
+ export * from './identity/identity.module';
+ export * from './membership/membership.errors';
+ export * from './membership/join-rate-limiter';
+ export * from './membership/membership.service';
+ export * from './membership/membership.module';
+ export * from './realtime/event-log.service';
+ export * from './realtime/realtime.module';
++export * from './auth/auth.constants';
++export * from './auth/auth.errors';
++export * from './auth/token.service';
++export * from './auth/auth.module';
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 5d53c22..2b1a039 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -86,20 +86,23 @@ importers:
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+       '@prisma/adapter-pg':
+         specifier: ^7.6.0
+         version: 7.8.0
+       '@prisma/client':
+         specifier: ^7.6.0
+         version: 7.8.0(prisma@7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3))(typescript@5.9.3)
+       ajv:
+         specifier: ^8.20.0
+         version: 8.20.0
++      jsonwebtoken:
++        specifier: ^9.0.3
++        version: 9.0.3
+       pg:
+         specifier: ^8.13.0
+         version: 8.22.0
+       reflect-metadata:
+         specifier: ^0.2.2
+         version: 0.2.2
+       rxjs:
+         specifier: ^7.8.1
+         version: 7.8.2
+       zod:
+@@ -108,20 +111,23 @@ importers:
+     devDependencies:
+       '@nestjs/testing':
+         specifier: ^11.0.0
+         version: 11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28(@nestjs/common@11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
+       '@testcontainers/postgresql':
+         specifier: ^12.0.4
+         version: 12.0.4
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
++      '@types/jsonwebtoken':
++        specifier: ^9.0.10
++        version: 9.0.10
+       '@types/node':
+         specifier: ^24.0.0
+         version: 24.13.3
+       '@types/pg':
+         specifier: ^8.11.0
+         version: 8.20.0
+       jest:
+         specifier: ^29.7.0
+         version: 29.7.0(@types/node@24.13.3)
+       prisma:
+@@ -873,20 +879,26 @@ packages:
+ 
+   '@types/istanbul-reports@3.0.4':
+     resolution: {integrity: sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ==}
+ 
+   '@types/jest@29.5.14':
+     resolution: {integrity: sha512-ZN+4sdnLUbo8EVvVc2ao0GFW6oVrQRPn4K2lglySj7APvSrgzxHiNNK99us4WDMi57xxA2yggblIAMNhXOotLQ==}
+ 
+   '@types/json-schema@7.0.15':
+     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+ 
++  '@types/jsonwebtoken@9.0.10':
++    resolution: {integrity: sha512-asx5hIG9Qmf/1oStypjanR7iKTv0gXQ1Ov/jfrX6kS/EO0OFni8orbmGCn0672NHR3kXHwpAwR+B368ZGN/2rA==}
++
++  '@types/ms@2.1.0':
++    resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
++
+   '@types/node@18.19.130':
+     resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
+ 
+   '@types/node@24.13.3':
+     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+ 
+   '@types/pg@8.20.0':
+     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
+ 
+   '@types/react@19.2.17':
+@@ -1193,20 +1205,23 @@ packages:
+     resolution: {integrity: sha512-pd8DCoxmbgc7hyPKOvxtqNcjYoOsABPQdcCUjGp3d42VR2CX1ORhk2A87oqqu5R1kk+76nsxZupkmyd+MVtCog==}
+     engines: {node: '>= 6'}
+ 
+   bser@2.1.1:
+     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
+ 
+   buffer-crc32@1.0.0:
+     resolution: {integrity: sha512-Db1SbgBS/fg/392AblrMJk97KggmvYhr4pB5ZIMTWtaivCPMWLkmb7m21cJvpvgK+J3nsU2CmmixNBZx4vFj/w==}
+     engines: {node: '>=8.0.0'}
+ 
++  buffer-equal-constant-time@1.0.1:
++    resolution: {integrity: sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==}
++
+   buffer-from@1.1.2:
+     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
+ 
+   buffer@5.7.1:
+     resolution: {integrity: sha512-EHcyIPBQ4BSGlvjB16k5KgAJ27CIsHY/2JBmCRReo48y9rQ3MaUzWX3KVlBa4U7MyX02HdVj0K7C3WaB3ju7FQ==}
+ 
+   buffer@6.0.3:
+     resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
+ 
+   buildcheck@0.0.7:
+@@ -1404,20 +1419,23 @@ packages:
+     resolution: {integrity: sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==}
+     engines: {node: '>=12'}
+ 
+   dotenv@17.4.2:
+     resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
+     engines: {node: '>=12'}
+ 
+   eastasianwidth@0.2.0:
+     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
+ 
++  ecdsa-sig-formatter@1.0.11:
++    resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
++
+   effect@3.20.0:
+     resolution: {integrity: sha512-qMLfDJscrNG8p/aw+IkT9W7fgj50Z4wG5bLBy0Txsxz8iUHjDIkOgO3SV0WZfnQbNG2VJYb0b+rDLMrhM4+Krw==}
+ 
+   electron-to-chromium@1.5.392:
+     resolution: {integrity: sha512-1yQq3VQCZRwsnYc67Oc+1fge6Lwtn0hzi6zmEVkB61Zx21kTbwJAW4dFLadl5Rc1tKhG/kSpYXnfiAhu0f0a1g==}
+ 
+   emittery@0.13.1:
+     resolution: {integrity: sha512-DeWwawk6r5yR9jFgnDKYt4sLS0LmHJJi3ZOnb5/JdbYwj3nW+FxQnHIjhBKz8YLC7oRNPVM9NQ47I3CVx34eqQ==}
+     engines: {node: '>=12'}
+ 
+@@ -2023,20 +2041,30 @@ packages:
+     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
+ 
+   json-stable-stringify-without-jsonify@1.0.1:
+     resolution: {integrity: sha512-Bdboy+l7tA3OGW6FjyFHWkP5LuByj1Tk33Ljyq0axyzdk9//JSi2u3fP1QSmd1KNwq6VOKYGlAu87CisVir6Pw==}
+ 
+   json5@2.2.3:
+     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
+     engines: {node: '>=6'}
+     hasBin: true
+ 
++  jsonwebtoken@9.0.3:
++    resolution: {integrity: sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==}
++    engines: {node: '>=12', npm: '>=6'}
++
++  jwa@2.0.1:
++    resolution: {integrity: sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==}
++
++  jws@4.0.1:
++    resolution: {integrity: sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==}
++
+   keyv@4.5.4:
+     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
+ 
+   kleur@3.0.3:
+     resolution: {integrity: sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w==}
+     engines: {node: '>=6'}
+ 
+   lazystream@1.0.1:
+     resolution: {integrity: sha512-b94GiNHQNy6JNTrt5w6zNyffMrNkXZb3KTkCZJb2V1xaEGCk093vkZ2jk3tpaeP33/OiXC+WvK9AxUebnf5nbw==}
+     engines: {node: '>= 0.6.3'}
+@@ -2063,26 +2091,47 @@ packages:
+     resolution: {integrity: sha512-t7hw9pI+WvuwNJXwk5zVHpyhIqzg2qTlklJOf0mVxGSbe3Fp2VieZcduNYjaLDoy6p9uGpQEGWG87WpMKlNq8g==}
+     engines: {node: '>=8'}
+ 
+   locate-path@6.0.0:
+     resolution: {integrity: sha512-iPZK6eYjbxRu3uB4/WZ3EsEIMJFMqAoopl3R+zuq0UjcAm/MO6KCweDgPfP3elTztoKP3KtnVHxTn2NHBSDVUw==}
+     engines: {node: '>=10'}
+ 
+   lodash.camelcase@4.3.0:
+     resolution: {integrity: sha512-TwuEnCnxbc3rAvhf/LbG7tJUDzhqXyFnv3dtzLOPgCG/hODL7WFnsbwktkD7yUV0RrreP/l1PALq/YSg6VvjlA==}
+ 
++  lodash.includes@4.3.0:
++    resolution: {integrity: sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==}
++
++  lodash.isboolean@3.0.3:
++    resolution: {integrity: sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==}
++
++  lodash.isinteger@4.0.4:
++    resolution: {integrity: sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==}
++
++  lodash.isnumber@3.0.3:
++    resolution: {integrity: sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==}
++
++  lodash.isplainobject@4.0.6:
++    resolution: {integrity: sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==}
++
++  lodash.isstring@4.0.1:
++    resolution: {integrity: sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==}
++
+   lodash.memoize@4.1.2:
+     resolution: {integrity: sha512-t7j+NzmgnQzTAYXcsHYLgimltOV1MXHtlOWf6GjL9Kj8GK5FInw5JotxvbOs+IvV1/Dzo04/fCGfLVs7aXb4Ag==}
+ 
+   lodash.merge@4.6.2:
+     resolution: {integrity: sha512-0KpjqXRVvrYyCsX1swR/XTK0va6VQkQM6MNo7PqW77ByjAhoARA8EfrP1N4+KlKj8YS0ZUCtRT/YUuhyYDujIQ==}
+ 
++  lodash.once@4.1.1:
++    resolution: {integrity: sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==}
++
+   lodash@4.18.1:
+     resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
+ 
+   long@5.3.2:
+     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
+ 
+   lru-cache@10.4.3:
+     resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
+ 
+   lru-cache@5.1.1:
+@@ -3790,20 +3839,27 @@ snapshots:
+     dependencies:
+       '@types/istanbul-lib-report': 3.0.3
+ 
+   '@types/jest@29.5.14':
+     dependencies:
+       expect: 29.7.0
+       pretty-format: 29.7.0
+ 
+   '@types/json-schema@7.0.15': {}
+ 
++  '@types/jsonwebtoken@9.0.10':
++    dependencies:
++      '@types/ms': 2.1.0
++      '@types/node': 24.13.3
++
++  '@types/ms@2.1.0': {}
++
+   '@types/node@18.19.130':
+     dependencies:
+       undici-types: 5.26.5
+ 
+   '@types/node@24.13.3':
+     dependencies:
+       undici-types: 7.18.2
+ 
+   '@types/pg@8.20.0':
+     dependencies:
+@@ -4171,20 +4227,22 @@ snapshots:
+   bs-logger@0.2.6:
+     dependencies:
+       fast-json-stable-stringify: 2.1.0
+ 
+   bser@2.1.1:
+     dependencies:
+       node-int64: 0.4.0
+ 
+   buffer-crc32@1.0.0: {}
+ 
++  buffer-equal-constant-time@1.0.1: {}
++
+   buffer-from@1.1.2: {}
+ 
+   buffer@5.7.1:
+     dependencies:
+       base64-js: 1.5.1
+       ieee754: 1.2.1
+ 
+   buffer@6.0.3:
+     dependencies:
+       base64-js: 1.5.1
+@@ -4383,20 +4441,24 @@ snapshots:
+       tar-fs: 2.1.5
+     transitivePeerDependencies:
+       - supports-color
+ 
+   dotenv@16.6.1: {}
+ 
+   dotenv@17.4.2: {}
+ 
+   eastasianwidth@0.2.0: {}
+ 
++  ecdsa-sig-formatter@1.0.11:
++    dependencies:
++      safe-buffer: 5.2.1
++
+   effect@3.20.0:
+     dependencies:
+       '@standard-schema/spec': 1.1.0
+       fast-check: 3.23.2
+ 
+   electron-to-chromium@1.5.392: {}
+ 
+   emittery@0.13.1: {}
+ 
+   emoji-regex@8.0.0: {}
+@@ -5179,20 +5241,44 @@ snapshots:
+       dequal: 2.0.3
+ 
+   json-schema-traverse@0.4.1: {}
+ 
+   json-schema-traverse@1.0.0: {}
+ 
+   json-stable-stringify-without-jsonify@1.0.1: {}
+ 
+   json5@2.2.3: {}
+ 
++  jsonwebtoken@9.0.3:
++    dependencies:
++      jws: 4.0.1
++      lodash.includes: 4.3.0
++      lodash.isboolean: 3.0.3
++      lodash.isinteger: 4.0.4
++      lodash.isnumber: 3.0.3
++      lodash.isplainobject: 4.0.6
++      lodash.isstring: 4.0.1
++      lodash.once: 4.1.1
++      ms: 2.1.3
++      semver: 7.8.5
++
++  jwa@2.0.1:
++    dependencies:
++      buffer-equal-constant-time: 1.0.1
++      ecdsa-sig-formatter: 1.0.11
++      safe-buffer: 5.2.1
++
++  jws@4.0.1:
++    dependencies:
++      jwa: 2.0.1
++      safe-buffer: 5.2.1
++
+   keyv@4.5.4:
+     dependencies:
+       json-buffer: 3.0.1
+ 
+   kleur@3.0.3: {}
+ 
+   lazystream@1.0.1:
+     dependencies:
+       readable-stream: 2.3.8
+ 
+@@ -5216,24 +5302,38 @@ snapshots:
+   locate-path@5.0.0:
+     dependencies:
+       p-locate: 4.1.0
+ 
+   locate-path@6.0.0:
+     dependencies:
+       p-locate: 5.0.0
+ 
+   lodash.camelcase@4.3.0: {}
+ 
++  lodash.includes@4.3.0: {}
++
++  lodash.isboolean@3.0.3: {}
++
++  lodash.isinteger@4.0.4: {}
++
++  lodash.isnumber@3.0.3: {}
++
++  lodash.isplainobject@4.0.6: {}
++
++  lodash.isstring@4.0.1: {}
++
+   lodash.memoize@4.1.2: {}
+ 
+   lodash.merge@4.6.2: {}
+ 
++  lodash.once@4.1.1: {}
++
+   lodash@4.18.1: {}
+ 
+   long@5.3.2: {}
+ 
+   lru-cache@10.4.3: {}
+ 
+   lru-cache@5.1.1:
+     dependencies:
+       yallist: 3.1.1
+ 

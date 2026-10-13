@@ -1,0 +1,1843 @@
+# Review package: b3fb9f9deae33a0829dc91d6a78a72c4ce2befb6..HEAD
+
+## Commits
+06df4df docs: guard discriminator is a derived allowlist (owner decision 2026-07-17)
+80d2ca9 fix(sdk): admit length_equals, derive the allowlist by trace test (ADR-008)
+6d3c42e fix(sdk): guard rejects unknown check kinds, closing silent overwrite loss (ADR-008)
+730d646 feat(sdk): zod authoring surface with fail-closed conversion guard (REQ-CTR-008, ADR-006, ADR-008)
+72b5dad feat(sdk): fail-safe per-property appSettings visibility (REQ-CORE-008, ADR-008)
+b96caed docs(handoff): batch 2 complete (SDK contract forms, tasks 4-7)
+93e7764 feat(sdk): app manifest schema with per-type visibility ceiling (REQ-CTR-004, REQ-CTR-009, ADR-006)
+56636cb feat(sdk): contract version = SDK version, with range satisfaction (REQ-CTR-004)
+670e10d feat(sdk): core event registry with public lifecycle events (REQ-RT-010, REQ-RT-005)
+0666e8d feat(sdk): outward projection envelope carries no seq (REQ-RT-001, REQ-RT-011)
+dd0338e docs(handoff): batch 1 complete (SDK contract vocabulary, tasks 1-3)
+6c78db4 refactor(sdk): compose event-type regexes from shared segments (REQ-CTR-008)
+747c085 feat(sdk): structural event-type ownership by namespace (REQ-CTR-008, ADR-002)
+4ee2e63 feat(sdk): typed contract error codes, code-only wire form (REQ-SEC-006)
+bc86018 feat(sdk): visibility lattice with explicit exposure ceiling (REQ-CORE-005, REQ-CTR-009)
+
+## Files changed
+ HANDOFF.md                                         | 100 +++++++++------
+ .../2026-07-16-sdk-contract-core-design.md         |  68 ++++++++--
+ packages/sdk/package.json                          |   8 +-
+ packages/sdk/src/contract-version.contract.spec.ts |  50 ++++++++
+ packages/sdk/src/contract-version.ts               |  33 +++++
+ .../sdk/src/errors/error-codes.contract.spec.ts    |  51 ++++++++
+ packages/sdk/src/errors/error-codes.ts             |  42 ++++++
+ .../sdk/src/events/core-events.contract.spec.ts    |  50 ++++++++
+ packages/sdk/src/events/core-events.ts             |  50 ++++++++
+ .../sdk/src/events/event-type.contract.spec.ts     |  85 ++++++++++++
+ packages/sdk/src/events/event-type.ts              |  72 +++++++++++
+ packages/sdk/src/events/log-event.fixtures.ts      |   8 +-
+ packages/sdk/src/events/log-event.schema.ts        |  11 +-
+ .../src/events/projected-event.contract.spec.ts    |  28 ++++
+ .../sdk/src/events/projected-event.fixtures.ts     |  49 +++++++
+ packages/sdk/src/events/projected-event.schema.ts  |  18 +++
+ packages/sdk/src/index.ts                          |  13 ++
+ .../app-settings-visibility.contract.spec.ts       |  76 +++++++++++
+ .../sdk/src/manifest/app-settings-visibility.ts    |  71 +++++++++++
+ .../sdk/src/manifest/define-app.contract.spec.ts   | 142 +++++++++++++++++++++
+ packages/sdk/src/manifest/define-app.fixtures.ts   |  25 ++++
+ packages/sdk/src/manifest/define-app.ts            | 139 ++++++++++++++++++++
+ .../sdk/src/manifest/manifest.contract.spec.ts     |  24 ++++
+ packages/sdk/src/manifest/manifest.fixtures.ts     |  78 +++++++++++
+ packages/sdk/src/manifest/manifest.schema.ts       |  38 ++++++
+ .../sdk/src/visibility/visibility.contract.spec.ts |  34 +++++
+ packages/sdk/src/visibility/visibility.fixtures.ts |  20 +++
+ packages/sdk/src/visibility/visibility.ts          |  25 ++++
+ pnpm-lock.yaml                                     |  11 ++
+ 29 files changed, 1361 insertions(+), 58 deletions(-)
+
+## Diff
+diff --git a/HANDOFF.md b/HANDOFF.md
+index c5431cd..c4be0d0 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -1,63 +1,91 @@
+ # HANDOFF
+ 
+-**Date:** 2026-07-16
+-**Branch:** main (23 коммита впереди `origin/main`; в рабочем дереве — **незакоммиченный** план фазы 1, см. «Локальное состояние») — последний коммит `dce906a` docs(handoff): SDK contract design done, plan deferred to new session (2026-07-16)
++**Date:** 2026-07-17
++**Branch:** `phase-1-sdk-contract-core` (ответвлена от `main` на `b3fb9f9`; `main` впереди `origin/main` на 26 коммитов, push по-прежнему отложен) — последний коммит `93e7764` feat(sdk): app manifest schema with per-type visibility ceiling
+ 
+-**Фаза 0 закрыта, гейты зелёные. Амендмент v1.3 утверждён. Дизайн ядра SDK-контракта одобрен, оба спорных прочтения подтверждены владельцем. План реализации написан — исполнение не начиналось.** Этап продукта — MVP. Метод — AI-Driven / Specification-Driven, спецификация в `docs/` — источник истины.
++**Фаза 0 закрыта. Дизайн ядра SDK-контракта одобрен. План реализации исполняется по батчам: батчи 1 и 2 (задачи 1–7) ЗАКРЫТЫ, все гейты зелёные. Следующее — батч 3 (задачи 8–9 + финальное ревью ветки).** Этап продукта — MVP. Метод — AI-Driven / Specification-Driven, спецификация в `docs/` — источник истины.
+ 
+ ## Как войти в контекст за одно чтение
+ 
+ 1. `CLAUDE.md` — рамка проекта и интеграция с superpowers (правило «решено vs открыто»).
+-2. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, модель угроз, **§5 фазовый план 0→4**.
+-3. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1 и её критерии выхода относительно §5. Читать вместе с пакетом, не вместо.
+-4. `docs/sessions/2026-07-16-sdk-contract-core-design.md` — **дизайн ядра SDK-контракта**. Решения и отклонённые альтернативы (§4), манифест (§5), страж конверсии (§6), точки принуждения для последующих планов (§7), ошибки (§8), фикстуры (§9), состав пакета (§10).
+-5. `docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md` — **план реализации, следующее к исполнению**. 9 задач TDD; в конце — критерии выхода, «что план сознательно НЕ строит» и Self-Review.
+-6. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS, разметка оверинжиниринга, порядок контролей.
+-7. `docs/sessions/2026-07-11-phase-0-walking-skeleton-design.md` — дизайн фазы 0 (организующий принцип). Его §1.4 заменён амендментом v1.3; §1.5 (открытый вопрос пина схем) закрыт дизайном SDK §4.6.
++2. **`.superpowers/sdd/progress.md` — леджер исполнения. Читать сразу после CLAUDE.md.** Он держит статус каждой задачи, отклонения от плана и открытые ⚠️. Задачи, помеченные COMPLETE, — сделаны; не пере-диспатчить. **Леджера нет в git** (`.superpowers/` игнорируется) — он переживает смену сессии, но не `git clean -fdx`; в этом случае восстановление по `git log`.
++3. `docs/spec/normative-package-v1.2.md` — источник истины: 11 ADR, ~90 требований, модель угроз, **§5 фазовый план 0→4**.
++4. `docs/spec/amendment-v1.3-phase-remapping.md` — **утверждённая пере-разметка фаз**; меняет объём фазы 1 и её критерии выхода относительно §5. Читать вместе с пакетом, не вместо.
++5. `docs/sessions/2026-07-16-sdk-contract-core-design.md` — **дизайн ядра SDK-контракта**. Решения и отклонённые альтернативы (§4), манифест (§5), страж конверсии (§6), точки принуждения для последующих планов (§7), ошибки (§8), фикстуры (§9), состав пакета (§10).
++6. `docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md` — **исполняемый план**. 9 задач TDD; в конце — критерии выхода, «что план сознательно НЕ строит» и Self-Review.
++7. `docs/roadmap.md` — траектория прототип→MVP→платформа→BaaS, разметка оверинжиниринга, порядок контролей.
+ 
+ ## Два гейта над фазами
+ 
+-1. **Юрист** — до первого события с посторонними или призами. Список вопросов готов (`docs/legal/questions-for-lawyer.md`), заключение даёт живой юрист, не агент. Блокирует уверенный старт работы с реальными PII, не блокирует проектирование и реализацию фазы 1.
++1. **Юрист** — до первого события с посторонними или призами. Список вопросов готов (`docs/legal/questions-for-lawyer.md`), заключение даёт живой юрист, не агент. Блокирует уверенный старт работы с реальными PII, не блокирует реализацию фазы 1.
+ 2. **Первое живое событие** — до тяжёлых вложений в фазу 3 (rewards/лотерея). Квиз фазы 2 считает счёт сам.
+ 
+ ## Следующее действие
+ 
+-**Исполнять план** `docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md`. Владелец не выбрал режим — вопрос задан и остался без ответа: subagent-driven (свежий субагент на задачу, двухстадийное ревью между задачами) против inline через `superpowers:executing-plans`. Спросить снова перед стартом.
++**Исполнять батч 3 — задачи 8–9**, затем финальное ревью всей ветки и Критерии выхода плана.
+ 
+-Перед исполнением владелец собирался прочитать план — в нём **шесть решений сверх дизайна**, каждое помечено в тексте как `Design note ... recorded here for review` (перечень — в разделе сессии ниже). Ревью первой стадии сверяется с REQ-*, перечисленными в шапке плана.
++Режим — **subagent-driven** (решение владельца 2026-07-16): свежий субагент на задачу, двухстадийное ревью между задачами. Навык: `superpowers:subagent-driven-development`. Владелец решил гонять **по одному батчу на сессию**.
+ 
+-## Session 2026-07-16 (вторая сессия дня)
++Подготовка уже сделана, переделывать не надо:
++- **Брифы всех задач извлечены** в `.superpowers/sdd/p1/task-N-brief.md` (N = 1…9). Скрипт: `.../superpowers/*/skills/subagent-driven-development/scripts/task-brief`.
++- Отчёты имплементеров — туда же, `task-N-report.md`. Пакеты ревью — `scripts/review-package BASE HEAD`, пишет в `.superpowers/sdd/`.
++- Фаза 0 использовала те же имена файлов — её брифы лежат в `.superpowers/sdd/` (корень), фаза 1 в `p1/`. Не путать. Леджер фазы 0 — `progress-phase-0-archive.md`.
+ 
+-### Что сделано
++**BASE для ревью каждой задачи — коммит перед её имплементером, не `HEAD~1`** (задача может дать несколько коммитов, как Task 3).
+ 
+-- **Оба неподтверждённых прочтения дизайна закрыты владельцем** («оба да»): §4.6 (zod — поверхность авторства, JSON Schema — регистрируемый артефакт) и §1 (исключение контракта rewards; расхождение §6.1 против §5 разрешено в пользу §5). Прошлый handoff держал их открытыми как условие для плана.
+-- **Написан план реализации ядра SDK-контракта** — 9 задач TDD, каждая с независимо тестируемым результатом и коммитом с разметкой REQ-*.
++**Финальное ревью ветки** получает пакет `scripts/review-package $(git merge-base main HEAD) HEAD` и **список Minor-находок из леджера** — иначе роллап, который никто не читает, это молчаливый выброс.
+ 
+-### Rationale и находки, которых нет в документах
++## Разбиение на батчи (решение владельца 2026-07-16)
+ 
+-**Прочтение §4.6 оказалось прочнее, чем заявлял дизайн.** Дизайн подаёт снапшот JSON Schema как «прочтение ADR-006, которое это предполагает». На деле оговорка самого ADR-006 гласит: схемы настроек и типов событий приложения «переносятся как **сериализуемая JSON Schema внутри манифеста**», а zod-схемы модуль экспортирует «дополнительно». То есть снапшот — почти буква ADR, а не вольная интерпретация. Если кто-то вернётся к этому спору — начинать отсюда.
++По зависимостям, не поровну по числу задач. Порядок из плана: 1→2→3 фундамент; 4 и 5 зависят от 3; 6 — только от 2; 7 — от 1 и 3; 8 — от 1, 2, 7; 9 — от всего.
+ 
+-**Эмпирика zod перепроверена запуском (zod 4.4.3), и §3.3 дизайна оказался неточен.** Все четыре факта §3 воспроизвелись, но дизайн говорит только, что `.refine()` «лежит в `_zod.def.checks`». Этого недостаточно: `.min(1)` кладёт проверку туда же. Страж, написанный по букве §3.3, отверг бы любую схему с `.min()` — то есть почти все легальные. Настоящий дискриминатор — **`check === 'custom'`** (так помечены `.refine()`/`.superRefine()`), тогда как штатные проверки несут `min_length` / `greater_than` / `string_format`. Обход дерева делает **хук `override`**: он вызывается на каждом подузле, включая вложенные и внутри массивов, — ручная рекурсия не нужна и пропустила бы формы. Страж и матрица фикстур §9 прогнаны целиком до записи в план: 7 непредставимых конструкций отвергнуты, 5 легальных прошли, `.meta({'x-visibility'})` переживает конверсию даже с подставленным хуком.
++- **Батч 1 — словарь: задачи 1–3.** ✅ ЗАКРЫТ 2026-07-17.
++- **Батч 2 — формы: задачи 4–7.** ✅ ЗАКРЫТ 2026-07-17.
++- **Батч 3 — стражи: задачи 8–9 + финальное ревью ветки + Критерии выхода плана.** ⬅ следующий. Fail-safe чтение видимости `appSettings`; `defineApp` со стражем конверсии.
+ 
+-**Шесть решений плана сверх дизайна** (каждое обосновано в самом плане, здесь — перечень для ревью):
+-1. Три файла сверх §10 (`events/event-type.ts`, `manifest/app-settings-visibility.ts` + фикстуры/спеки) — дизайн формулирует правила §4.1 и §5 прозой, но не даёт им файла.
+-2. `CONTRACT_VERSION = 1.0.0`, `packages/sdk/package.json` поднимается с `0.0.0` (REQ-CTR-004: версия SDK = версия контракта). Не `0.1.0`: по semver `^0.1.0` пропускает только патчи.
+-3. Проекция — `strictObject` (лишний ключ отвергается, а не срезается молча).
+-4. Lifecycle-события выведены из REQ-RT-005: `activated`/`completed`/`cancelled`; `core.room.created` сознательно нет — создание не переход.
+-5. Фикстура фазы 0 чинится: тип `room.created` по правилу §4.1 разбирается как приложение с `appId: "room"`.
+-6. Зависимость `semver` добавляется в `packages/sdk` (границу `sdk-is-leaf` не трогает — правило про workspace-пакеты).
++Шов между 7 и 8 намеренный: 7 — это *форма* манифеста (zod-схема), 8–9 — *правила*, которые её охраняют. Задача 9 (страж конверсии) — самая тяжёлая в плане, ей дан запас сессии.
+ 
+-### Локальное состояние (не в git)
++## Состояние батча 2 (задачи 4–7)
+ 
+-- **`docs/sessions/2026-07-16-sdk-contract-core-implementation-plan.md` не закоммичен** — лежит untracked в рабочем дереве. `/handoff` коммитит только HANDOFF.md, поэтому план остался за бортом. **Закоммитить первым делом** (`docs: add SDK contract core implementation plan (TDD, task-by-task)`), иначе следующая сессия прочтёт про него здесь и не найдёт в git.
+-- Ничего не запущено: нет процессов, контейнеров, БД. Пробы zod писались в scratchpad вне репозитория и ничего за собой не оставили (`git status` чист, кроме плана).
+-- Никаких side-effects на внешние системы: ничего не задеплоено и не запушено.
++Коммиты: `0666e8d` (Task 4) → `670e10d` (Task 5) → `56636cb` (Task 6) → `93e7764` (Task 7). Все четыре ревью чистые; у Task 7 — вообще без находок.
+ 
+-### Осталось недоделанным
++- **Task 4 — конверт внешней проекции.** `events/projected-event.schema.ts`: `z.strictObject` ровно из `(type, payload, actorId)`. REQ-RT-011(a) держится **структурно** — `seq`/`visibility`/курсора нет в форме, экспонировать нечего. Ревьюер проверил, что тест на набор ключей не вырожден (zod 4.4.3 действительно отдаёт `.shape` у `strictObject`), и протрассировал все 5 негативных фикстур.
++- **Task 5 — реестр core-событий.** `events/core-events.ts`: ровно переходы REQ-RT-005 (`room.activated`/`completed`/`cancelled`), все `public` по REQ-RT-010, активация несёт пин `(appId, manifestVersion)` по REQ-RT-004. `core.room.created` намеренно нет — создание не переход.
++- **Task 6 — версия контракта.** `contract-version.ts`: `CONTRACT_VERSION = '1.0.0'`, `packages/sdk/package.json` поднят на `1.0.0` (REQ-CTR-004: версия SDK = версия контракта; тест читает файл через `fs`, так что два источника одной истины не разъедутся). Добавлен `semver`.
++- **Task 7 — схема манифеста.** `manifest/manifest.schema.ts`: `strictObject`, обязательный потолок видимости на тип (REQ-CTR-009), `contractRange` через `validRange`, `appSettings` и схемы событий как сериализуемая JSON Schema (ADR-006). Поля `capabilities` нет, и фикстура это доказывает.
+ 
+-- **План не исполнялся** — ни одной задачи, кода нет. Режим исполнения не выбран (см. «Следующее действие»).
+-- **Находка про `check === 'custom'` живёт только в плане**, а дизайн-док §3.3 — заявленная точка входа — остался неточен. Предложено перенести уточнение в §3; владелец не ответил. Без переноса следующая сессия прочтёт §3.3 и повторит ошибку.
+-- **`origin/main` отстаёт на 23 коммита** — push отложен, решение владельца.
++**Гейты на `93e7764`, прогнаны первой рукой:** typecheck / lint / test / build / boundary-check / guardrails — все зелёные. boundary-check: `no dependency violations found (108 modules, 188 dependencies cruised)` (было 75/118 на батче 1 — SDK вырос, правило листа держится). guardrails: все три пробы стреляют (`All guardrails verified alive`) — принуждение живо, а не просто «нарушений нет». Пакет SDK: 88/88, 8 сюит.
++
++### Отклонения от буквы плана (два, решены агентом — владелец делегировал 2026-07-17 «на твоё усмотрение»)
++
++Оба найдены pre-flight-сканом до диспатча, оба — «план мандатит то, что рубрика ревью считает дефектом». **Текст плана НЕ правился** — сверяющий план с кодом найдёт ровно их (плюс фикс регулярок батча 1). Полное обоснование — в леджере.
++
++1. **Task 6: план сам с собой не сходился.** Его тест требовал `isContractRangeSatisfied('') === false`, а его же реализация возвращала `true` — semver читает `validRange('')` как `'*'`. Задача не могла позеленеть. Починена реализация, тест устоял и расширен на `'*'`; главенствовало намерение, записанное в комментарии самого плана («never silently passes as "no constraint"»). Страж проверяет **нормализованный** диапазон, а не написание: в `'*'` нормализуются десять написаний (`''`, `'*'`, `'x'`, `'X'`, `'>=0.0.0'`, `'*.*.*'`, `' '`, `'||'`, `'1 || *'`, `'x.x.x'`), и проверка `range === ''` ловила бы одно из десяти.
++2. **Task 5: тест-тавтология убран.** `isWithinCeiling(x, x)` — это `RANK[x] <= RANK[x]`, истинно всегда; тест не мог упасть ни при каком содержимом реестра. Избыточен дважды: соседний `declares %s public` уже перебирает все ключи, а все 9 пар решётки покрыты Task 1.
++
++### Дефект плана, найденный в батче 2 — заденет задачи 8–9
++
++**Флаг `-v` в командах плана не работает.** Jest 29.7.0 отвергает его (`Unrecognized option "v"`) и **не запускает тестов вовсе**. Опасность точечная: на Step 2 агент *ждёт* провала, а ошибка разбора аргументов выглядит как провал — можно записать фальшивый RED и не прогнать тест ни разу. **Проверено: вреда нет** — RED-доказательства задач 4, 5, 6, 7 показывают настоящий `TS2307: Cannot find module`, каждый имплементер сам заметил и перешёл на `--verbose`. **Для батча 3:** брать `--verbose`, и убеждаться, что RED называет отсутствующий модуль, а не жалуется на argv.
++
++## Закрытое ⚠️ батча 1 (о подделке неймспейса)
++
++Ревьюер Task 3 поднял: `composeEventType(namespace, shortName)` принимает `namespace` свободной строкой без валидации, так что «подделать чужой неймспейс невозможно» держится только дисциплиной вызывающих. Задачи 4/5/7 были первыми вызывающими — **проверено кодом, а не ожиданием:**
++
++- Task 4 — не вызывающий: импортирует `eventTypeSchema`, то есть **валидирует** тип, а не **конструирует**.
++- Task 5 — вызывающий, но подставляет `CORE_NAMESPACE` (`const 'core'`), не ввод.
++- Task 7 — не вызывающий: регистрирует **короткие** имена через `shortEventNameSchema`.
++
++Во всём SDK единственный нетестовый вызов — `core-events.ts:47`, константный. **Внутри SDK утверждение держится.** Но см. открытое №1 ниже: сигнатура не изменилась, и первый вызывающий со стороны ядра будет уже в другом плане.
++
++## Открытые ⚠️ для батча 3 / финального ревью
++
++1. **Сигнатура `composeEventType` по-прежнему берёт `namespace: string`.** Изнутри SDK закрыть нельзя: первый вызывающий со стороны ядра (сборщик проекции, коммит-пайплайн) лежит в **более позднем плане**, и именно там ввод приложения может дотянуться. Что это принуждает — §7 дизайна.
++2. **Диапазон контракта без верхней границы проходит.** `'>=1.0.0'` допускает контракт 2.0.0; `'>=0.0.0-0'` не ограничивает практически ничего и при этом не нормализуется в `'*'`, так что страж Task 6 его не ловит. Требует ли REQ-CTR-004 от манифеста верхней границы — **вопрос дизайна контракта, который план не ставит**; отклонение №1 его намеренно не закрывало. **Вопрос владельцу.**
++3. **Роллап Minor-находок** (задачи 1, 4, 5, 6) копится в леджере, раздел «Minor findings». Самая содержательная: `payload: z.record(z.string(), z.unknown())` не принуждает структурно REQ-CTR-002 («сетевой формат, JSON-сериализуемо») — пропустит функцию, `Date`, `Map`, `BigInt`. Не регрессия батча 2 (унаследовано из фазы 0), но Task 4 — это место, где определена настоящая граница к клиенту. Кандидат: общая рекурсивная `jsonValueSchema` для `log-event` и `projected-event`. **Разбирает финальное ревью ветки.**
++
++## Осталось недоделанным (шире батчей)
++
++- **`origin/main` отстаёт на 26 коммитов**, ветка `phase-1-sdk-contract-core` не пушена — push остаётся решением владельца (стоит так с фазы 0).
+ - **Вопросы юристу не заданы** — гейт 1 открыт, действие вне агента.
+-- **Живой boot артефакта** (`docker compose up` → `/health/ready` против настоящей БД) **не прогонялся** — критерий фазы 0 подтверждён e2e-тестами с замоканной БД и коммитом `43f425a`, но не живым запуском.
+-- **Условие пересмотра §4.4 дизайна** (отказ от курсора держится на малости *проекции участника*, не лога) — сформулировано в самом дизайне §4.4. Механика с крупной публичной проекцией обрушит основание, не затронув ни одной нормы.
++- **Живой boot артефакта** прогонялся на закрытии фазы 0 (`docker compose up --build` → `/health/ready` зелёный против настоящей БД). В фазе 1 не трогался: SDK — лист, рантайма не касается.
++- **Условие пересмотра §4.4 дизайна** (отказ от курсора держится на малости *проекции участника*, не лога) — механика с крупной публичной проекцией обрушит основание, не затронув ни одной нормы.
+diff --git a/docs/sessions/2026-07-16-sdk-contract-core-design.md b/docs/sessions/2026-07-16-sdk-contract-core-design.md
+index 0c1b96d..42f49be 100644
+--- a/docs/sessions/2026-07-16-sdk-contract-core-design.md
++++ b/docs/sessions/2026-07-16-sdk-contract-core-design.md
+@@ -48,25 +48,33 @@ REQ-CORE-007, REQ-RT-007, REQ-RT-009, REQ-RT-012, REQ-RT-014, REQ-RT-016, REQ-DE
+ воспроизводятся пробой на `z.toJSONSchema` из контекста пакета `packages/sdk`.
+ 
+ 1. **`z.toJSONSchema` молча теряет `.refine()`.** Схема `{a, b}` с правилом `a < b`
+    конвертируется без следа правила: ни ошибки, ни предупреждения. Вложенный `.refine()`
+    теряется так же.
+ 2. **Непредставимые типы, наоборот, бросают:** `date`, `bigint`, `.transform()` →
+    исключение. Флаг `unrepresentable: 'throw'` на refine **не** срабатывает — он про типы,
+    не про проверки. Обычные проверки (`.min(1)` → `minLength: 1`) доезжают штатно.
+ 3. **`.refine()` детектируется — но признак не «лежит в `_zod.def.checks`».** Туда же ложится
+    и `.min(1)`, поэтому страж, написанный по этому признаку, отверг бы почти любую легальную
+-   схему. Дискриминатор — **`check === 'custom'`**: так помечены `.refine()`/`.superRefine()`,
+-   тогда как штатные проверки несут `min_length` / `greater_than` / `string_format`. Обход
+-   дерева даёт **хук `override`** — он вызывается на каждом подузле, включая вложенные и внутри
+-   массивов; ручная рекурсия не нужна и пропустила бы формы. Значит fail-closed страж
+-   строится (§6).
++   схему. Обход дерева даёт **хук `override`** — он вызывается на каждом подузле, включая
++   вложенные и внутри массивов; ручная рекурсия не нужна и пропустила бы формы. Значит
++   fail-closed страж строится (§6).
++
++   > **Правка 2026-07-17 — решение владельца, основание вскрыто реализацией.** Здесь стоял
++   > дискриминатор **`check === 'custom'`**, и он был верен ровно наполовину: он отсекал
++   > ложные срабатывания (`.min(1)` лежит в тех же `checks`), но не видел ложных пропусков.
++   > `overwrite`-проверки — `.trim()`, `.toLowerCase()`, `.toUpperCase()`, `.normalize()` —
++   > теряются так же молча и проходили страж насквозь: `z.string().trim().min(1)` даёт
++   > `{"type":"string","minLength":1}`, и пробельная строка проходит проверку, которую автор
++   > схемы считал закрытой. Перечень «что теряется молча» в пунктах 1–2 точен, но **не
++   > исчерпывающ**, а стражу нужна исчерпаемость. Признак теперь **выводится, а не
++   > перечисляется** — см. §6.
+ 4. **`.meta()` переживает конверсию.** `z.string().meta({ 'x-visibility': 'public' })` даёт
+    в JSON Schema свойство с `x-visibility: "public"`; неразмеченное свойство не получает
+    аннотации вообще. Модель ADR-008 ложится нативно.
+ 
+ **Следствие из 1–3:** конверсия fail-open ровно там, где приложение уверено, что ядро принуждает
+ его правило. Это тот же класс дефекта, против которого написан ADR-008, только про ограничения
+ payload, а не про видимость. Отсюда страж §6.
+ 
+ ## 4. Решения
+ 
+@@ -217,30 +225,66 @@ ADR-008 получается сам собой: чтобы данные утек
+ забывчивость закрывает, а не открывает.
+ 
+ **Поля `capabilities` нет.** ADR-003 подключает rewards через capability манифеста, но rewards —
+ фаза 3; по CLAUDE.md §2.3 точка расширения фиксируется словами в ADR, не пустым полем. В фазе 3
+ добавляется аддитивно.
+ 
+ ## 6. Страж конверсии
+ 
+ При регистрации манифеста SDK **отклоняет манифест типизированной ошибкой**
+ (`SCHEMA_NOT_REPRESENTABLE`), если схема несёт конструкцию, которая не доедет до JSON Schema:
+-custom `.refine()`, `.transform()`, `date`, `bigint`. Обычные проверки (`.min(1)` → `minLength`)
+-доезжают штатно и не трогаются — страж бьёт только по тому, что теряется молча.
+-
+-Признак custom-проверки — `check === 'custom'`, не сам факт наличия в `_zod.def.checks` (§3.3):
+-штатные проверки лежат там же, и страж по факту наличия закрыл бы ворота перед легальными схемами.
++`.refine()`/`.superRefine()`, `overwrite`-проверки (`.trim()`, `.toLowerCase()`), `.transform()`,
++`date`, `bigint`. Обычные проверки (`.min(1)` → `minLength`) доезжают штатно и не трогаются —
++страж бьёт по тому, что теряется молча, и по тому, чей вид он не опознал.
++
++**Признак — аллоу-лист, не дени-лист** (решение владельца 2026-07-17). Страж отвергает проверку,
++чей вид **не входит** в список заведомо представимых: неизвестное = непредставимое. Дени-лист
++из `custom` закрывал бы только известное на сегодня и оставался бы fail-open к любому виду,
++который zod добавит завтра, — ровно так сквозь него прошли `overwrite`-проверки (§3.3). Штатные
++проверки (`.min(1)` → `minLength`) в списке и не трогаются: правка §3.3 против «признака по факту
++наличия в `_zod.def.checks`» этим не откатывается, а исполняется.
++
++Список **выводится проверкой на след**, а не перечисляется на глаз. Вид представим тогда и только
++тогда, когда конверсия схемы **с** проверкой отличается от конверсии той же основы **без** неё;
++нет следа — молчаливая потеря. Выведено прогоном 25 конструкций на zod 4.4.3:
++
++| Вид | След есть — порождается |
++|---|---|
++| `min_length` | `.min(1)`, `z.array().min(1)`, `.nonempty()` |
++| `max_length` | `.max(9)`, `z.array().max(3)` |
++| `length_equals` | `.length(5)` — на строке и на массиве |
++| `string_format` | `.regex`, `.startsWith`, `.endsWith`, `.includes`, `.lowercase` |
++| `number_format` | `.int()` |
++| `greater_than` | `.min(0)`, `.gt(0)`, `.positive()` |
++| `less_than` | `.max(3)` |
++| `multiple_of` | `.multipleOf(5)` |
++
++Следа нет, отвергается: **`custom`** (`.refine()`/`.superRefine()`) и **`overwrite`** (`.trim()`,
++`.toLowerCase()`, `.toUpperCase()`, `.normalize()`). `z.email()` / `z.uuid()` / `z.url()` /
++`z.iso.datetime()` проверок не порождают вовсе и конвертируются со следом — аллоу-листа не
++касаются.
++
++Цена принята сознательно: легальный вид проверки, добавленный будущим zod, будет отвергнут, пока
++список не пополнят. Это **отказ, а не дыра** — он громкий, виден автору сразу и не даёт ядру
++принять схему, правило которой до него не доехало.
++
++**Второй механизм, для конструкций без проверок вовсе.** `z.custom()`, `z.set()`, `z.map()`,
++`z.nan()`, `z.symbol()`, `z.undefined()`, `z.void()` несут пустой `checks` и сквозь проверку видов
++проходят по построению. Их ловит zod сам — бросает под дефолтным `unrepresentable: 'throw'`, — а
++страж перезаворачивает исключение в типизированный код. Между двумя механизмами не проваливается
++ничего.
+ 
+ **Хрупкость и её лечение:** страж опирается на `_zod.def.checks` — внутреннее API zod.
+ Лечится принципом самого проекта: **страж проверяется фикстурой** — схема с `.refine()` обязана
+-быть отклонена. Обновление zod, сломавшее детекцию, уронит CI громко, вместо того чтобы тихо
+-открыть ворота. Гейт проверяет гейт, как в фазе 0.
++быть отклонена, а каждый вид из таблицы выше обязан быть пропущен. Обновление zod, сломавшее
++детекцию, уронит CI громко, вместо того чтобы тихо открыть ворота. Гейт проверяет гейт, как в
++фазе 0.
+ 
+ ## 7. Точки принуждения (ограничения для последующих планов)
+ 
+ **Регистрация приложения:** манифест валидируется zod → проверка совместимости `contractRange`
+ (REQ-CTR-004) → конверсия zod→JSON Schema со стражем (§6) → снапшот под ключом
+ `(appId, manifestVersion)`.
+ 
+ **Запись `appSettings`:** валидация JSON Schema из манифеста; скомпилированный валидатор
+ кэшируется по `(appId, manifestVersion)` (REQ-CORE-007). Повторно при `DRAFT → ACTIVE`.
+ 
+diff --git a/packages/sdk/package.json b/packages/sdk/package.json
+index e49c147..75a2a53 100644
+--- a/packages/sdk/package.json
++++ b/packages/sdk/package.json
+@@ -1,21 +1,25 @@
+ {
+   "name": "@mymozhem/sdk",
+-  "version": "0.0.0",
++  "version": "1.0.0",
+   "private": true,
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
+     "typecheck": "tsc -p tsconfig.json --noEmit",
+     "lint": "eslint src",
+     "test": "jest"
+   },
+-  "dependencies": { "zod": "^4.0.0" },
++  "dependencies": {
++    "semver": "^7.8.5",
++    "zod": "^4.0.0"
++  },
+   "devDependencies": {
+     "@types/jest": "^29.5.14",
+     "@types/node": "^24.0.0",
++    "@types/semver": "^7.7.1",
+     "jest": "^29.7.0",
+     "ts-jest": "^29.2.5",
+     "typescript": "^5.7.0"
+   }
+ }
+diff --git a/packages/sdk/src/contract-version.contract.spec.ts b/packages/sdk/src/contract-version.contract.spec.ts
+new file mode 100644
+index 0000000..a871d6c
+--- /dev/null
++++ b/packages/sdk/src/contract-version.contract.spec.ts
+@@ -0,0 +1,50 @@
++import { readFileSync } from 'node:fs';
++import { join } from 'node:path';
++import { valid } from 'semver';
++import {
++  CONTRACT_VERSION,
++  assertContractRangeSatisfied,
++  isContractRangeSatisfied,
++} from './contract-version';
++import { ContractError } from './errors/error-codes';
++
++describe('contract version', () => {
++  it('is a valid semver version', () => {
++    expect(valid(CONTRACT_VERSION)).not.toBeNull();
++  });
++
++  // REQ-CTR-004: "Версия SDK = версия контракта". Two sources of the same truth
++  // drift; this test is what keeps them one.
++  it('equals the SDK package version', () => {
++    const pkg = JSON.parse(
++      readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
++    ) as { version: string };
++    expect(pkg.version).toBe(CONTRACT_VERSION);
++  });
++
++  it.each(['^1.0.0', '>=1.0.0 <2.0.0', '1.x'])('accepts a compatible range: %s', (range) => {
++    expect(isContractRangeSatisfied(range)).toBe(true);
++  });
++
++  it.each(['^2.0.0', '>=1.5.0', '0.9.x'])('rejects an incompatible range: %s', (range) => {
++    expect(isContractRangeSatisfied(range)).toBe(false);
++  });
++
++  it.each(['garbage!!', '', 'not-a-range', '*'])(
++    'rejects a range that constrains nothing or is malformed: %s',
++    (range) => {
++      expect(isContractRangeSatisfied(range)).toBe(false);
++    },
++  );
++
++  it('asserts with a typed error the core can return outward', () => {
++    expect(() => assertContractRangeSatisfied('^1.0.0')).not.toThrow();
++    try {
++      assertContractRangeSatisfied('^2.0.0');
++      throw new Error('should have thrown');
++    } catch (err) {
++      expect(err).toBeInstanceOf(ContractError);
++      expect((err as ContractError).code).toBe('CONTRACT_VERSION_INCOMPATIBLE');
++    }
++  });
++});
+diff --git a/packages/sdk/src/contract-version.ts b/packages/sdk/src/contract-version.ts
+new file mode 100644
+index 0000000..b1c587d
+--- /dev/null
++++ b/packages/sdk/src/contract-version.ts
+@@ -0,0 +1,33 @@
++import { satisfies, validRange } from 'semver';
++import { ContractError } from './errors/error-codes';
++
++// The version of the core↔module contract. REQ-CTR-004: the SDK version IS the
++// contract version — packages/sdk/package.json is kept equal to this by a contract
++// test. Versioning from day one is the enforcement mechanism of the boundary, not
++// preparation for a future consumer (ADR-002).
++export const CONTRACT_VERSION = '1.0.0';
++
++// A manifest declares the range of contract versions it is compatible with; the
++// core checks it at registration (REQ-CTR-004). We normalize the range with semver
++// before judging it, rather than pattern-matching the input spelling: many strings
++// normalize to "any version" ('', '*', 'x', '>=0.0.0', and others), and checking the
++// normalized form catches all of them instead of an incomplete enumeration of
++// spellings. A range that constrains nothing has not declared compatibility — it has
++// opted out of the check REQ-CTR-004 requires — so it is refused, the same as a
++// range that fails to parse at all. It never silently passes as "no constraint".
++export const isContractRangeSatisfied = (range: string): boolean => {
++  const normalized = validRange(range);
++  if (normalized === null || normalized === '*') return false;
++  return satisfies(CONTRACT_VERSION, range);
++};
++
++// Exported so the registration service in the later core plan cannot express this
++// check any other way than with the typed error the norm requires.
++export const assertContractRangeSatisfied = (range: string): void => {
++  if (!isContractRangeSatisfied(range)) {
++    throw new ContractError(
++      'CONTRACT_VERSION_INCOMPATIBLE',
++      `manifest requires contract range "${range}", core provides ${CONTRACT_VERSION}`,
++    );
++  }
++};
+diff --git a/packages/sdk/src/errors/error-codes.contract.spec.ts b/packages/sdk/src/errors/error-codes.contract.spec.ts
+new file mode 100644
+index 0000000..b51736f
+--- /dev/null
++++ b/packages/sdk/src/errors/error-codes.contract.spec.ts
+@@ -0,0 +1,51 @@
++import {
++  CONTRACT_ERROR_CODES,
++  ContractError,
++  contractErrorCodeSchema,
++  contractErrorPayloadSchema,
++} from './error-codes';
++
++describe('contract errors', () => {
++  it('exports exactly the codes named by the design §8', () => {
++    expect([...CONTRACT_ERROR_CODES]).toEqual([
++      'MANIFEST_INVALID',
++      'CONTRACT_VERSION_INCOMPATIBLE',
++      'SCHEMA_NOT_REPRESENTABLE',
++      'EVENT_UNKNOWN_TYPE',
++      'EVENT_PAYLOAD_INVALID',
++      'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
++      'EVENT_PAYLOAD_TOO_LARGE',
++      'EVENT_RATE_LIMITED',
++      'ROOM_LOG_SEALED',
++      'ROOM_SETTINGS_FROZEN',
++    ]);
++  });
++
++  it('rejects an unknown code', () => {
++    expect(contractErrorCodeSchema.safeParse('KABOOM').success).toBe(false);
++  });
++
++  it('carries its code and stays a real Error', () => {
++    const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
++    expect(err).toBeInstanceOf(Error);
++    expect(err.code).toBe('EVENT_UNKNOWN_TYPE');
++  });
++
++  // REQ-SEC-006: outward there is a code and nothing else — no message, no stack.
++  it('projects outward as a bare code, leaking neither message nor stack', () => {
++    const err = new ContractError('EVENT_UNKNOWN_TYPE', 'internal detail: table app_registry empty');
++    const payload = err.toPayload();
++
++    expect(payload).toEqual({ code: 'EVENT_UNKNOWN_TYPE' });
++    expect(contractErrorPayloadSchema.safeParse(payload).success).toBe(true);
++
++    const serialized = JSON.stringify(payload);
++    expect(serialized).not.toContain('internal detail');
++    expect(serialized).not.toContain('at ');
++  });
++
++  it('rejects an outward payload that smuggles extra fields', () => {
++    const smuggled = { code: 'EVENT_UNKNOWN_TYPE', message: 'table app_registry empty' };
++    expect(contractErrorPayloadSchema.safeParse(smuggled).success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/errors/error-codes.ts b/packages/sdk/src/errors/error-codes.ts
+new file mode 100644
+index 0000000..e143668
+--- /dev/null
++++ b/packages/sdk/src/errors/error-codes.ts
+@@ -0,0 +1,42 @@
++import { z } from 'zod';
++
++// Typed error codes crossing the contract boundary (REQ-SEC-006, design §8).
++// The SDK exports them because a module is required to be able to parse them.
++export const CONTRACT_ERROR_CODES = [
++  'MANIFEST_INVALID',
++  'CONTRACT_VERSION_INCOMPATIBLE',
++  'SCHEMA_NOT_REPRESENTABLE',
++  'EVENT_UNKNOWN_TYPE',
++  'EVENT_PAYLOAD_INVALID',
++  'EVENT_VISIBILITY_WEAKER_THAN_DECLARED',
++  'EVENT_PAYLOAD_TOO_LARGE',
++  'EVENT_RATE_LIMITED',
++  'ROOM_LOG_SEALED',
++  'ROOM_SETTINGS_FROZEN',
++] as const;
++
++export type ContractErrorCode = (typeof CONTRACT_ERROR_CODES)[number];
++export const contractErrorCodeSchema = z.enum(CONTRACT_ERROR_CODES);
++
++// The wire form of an error: a code, and deliberately nothing else. strictObject so
++// that a well-meaning `message` field cannot be added without failing this contract
++// (REQ-SEC-006 bans forwarding raw error.message outward).
++export const contractErrorPayloadSchema = z.strictObject({
++  code: contractErrorCodeSchema,
++});
++export type ContractErrorPayload = z.infer<typeof contractErrorPayloadSchema>;
++
++export class ContractError extends Error {
++  readonly code: ContractErrorCode;
++
++  constructor(code: ContractErrorCode, message: string) {
++    super(message);
++    this.code = code;
++    this.name = 'ContractError';
++  }
++
++  // The message stays server-side, for logs and tests; only the code goes out.
++  toPayload(): ContractErrorPayload {
++    return { code: this.code };
++  }
++}
+diff --git a/packages/sdk/src/events/core-events.contract.spec.ts b/packages/sdk/src/events/core-events.contract.spec.ts
+new file mode 100644
+index 0000000..dec5690
+--- /dev/null
++++ b/packages/sdk/src/events/core-events.contract.spec.ts
+@@ -0,0 +1,50 @@
++import { CORE_EVENTS, coreEventType, isCoreEventName } from './core-events';
++import { resolveTypeOwner } from './event-type';
++
++describe('core event registry', () => {
++  it('registers exactly the lifecycle transitions of REQ-RT-005', () => {
++    expect(Object.keys(CORE_EVENTS).sort()).toEqual([
++      'room.activated',
++      'room.cancelled',
++      'room.completed',
++    ]);
++  });
++
++  // REQ-RT-010: lifecycle transitions are emitted as public events.
++  it.each(Object.keys(CORE_EVENTS))('declares %s public (REQ-RT-010)', (name) => {
++    expect(CORE_EVENTS[name as keyof typeof CORE_EVENTS].visibility).toBe('public');
++  });
++
++  it('composes full types inside the core namespace, owned by the core', () => {
++    expect(coreEventType('room.activated')).toBe('core.room.activated');
++    expect(resolveTypeOwner(coreEventType('room.activated'))).toEqual({
++      kind: 'core',
++      shortName: 'room.activated',
++    });
++  });
++
++  it('recognises its own short names and nothing else', () => {
++    expect(isCoreEventName('room.activated')).toBe(true);
++    expect(isCoreEventName('answer.submitted')).toBe(false);
++  });
++
++  // REQ-RT-004: ACTIVE freezes the pin, so the activation event carries it.
++  it('validates the activation payload as the pin (appId, manifestVersion)', () => {
++    const schema = CORE_EVENTS['room.activated'].schema;
++    expect(schema.safeParse({ appId: 'quiz', manifestVersion: 1 }).success).toBe(true);
++    expect(schema.safeParse({ appId: 'quiz' }).success).toBe(false);
++    expect(schema.safeParse({ appId: 'core', manifestVersion: 1 }).success).toBe(false);
++    expect(schema.safeParse({ appId: 'quiz', manifestVersion: 0 }).success).toBe(false);
++  });
++
++  it('rejects payload on the terminal transitions', () => {
++    expect(CORE_EVENTS['room.completed'].schema.safeParse({}).success).toBe(true);
++    expect(CORE_EVENTS['room.completed'].schema.safeParse({ reason: 'x' }).success).toBe(false);
++  });
++
++  it('declares a positive schemaVersion for every type', () => {
++    for (const def of Object.values(CORE_EVENTS)) {
++      expect(def.version).toBeGreaterThan(0);
++    }
++  });
++});
+diff --git a/packages/sdk/src/events/core-events.ts b/packages/sdk/src/events/core-events.ts
+new file mode 100644
+index 0000000..3987fe1
+--- /dev/null
++++ b/packages/sdk/src/events/core-events.ts
+@@ -0,0 +1,50 @@
++import { z } from 'zod';
++import type { Visibility } from '../visibility/visibility';
++import { CORE_NAMESPACE, appIdSchema, composeEventType } from './event-type';
++
++// Shape shared by the core registry and the app registry in a manifest, so that the
++// commit pipeline differs only in WHERE the registry comes from, not in its logic
++// (design §4.2). `visibility` is the exposure ceiling of the type (REQ-CTR-009);
++// `version` is what the core stamps as the event's schemaVersion.
++export type EventTypeDefinition = {
++  readonly schema: z.ZodType;
++  readonly visibility: Visibility;
++  readonly version: number;
++};
++
++// Core-owned event types. Static zod, with no conversion and no snapshot: the core
++// is versioned by the contract rather than by a manifest, and these schemas never
++// cross the boundary (design §4.2).
++//
++// The set is the lifecycle transitions of REQ-RT-005 (DRAFT → ACTIVE → COMPLETED,
++// DRAFT → CANCELLED, ACTIVE → CANCELLED), emitted as public events per REQ-RT-010.
++export const CORE_EVENTS = {
++  'room.activated': {
++    // ACTIVE freezes appSettings and the pair (appId, manifestVersion) — REQ-RT-004.
++    // Carrying the pin keeps the log self-describing without a join to the room.
++    schema: z.strictObject({
++      appId: appIdSchema,
++      manifestVersion: z.number().int().positive(),
++    }),
++    visibility: 'public',
++    version: 1,
++  },
++  'room.completed': {
++    schema: z.strictObject({}),
++    visibility: 'public',
++    version: 1,
++  },
++  'room.cancelled': {
++    schema: z.strictObject({}),
++    visibility: 'public',
++    version: 1,
++  },
++} as const satisfies Record<string, EventTypeDefinition>;
++
++export type CoreEventName = keyof typeof CORE_EVENTS;
++
++export const coreEventType = (name: CoreEventName): string =>
++  composeEventType(CORE_NAMESPACE, name);
++
++export const isCoreEventName = (name: string): name is CoreEventName =>
++  Object.prototype.hasOwnProperty.call(CORE_EVENTS, name);
+diff --git a/packages/sdk/src/events/event-type.contract.spec.ts b/packages/sdk/src/events/event-type.contract.spec.ts
+new file mode 100644
+index 0000000..d527317
+--- /dev/null
++++ b/packages/sdk/src/events/event-type.contract.spec.ts
+@@ -0,0 +1,85 @@
++import {
++  CORE_NAMESPACE,
++  appIdSchema,
++  composeEventType,
++  eventTypeSchema,
++  resolveTypeOwner,
++  shortEventNameSchema,
++} from './event-type';
++import { ContractError } from '../errors/error-codes';
++
++describe('event type ownership', () => {
++  it.each(['core.room.activated', 'quiz.answer_scored', 'quiz.answer.submitted'])(
++    'accepts a namespaced type: %s',
++    (type) => {
++      expect(eventTypeSchema.safeParse(type).success).toBe(true);
++    },
++  );
++
++  it.each(['nodot', 'core.', '.leading', 'Quiz.Answer', 'quiz..double'])(
++    'rejects a malformed type: %s',
++    (type) => {
++      expect(eventTypeSchema.safeParse(type).success).toBe(false);
++    },
++  );
++
++  it('resolves the core namespace to the core', () => {
++    expect(resolveTypeOwner('core.room.activated')).toEqual({
++      kind: 'core',
++      shortName: 'room.activated',
++    });
++  });
++
++  it('resolves any other namespace to the app that owns it', () => {
++    expect(resolveTypeOwner('quiz.answer.submitted')).toEqual({
++      kind: 'app',
++      appId: 'quiz',
++      shortName: 'answer.submitted',
++    });
++  });
++
++  it('rejects an unresolvable type with a typed error', () => {
++    expect(() => resolveTypeOwner('nodot')).toThrow(ContractError);
++    try {
++      resolveTypeOwner('nodot');
++    } catch (err) {
++      expect((err as ContractError).code).toBe('EVENT_UNKNOWN_TYPE');
++    }
++  });
++
++  // §4.1: an app declares SHORT names; the core prefixes the namespace itself.
++  // Forging a foreign namespace must be inexpressible, not merely forbidden.
++  it('gives an app no way to declare into the core namespace', () => {
++    expect(shortEventNameSchema.safeParse('room.activated').success).toBe(true);
++    expect(composeEventType('quiz', 'room.activated')).toBe('quiz.room.activated');
++    expect(resolveTypeOwner(composeEventType('quiz', 'room.activated')).kind).toBe('app');
++  });
++
++  it('reserves the core namespace against an app claiming it as its appId', () => {
++    expect(appIdSchema.safeParse(CORE_NAMESPACE).success).toBe(false);
++    expect(appIdSchema.safeParse('quiz').success).toBe(true);
++  });
++
++  // The regexes for appIdSchema, shortEventNameSchema and eventTypeSchema are built from
++  // shared segments (event-type.ts) precisely so this holds by construction, not by three
++  // regexes coincidentally agreeing. This test exercises the composition itself, not fixed
++  // example strings, so a future edit to one character class that breaks the other two
++  // would fail here even if it happened to still pass every fixed-string assertion above.
++  describe('composition invariant: an accepted appId + an accepted short name always compose into an accepted, round-trippable event type', () => {
++    const appIds = ['quiz', 'app-2', 'a'];
++    const shortNames = ['answer_scored', 'answer.submitted', 'started'];
++
++    const cases = appIds.flatMap((appId) =>
++      shortNames.map((shortName) => [appId, shortName] as const),
++    );
++
++    it.each(cases)('appId=%s, shortName=%s', (appId, shortName) => {
++      expect(appIdSchema.safeParse(appId).success).toBe(true);
++      expect(shortEventNameSchema.safeParse(shortName).success).toBe(true);
++
++      const type = composeEventType(appId, shortName);
++      expect(eventTypeSchema.safeParse(type).success).toBe(true);
++      expect(resolveTypeOwner(type)).toEqual({ kind: 'app', appId, shortName });
++    });
++  });
++});
+diff --git a/packages/sdk/src/events/event-type.ts b/packages/sdk/src/events/event-type.ts
+new file mode 100644
+index 0000000..31729b6
+--- /dev/null
++++ b/packages/sdk/src/events/event-type.ts
+@@ -0,0 +1,72 @@
++import { z } from 'zod';
++import { ContractError } from '../errors/error-codes';
++
++// The namespace owned by the core (design §4.1).
++export const CORE_NAMESPACE = 'core';
++
++// Shared character classes. eventTypeSchema is exactly "an appId, followed by a short
++// name" — it is built from the same two segments below rather than hand-copied a third
++// time, so the invariant "an accepted appId + an accepted short name compose into an
++// accepted event type" holds structurally instead of by three regexes coincidentally
++// agreeing.
++const NAMESPACE_SEGMENT = '[a-z][a-z0-9-]*';
++const NAME_SEGMENT = '[a-z][a-z0-9_-]*';
++const SHORT_NAME_PATTERN = `${NAME_SEGMENT}(\\.${NAME_SEGMENT})*`;
++
++// appId is a slug and, at the same time, the app's event namespace (design §5).
++// `core` is refused so that an app cannot obtain the core namespace by naming itself.
++export const appIdSchema = z
++  .string()
++  .regex(new RegExp(`^${NAMESPACE_SEGMENT}$`), 'appId must be a lowercase slug')
++  .refine((id) => id !== CORE_NAMESPACE, { message: 'appId "core" is reserved' });
++export type AppId = z.infer<typeof appIdSchema>;
++
++// A short name as declared in a registry. Dots are allowed (`answer.submitted`):
++// they cannot forge a namespace, because the owner prefix is prepended
++// unconditionally by composeEventType.
++export const shortEventNameSchema = z
++  .string()
++  .regex(new RegExp(`^${SHORT_NAME_PATTERN}$`), 'short event name must be a dotted lowercase path');
++
++// A fully-qualified event type: `<namespace>.<short name>`.
++export const eventTypeSchema = z
++  .string()
++  .regex(new RegExp(`^${NAMESPACE_SEGMENT}\\.${SHORT_NAME_PATTERN}$`), 'event type must be namespaced');
++
++export const composeEventType = (namespace: string, shortName: string): string =>
++  `${namespace}.${shortName}`;
++
++export type TypeOwner =
++  | { kind: 'core'; shortName: string }
++  | { kind: 'app'; appId: AppId; shortName: string };
++
++// Ownership is resolved by parsing the name — no lookup table that could drift out
++// of sync with the registry (design §4.1).
++export const resolveTypeOwner = (type: string): TypeOwner => {
++  if (!eventTypeSchema.safeParse(type).success) {
++    throw new ContractError('EVENT_UNKNOWN_TYPE', `event type "${type}" is not namespaced`);
++  }
++
++  const separator = type.indexOf('.');
++  const namespace = type.slice(0, separator);
++  const shortName = type.slice(separator + 1);
++
++  if (namespace === CORE_NAMESPACE) {
++    return { kind: 'core', shortName };
++  }
++
++  // This branch is now provably unreachable, not merely untested: `namespace` is
++  // `type` up to its first dot, NAMESPACE_SEGMENT contains no dot, and `type` already
++  // matched eventTypeSchema (which opens with `^${NAMESPACE_SEGMENT}\.`) — so `namespace`
++  // necessarily matches appIdSchema's regex, and non-core was just checked above.
++  // Kept anyway as defence in depth: if eventTypeSchema and appIdSchema's shared
++  // segments are ever edited independently and drift apart, this still fails with a
++  // typed ContractError (REQ-SEC-006) instead of an unhandled ZodError leaking a raw
++  // validation message past the SDK boundary.
++  const appId = appIdSchema.safeParse(namespace);
++  if (!appId.success) {
++    throw new ContractError('EVENT_UNKNOWN_TYPE', `event type "${type}" has no resolvable owner`);
++  }
++
++  return { kind: 'app', appId: appId.data, shortName };
++};
+diff --git a/packages/sdk/src/events/log-event.fixtures.ts b/packages/sdk/src/events/log-event.fixtures.ts
+index 7ee8cc4..eda4ea8 100644
+--- a/packages/sdk/src/events/log-event.fixtures.ts
++++ b/packages/sdk/src/events/log-event.fixtures.ts
+@@ -1,18 +1,18 @@
+ import type { LogEvent } from './log-event.schema';
+ 
+ export const validLogEvents: LogEvent[] = [
+   {
+     roomId: '11111111-1111-4111-8111-111111111111',
+     seq: 0,
+-    type: 'room.created',
+-    payload: { policy: 'guests' },
++    type: 'core.room.activated',
++    payload: { appId: 'quiz', manifestVersion: 1 },
+     actorId: null,
+     visibility: 'public',
+     schemaVersion: 1,
+   },
+   {
+     roomId: '11111111-1111-4111-8111-111111111111',
+     seq: 1,
+     type: 'quiz.answer_scored',
+     payload: { correct: true },
+     actorId: '22222222-2222-4222-8222-222222222222',
+@@ -35,11 +35,15 @@ export const invalidLogEventCases: { name: string; value: unknown }[] = [
+     })(),
+   },
+   {
+     name: 'negative seq',
+     value: { ...validLogEvents[0], seq: -1 },
+   },
+   {
+     name: 'non-uuid roomId',
+     value: { ...validLogEvents[0], roomId: 'not-a-uuid' },
+   },
++  {
++    name: 'event type without an owning namespace',
++    value: { ...validLogEvents[0], type: 'created' },
++  },
+ ];
+diff --git a/packages/sdk/src/events/log-event.schema.ts b/packages/sdk/src/events/log-event.schema.ts
+index 7dd77d8..6d87b8d 100644
+--- a/packages/sdk/src/events/log-event.schema.ts
++++ b/packages/sdk/src/events/log-event.schema.ts
+@@ -1,19 +1,18 @@
+ import { z } from 'zod';
+-
+-// Visibility levels of room state, log events and appSettings (REQ-CORE-005).
+-export const VISIBILITY_LEVELS = ['public', 'organizer', 'module-private'] as const;
+-export const visibilitySchema = z.enum(VISIBILITY_LEVELS);
+-export type Visibility = z.infer<typeof visibilitySchema>;
++import { visibilitySchema } from '../visibility/visibility';
++import { eventTypeSchema } from './event-type';
+ 
+ // Append-only log event envelope (form of REQ-RT-001). seq is server-assigned;
+ // actorId is null only for system/lifecycle events.
++// Internal to the core↔module contract: it carries seq and MUST NOT be sent to a
++// client — the outward form is projectedEventSchema (design §4.3, REQ-RT-011a).
+ export const logEventSchema = z.object({
+   roomId: z.uuid(),
+   seq: z.number().int().nonnegative(),
+-  type: z.string().min(1),
++  type: eventTypeSchema,
+   payload: z.record(z.string(), z.unknown()),
+   actorId: z.uuid().nullable(),
+   visibility: visibilitySchema,
+   schemaVersion: z.number().int().positive(),
+ });
+ export type LogEvent = z.infer<typeof logEventSchema>;
+diff --git a/packages/sdk/src/events/projected-event.contract.spec.ts b/packages/sdk/src/events/projected-event.contract.spec.ts
+new file mode 100644
+index 0000000..b118e8a
+--- /dev/null
++++ b/packages/sdk/src/events/projected-event.contract.spec.ts
+@@ -0,0 +1,28 @@
++import { projectedEventSchema } from './projected-event.schema';
++import {
++  invalidProjectedEventCases,
++  validProjectedEvents,
++} from './projected-event.fixtures';
++
++describe('projectedEvent contract', () => {
++  it.each(validProjectedEvents.map((e, i) => [i, e] as const))(
++    'accepts valid fixture #%i',
++    (_i, event) => {
++      expect(projectedEventSchema.safeParse(event).success).toBe(true);
++    },
++  );
++
++  it.each(invalidProjectedEventCases.map((c) => [c.name, c.value] as const))(
++    'rejects invalid fixture: %s',
++    (_name, value) => {
++      expect(projectedEventSchema.safeParse(value).success).toBe(false);
++    },
++  );
++
++  // REQ-RT-011(a) per amendment v1.3: the global seq is never exposed to a
++  // participant. It holds structurally — the field is not in the schema at all.
++  it('has no seq, visibility or cursor field to expose', () => {
++    const keys = Object.keys(projectedEventSchema.shape);
++    expect(keys.sort()).toEqual(['actorId', 'payload', 'type']);
++  });
++});
+diff --git a/packages/sdk/src/events/projected-event.fixtures.ts b/packages/sdk/src/events/projected-event.fixtures.ts
+new file mode 100644
+index 0000000..ac065e6
+--- /dev/null
++++ b/packages/sdk/src/events/projected-event.fixtures.ts
+@@ -0,0 +1,49 @@
++import type { LogEvent } from './log-event.schema';
++import type { ProjectedEvent } from './projected-event.schema';
++
++export const validProjectedEvents: ProjectedEvent[] = [
++  {
++    type: 'core.room.activated',
++    payload: { appId: 'quiz', manifestVersion: 1 },
++    actorId: null,
++  },
++  {
++    type: 'quiz.answer.submitted',
++    payload: { roundId: 'r1', choice: 2 },
++    actorId: '22222222-2222-4222-8222-222222222222',
++  },
++];
++
++// The internal envelope a careless handler might hand to a client verbatim.
++const internalLogEvent: LogEvent = {
++  roomId: '11111111-1111-4111-8111-111111111111',
++  seq: 42,
++  type: 'quiz.answer.submitted',
++  payload: { roundId: 'r1', choice: 2 },
++  actorId: '22222222-2222-4222-8222-222222222222',
++  visibility: 'public',
++  schemaVersion: 1,
++};
++
++export const invalidProjectedEventCases: { name: string; value: unknown }[] = [
++  {
++    name: 'whole log envelope spread outward (leaks seq — REQ-RT-011a)',
++    value: internalLogEvent,
++  },
++  {
++    name: 'seq smuggled onto an otherwise clean projection',
++    value: { ...validProjectedEvents[0], seq: 0 },
++  },
++  {
++    name: 'visibility label sent outward',
++    value: { ...validProjectedEvents[0], visibility: 'public' },
++  },
++  {
++    name: 'replay cursor sent outward (no cursor exists in MVP — design §4.4)',
++    value: { ...validProjectedEvents[0], cursor: 'eyJzZXEiOjQyfQ==' },
++  },
++  {
++    name: 'event type without an owning namespace',
++    value: { ...validProjectedEvents[0], type: 'activated' },
++  },
++];
+diff --git a/packages/sdk/src/events/projected-event.schema.ts b/packages/sdk/src/events/projected-event.schema.ts
+new file mode 100644
+index 0000000..743d2df
+--- /dev/null
++++ b/packages/sdk/src/events/projected-event.schema.ts
+@@ -0,0 +1,18 @@
++import { z } from 'zod';
++import { eventTypeSchema } from './event-type';
++
++// What actually leaves the core towards a client (design §4.3).
++//
++// No seq, no visibility, no cursor: REQ-RT-011(a) — «глобальный seq не
++// экспонируется участнику» — holds structurally, because none of those values
++// exist in this shape to be exposed. The MVP has no replay cursor at all
++// (design §4.4): replay returns the full visible projection.
++//
++// strictObject, not object: an extra key is a core bug, and a loud rejection beats
++// a silent strip that leaves the bug alive.
++export const projectedEventSchema = z.strictObject({
++  type: eventTypeSchema,
++  payload: z.record(z.string(), z.unknown()),
++  actorId: z.uuid().nullable(),
++});
++export type ProjectedEvent = z.infer<typeof projectedEventSchema>;
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 3715a92..ce665fe 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -1,2 +1,15 @@
++export * from './contract-version';
++export * from './errors/error-codes';
++export * from './visibility/visibility';
++export * from './visibility/visibility.fixtures';
++export * from './events/event-type';
++export * from './events/core-events';
+ export * from './events/log-event.schema';
+ export * from './events/log-event.fixtures';
++export * from './events/projected-event.schema';
++export * from './events/projected-event.fixtures';
++export * from './manifest/manifest.schema';
++export * from './manifest/manifest.fixtures';
++export * from './manifest/app-settings-visibility';
++export * from './manifest/define-app';
++export * from './manifest/define-app.fixtures';
+diff --git a/packages/sdk/src/manifest/app-settings-visibility.contract.spec.ts b/packages/sdk/src/manifest/app-settings-visibility.contract.spec.ts
+new file mode 100644
+index 0000000..3500815
+--- /dev/null
++++ b/packages/sdk/src/manifest/app-settings-visibility.contract.spec.ts
+@@ -0,0 +1,76 @@
++import { ContractError } from '../errors/error-codes';
++import type { JsonSchemaObject } from './manifest.schema';
++import {
++  VISIBILITY_ANNOTATION,
++  appSettingsVisibilityMap,
++  assertVisibilityAnnotations,
++  readPropertyVisibility,
++} from './app-settings-visibility';
++
++const appSettings: JsonSchemaObject = {
++  type: 'object',
++  properties: {
++    title: { type: 'string', 'x-visibility': 'public' },
++    scoreboardMode: { type: 'string', 'x-visibility': 'organizer' },
++    correctAnswers: { type: 'array', 'x-visibility': 'module-private' },
++    hiddenWeights: { type: 'array' },
++  },
++};
++
++describe('appSettings per-property visibility', () => {
++  it('uses the annotation ADR-008 mandates', () => {
++    expect(VISIBILITY_ANNOTATION).toBe('x-visibility');
++  });
++
++  it.each([
++    ['title', 'public'],
++    ['scoreboardMode', 'organizer'],
++    ['correctAnswers', 'module-private'],
++  ])('reads the declared level of %s', (property, expected) => {
++    expect(readPropertyVisibility(appSettings, property)).toBe(expected);
++  });
++
++  // REQ-CORE-008 / ADR-008: absence of an annotation means module-private.
++  // Forgetting to annotate must close, never open.
++  it('treats an unannotated property as module-private', () => {
++    expect(readPropertyVisibility(appSettings, 'hiddenWeights')).toBe('module-private');
++  });
++
++  it('treats an unknown property as module-private', () => {
++    expect(readPropertyVisibility(appSettings, 'nope')).toBe('module-private');
++  });
++
++  it.each([
++    ['no properties block', { type: 'object' }],
++    ['properties is not an object', { type: 'object', properties: 'nonsense' }],
++    ['property is not an object', { type: 'object', properties: { a: 'nonsense' } }],
++  ])('fails safe when the schema is shaped unexpectedly: %s', (_name, schema) => {
++    expect(readPropertyVisibility(schema as JsonSchemaObject, 'a')).toBe('module-private');
++  });
++
++  it('maps every property, defaulting the unannotated ones', () => {
++    expect(appSettingsVisibilityMap(appSettings)).toEqual({
++      title: 'public',
++      scoreboardMode: 'organizer',
++      correctAnswers: 'module-private',
++      hiddenWeights: 'module-private',
++    });
++  });
++
++  it('accepts annotations that are absent or valid', () => {
++    expect(() => assertVisibilityAnnotations(appSettings)).not.toThrow();
++  });
++
++  it('rejects a misspelled annotation instead of silently hiding the property', () => {
++    const typo: JsonSchemaObject = {
++      type: 'object',
++      properties: { title: { type: 'string', 'x-visibility': 'publik' } },
++    };
++    expect(() => assertVisibilityAnnotations(typo)).toThrow(ContractError);
++    try {
++      assertVisibilityAnnotations(typo);
++    } catch (err) {
++      expect((err as ContractError).code).toBe('MANIFEST_INVALID');
++    }
++  });
++});
+diff --git a/packages/sdk/src/manifest/app-settings-visibility.ts b/packages/sdk/src/manifest/app-settings-visibility.ts
+new file mode 100644
+index 0000000..2f39f78
+--- /dev/null
++++ b/packages/sdk/src/manifest/app-settings-visibility.ts
+@@ -0,0 +1,71 @@
++import { ContractError } from '../errors/error-codes';
++import {
++  DEFAULT_VISIBILITY,
++  visibilitySchema,
++  type Visibility,
++} from '../visibility/visibility';
++import type { JsonSchemaObject } from './manifest.schema';
++
++// The per-property annotation of ADR-008 §1. It survives zod → JSON Schema
++// conversion via .meta({ 'x-visibility': ... }) — verified on zod 4.4.3.
++export const VISIBILITY_ANNOTATION = 'x-visibility';
++
++const asRecord = (value: unknown): Record<string, unknown> | null =>
++  typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
++
++const propertiesOf = (appSettings: JsonSchemaObject): Record<string, unknown> =>
++  asRecord(appSettings['properties']) ?? {};
++
++// REQ-CORE-008: «отсутствие аннотации трактуется как module-private (fail-safe)».
++// Every unreadable shape resolves the same way — the most protected level. To expose
++// a property an author must say so explicitly; forgetting closes, never opens.
++export const readPropertyVisibility = (
++  appSettings: JsonSchemaObject,
++  property: string,
++): Visibility => {
++  const definition = asRecord(propertiesOf(appSettings)[property]);
++  if (definition === null) {
++    return DEFAULT_VISIBILITY;
++  }
++
++  const parsed = visibilitySchema.safeParse(definition[VISIBILITY_ANNOTATION]);
++  return parsed.success ? parsed.data : DEFAULT_VISIBILITY;
++};
++
++// The whole map, for the core's projection builder (a later plan): it projects
++// appSettings by the requester's level exactly as it projects state and events
++// (REQ-CORE-005), instead of filtering fields by hand — which the norm forbids.
++export const appSettingsVisibilityMap = (
++  appSettings: JsonSchemaObject,
++): Record<string, Visibility> =>
++  Object.fromEntries(
++    Object.keys(propertiesOf(appSettings)).map((property) => [
++      property,
++      readPropertyVisibility(appSettings, property),
++    ]),
++  );
++
++// A present-but-unknown annotation is an authoring mistake, not a visibility choice.
++// Reading it fails safe, but staying silent would leave the author believing a
++// property is public while the core hides it. ADR-008 catches mislabels at
++// registration; this is that principle applied to the settings channel.
++export const assertVisibilityAnnotations = (appSettings: JsonSchemaObject): void => {
++  for (const [property, rawDefinition] of Object.entries(propertiesOf(appSettings))) {
++    const definition = asRecord(rawDefinition);
++    if (definition === null) {
++      continue;
++    }
++
++    const annotation = definition[VISIBILITY_ANNOTATION];
++    if (annotation === undefined) {
++      continue;
++    }
++
++    if (!visibilitySchema.safeParse(annotation).success) {
++      throw new ContractError(
++        'MANIFEST_INVALID',
++        `appSettings property "${property}" declares an unknown ${VISIBILITY_ANNOTATION}: ${JSON.stringify(annotation)}`,
++      );
++    }
++  }
++};
+diff --git a/packages/sdk/src/manifest/define-app.contract.spec.ts b/packages/sdk/src/manifest/define-app.contract.spec.ts
+new file mode 100644
+index 0000000..1a558e6
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.contract.spec.ts
+@@ -0,0 +1,142 @@
++import { z } from 'zod';
++import { ContractError } from '../errors/error-codes';
++import { CONTRACT_VERSION } from '../contract-version';
++import { appManifestSchema } from './manifest.schema';
++import { readPropertyVisibility } from './app-settings-visibility';
++import { defineApp, toRegisteredSchema } from './define-app';
++import { representableSchemas, unrepresentableSchemas } from './define-app.fixtures';
++
++const quizSettings = z.object({
++  title: z.string().meta({ 'x-visibility': 'public' }),
++  correctAnswers: z.array(z.number()),
++});
++
++const defineQuiz = () =>
++  defineApp({
++    appId: 'quiz',
++    manifestVersion: 1,
++    appSettings: quizSettings,
++    events: {
++      'answer.submitted': {
++        schema: z.object({ roundId: z.string(), choice: z.number().int() }),
++        visibility: 'module-private',
++      },
++    },
++  });
++
++describe('conversion guard', () => {
++  it.each(representableSchemas.map((c) => [c.name, c.schema] as const))(
++    'converts a legal schema: %s',
++    (_name, schema) => {
++      expect(() => toRegisteredSchema(schema)).not.toThrow();
++    },
++  );
++
++  // Design §6: the loss is SILENT, which is the ADR-008 class of defect — the app
++  // believes the core enforces a rule the core never received. Reject instead.
++  it.each(unrepresentableSchemas.map((c) => [c.name, c.schema] as const))(
++    'refuses a schema that would not survive conversion: %s',
++    (_name, schema) => {
++      expect(() => toRegisteredSchema(schema)).toThrow(ContractError);
++      expect(() => toRegisteredSchema(schema)).toThrow(
++        expect.objectContaining({ code: 'SCHEMA_NOT_REPRESENTABLE' }),
++      );
++    },
++  );
++
++  // This is the fixture that guards the guard (design §6). It rests on a zod
++  // internal (_zod.def.checks); a zod upgrade that breaks detection must fail CI
++  // loudly rather than quietly open the gate. Do not silence it — fix the detector.
++  //
++  // The premise check is that zod's own output for the refined schema is IDENTICAL
++  // to its output for the same schema with the refinement stripped — i.e. the
++  // refinement leaves no trace at all, under whatever keyword a future zod might
++  // use for it. Asserting the literal string 'refine' is absent would pass even if
++  // zod started representing refinements under a different keyword.
++  it('still detects that zod drops .refine() silently', () => {
++    const bare = z.object({ a: z.number(), b: z.number() });
++    const refined = bare.refine((v) => v.a < v.b);
++
++    expect(JSON.stringify(z.toJSONSchema(refined))).toBe(JSON.stringify(z.toJSONSchema(bare)));
++    expect(() => toRegisteredSchema(refined)).toThrow(ContractError);
++  });
++
++  it('keeps the checks that DO convert', () => {
++    const json = toRegisteredSchema(z.object({ nick: z.string().min(1) }));
++    expect(JSON.stringify(json)).toContain('minLength');
++  });
++});
++
++describe('defineApp', () => {
++  it('produces a manifest that satisfies the manifest contract', () => {
++    expect(appManifestSchema.safeParse(defineQuiz()).success).toBe(true);
++  });
++
++  it('defaults contractRange to the current major of the contract', () => {
++    expect(defineQuiz().contractRange).toBe(`^${CONTRACT_VERSION}`);
++  });
++
++  it('keeps an explicit contractRange', () => {
++    const manifest = defineApp({
++      appId: 'quiz',
++      manifestVersion: 2,
++      contractRange: '>=1.0.0 <2.0.0',
++      appSettings: quizSettings,
++      events: {},
++    });
++    expect(manifest.contractRange).toBe('>=1.0.0 <2.0.0');
++  });
++
++  it('registers events under short names and carries their ceiling', () => {
++    const manifest = defineQuiz();
++    expect(Object.keys(manifest.events)).toEqual(['answer.submitted']);
++    expect(manifest.events['answer.submitted'].visibility).toBe('module-private');
++  });
++
++  it('snapshots appSettings with visibility annotations intact (ADR-008)', () => {
++    const manifest = defineQuiz();
++    expect(readPropertyVisibility(manifest.appSettings, 'title')).toBe('public');
++    // Never annotated → module-private, and that is what the outcome-deciding data
++    // must be (REQ-CORE-008).
++    expect(readPropertyVisibility(manifest.appSettings, 'correctAnswers')).toBe('module-private');
++  });
++
++  // REQ-CTR-002: what the registry stores must be serializable — no live zod.
++  it('produces a JSON-serializable manifest with no live objects in it', () => {
++    const manifest = defineQuiz();
++    expect(JSON.parse(JSON.stringify(manifest))).toEqual(manifest);
++  });
++
++  it('refuses an app that would take the core namespace', () => {
++    expect(() =>
++      defineApp({ appId: 'core', manifestVersion: 1, appSettings: quizSettings, events: {} }),
++    ).toThrow(ContractError);
++  });
++
++  it('refuses an unrepresentable event schema with a typed error', () => {
++    expect(() =>
++      defineApp({
++        appId: 'quiz',
++        manifestVersion: 1,
++        appSettings: quizSettings,
++        events: {
++          'answer.submitted': {
++            schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b),
++            visibility: 'module-private',
++          },
++        },
++      }),
++    ).toThrow(ContractError);
++  });
++
++  it('refuses a misspelled visibility annotation', () => {
++    expect(() =>
++      defineApp({
++        appId: 'quiz',
++        manifestVersion: 1,
++        appSettings: z.object({ title: z.string().meta({ 'x-visibility': 'publik' }) }),
++        events: {},
++      }),
++    ).toThrow(ContractError);
++  });
++});
+diff --git a/packages/sdk/src/manifest/define-app.fixtures.ts b/packages/sdk/src/manifest/define-app.fixtures.ts
+new file mode 100644
+index 0000000..64db5d9
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.fixtures.ts
+@@ -0,0 +1,25 @@
++import { z } from 'zod';
++
++// Schemas an app may legally author: everything here survives conversion intact.
++export const representableSchemas: { name: string; schema: z.ZodType }[] = [
++  { name: 'string bounds and regex', schema: z.object({ nick: z.string().min(1).max(32), code: z.string().regex(/^[A-Z]+$/) }) },
++  { name: 'integer bounds', schema: z.object({ choice: z.number().int().min(0).max(3) }) },
++  { name: 'enum and optional', schema: z.object({ kind: z.enum(['a', 'b']), note: z.string().optional() }) },
++  { name: 'nested object and array', schema: z.object({ rounds: z.array(z.object({ id: z.string() })) }) },
++  { name: 'visibility annotation', schema: z.object({ title: z.string().meta({ 'x-visibility': 'public' }) }) },
++  { name: 'string .length() (fixed-length code, e.g. a room code)', schema: z.object({ code: z.string().length(6) }) },
++  { name: 'array .length() (fixed-size answer array)', schema: z.object({ answers: z.array(z.string()).length(3) }) },
++];
++
++// Schemas that must be refused: each would either vanish silently or fail to convert.
++export const unrepresentableSchemas: { name: string; schema: z.ZodType }[] = [
++  { name: 'top-level .refine()', schema: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) },
++  { name: 'nested .refine()', schema: z.object({ inner: z.object({ a: z.number(), b: z.number() }).refine((v) => v.a < v.b) }) },
++  { name: '.refine() inside an array', schema: z.object({ xs: z.array(z.string().refine((s) => s.length > 2)) }) },
++  { name: '.superRefine()', schema: z.object({ s: z.string() }).superRefine(() => {}) },
++  { name: 'z.date()', schema: z.object({ at: z.date() }) },
++  { name: 'z.bigint()', schema: z.object({ n: z.bigint() }) },
++  { name: '.transform()', schema: z.object({ s: z.string().transform((s) => s.length) }) },
++  { name: 'string .trim() (overwrite check, dropped silently)', schema: z.object({ s: z.string().trim().min(1) }) },
++  { name: 'string .toLowerCase() (overwrite check, dropped silently)', schema: z.object({ s: z.string().toLowerCase() }) },
++];
+diff --git a/packages/sdk/src/manifest/define-app.ts b/packages/sdk/src/manifest/define-app.ts
+new file mode 100644
+index 0000000..e6add5a
+--- /dev/null
++++ b/packages/sdk/src/manifest/define-app.ts
+@@ -0,0 +1,139 @@
++import { z } from 'zod';
++import { CONTRACT_VERSION } from '../contract-version';
++import { ContractError } from '../errors/error-codes';
++import type { Visibility } from '../visibility/visibility';
++import { assertVisibilityAnnotations } from './app-settings-visibility';
++import {
++  appManifestSchema,
++  type AppManifest,
++  type JsonSchemaObject,
++} from './manifest.schema';
++
++// The authoring surface (design §4.6): an app writes zod — types and DX — while the
++// REGISTERED artifact is JSON Schema. That is what makes REQ-RT-004 an invariant
++// held by data: the snapshot sits in the core's storage under
++// (appId, manifestVersion), so a module cannot break an active room's validation by
++// deleting last version's code.
++export type AppDefinition = {
++  appId: string;
++  manifestVersion: number;
++  // Defaults to the current major of the contract (REQ-CTR-004).
++  contractRange?: string;
++  appSettings: z.ZodType;
++  // Short names; the core prefixes the namespace itself (design §4.1).
++  events: Record<string, { schema: z.ZodType; visibility: Visibility }>;
++};
++
++type ZodInternals = { _zod?: { def?: { checks?: unknown[] } } };
++type CheckInternals = { _zod?: { def?: { check?: string } } };
++
++// The allowlist of check kinds known to survive z.toJSONSchema intact. Ordinary
++// bounds ('min_length', 'greater_than', …) convert fine — testing for a non-empty
++// checks array would reject legal schemas like .min(1). Everything NOT on this list
++// is refused, not just 'custom' (.refine()/.superRefine()): zod also has 'overwrite'
++// checks (.trim(), .toLowerCase(), …) that convert with NO trace in the JSON Schema
++// output, same silent-loss defect as a refinement. A denylist of the kinds known
++// today would miss the next one zod adds; an allowlist is fail-closed by
++// construction, so an unrecognised kind is refused rather than let through.
++//
++// This list is DERIVED, not enumerated by hand: for each zod check kind, convert a
++// base schema with the check applied and the same base without it, and compare the
++// two z.toJSONSchema outputs. A check that leaves a trace (the outputs differ) is
++// representable and belongs on the list; a check that leaves no trace (the outputs
++// are identical, e.g. 'custom' from .refine()/.superRefine(), 'overwrite' from
++// .trim()/.toLowerCase()) is a silent loss and must stay refused. Re-run that trace
++// test against the installed zod version before adding or removing a kind — this
++// comment records the method, not a substitute for running it.
++const REPRESENTABLE_CHECK_KINDS = new Set([
++  'min_length',
++  'max_length',
++  'length_equals',
++  'string_format',
++  'number_format',
++  'greater_than',
++  'less_than',
++  'multiple_of',
++]);
++
++// Returns the offending check kind (so the refusal message can name it) or
++// `undefined` if every check on this schema is on the allowlist.
++const findUnrepresentableCheckKind = (schema: unknown): string | undefined => {
++  const checks = (schema as ZodInternals)?._zod?.def?.checks ?? [];
++  for (const check of checks) {
++    const kind = (check as CheckInternals)?._zod?.def?.check;
++    if (!REPRESENTABLE_CHECK_KINDS.has(kind ?? '')) {
++      return kind ?? '(unknown check kind)';
++    }
++  }
++  return undefined;
++};
++
++// The conversion guard (design §6).
++//
++// z.toJSONSchema drops .refine()/.superRefine() and 'overwrite' checks (.trim(),
++// .toLowerCase(), …) SILENTLY while throwing on date/bigint/transform. Silent loss
++// is the defect class ADR-008 exists to prevent: the app is convinced the core
++// enforces its rule, and the core never received it. So a manifest carrying one is
++// refused outright.
++//
++// This reads a zod internal (_zod.def.checks) on purpose. The cure is the project's
++// own principle: the guard is covered by a fixture, so a zod upgrade that breaks
++// detection turns CI red instead of quietly opening the gate.
++export const toRegisteredSchema = (schema: z.ZodType): JsonSchemaObject => {
++  try {
++    // `override` is invoked for every subschema, so it walks the tree for us —
++    // nested refinements and refinements inside arrays included.
++    const json = z.toJSONSchema(schema, {
++      override: (ctx) => {
++        const unrepresentableKind = findUnrepresentableCheckKind(ctx.zodSchema);
++        if (unrepresentableKind !== undefined) {
++          throw new ContractError(
++            'SCHEMA_NOT_REPRESENTABLE',
++            `check kind '${unrepresentableKind}' cannot be represented in JSON Schema and would be dropped silently (not in the allowlist of check kinds known to convert intact, e.g. .refine/.superRefine ('custom'), or an overwrite check such as .trim()/.toLowerCase() ('overwrite'))`,
++          );
++        }
++      },
++    });
++    return json as JsonSchemaObject;
++  } catch (err) {
++    if (err instanceof ContractError) {
++      throw err;
++    }
++    // date / bigint / transform: zod throws by itself — re-wrap as a typed code so
++    // nothing raw reaches the caller (REQ-SEC-006).
++    throw new ContractError(
++      'SCHEMA_NOT_REPRESENTABLE',
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++};
++
++// Where zod stops being the artifact and JSON Schema starts. The core validates the
++// FORM from this snapshot; semantics that need room state stay with the app
++// (design §4.6, REQ-RT-013).
++export const defineApp = (definition: AppDefinition): AppManifest => {
++  const appSettings = toRegisteredSchema(definition.appSettings);
++  assertVisibilityAnnotations(appSettings);
++
++  const events = Object.fromEntries(
++    Object.entries(definition.events).map(([shortName, event]) => [
++      shortName,
++      { schema: toRegisteredSchema(event.schema), visibility: event.visibility },
++    ]),
++  );
++
++  const manifest = {
++    appId: definition.appId,
++    manifestVersion: definition.manifestVersion,
++    contractRange: definition.contractRange ?? `^${CONTRACT_VERSION}`,
++    appSettings,
++    events,
++  };
++
++  const parsed = appManifestSchema.safeParse(manifest);
++  if (!parsed.success) {
++    throw new ContractError('MANIFEST_INVALID', parsed.error.message);
++  }
++
++  return parsed.data;
++};
+diff --git a/packages/sdk/src/manifest/manifest.contract.spec.ts b/packages/sdk/src/manifest/manifest.contract.spec.ts
+new file mode 100644
+index 0000000..c3728e9
+--- /dev/null
++++ b/packages/sdk/src/manifest/manifest.contract.spec.ts
+@@ -0,0 +1,24 @@
++import { appManifestSchema, contractRangeSchema } from './manifest.schema';
++import { invalidManifestCases, validManifests } from './manifest.fixtures';
++
++describe('app manifest contract', () => {
++  it.each(validManifests.map((m, i) => [i, m] as const))(
++    'accepts valid fixture #%i',
++    (_i, manifest) => {
++      expect(appManifestSchema.safeParse(manifest).success).toBe(true);
++    },
++  );
++
++  it.each(invalidManifestCases.map((c) => [c.name, c.value] as const))(
++    'rejects invalid fixture: %s',
++    (_name, value) => {
++      expect(appManifestSchema.safeParse(value).success).toBe(false);
++    },
++  );
++
++  it('accepts any well-formed semver range and refuses nonsense', () => {
++    expect(contractRangeSchema.safeParse('^1.0.0').success).toBe(true);
++    expect(contractRangeSchema.safeParse('>=1.0.0 <2.0.0').success).toBe(true);
++    expect(contractRangeSchema.safeParse('garbage!!').success).toBe(false);
++  });
++});
+diff --git a/packages/sdk/src/manifest/manifest.fixtures.ts b/packages/sdk/src/manifest/manifest.fixtures.ts
+new file mode 100644
+index 0000000..8390ba9
+--- /dev/null
++++ b/packages/sdk/src/manifest/manifest.fixtures.ts
+@@ -0,0 +1,78 @@
++import type { AppManifest } from './manifest.schema';
++
++export const validManifests: AppManifest[] = [
++  {
++    appId: 'quiz',
++    manifestVersion: 1,
++    contractRange: '^1.0.0',
++    appSettings: {
++      $schema: 'https://json-schema.org/draft/2020-12/schema',
++      type: 'object',
++      properties: {
++        title: { type: 'string', 'x-visibility': 'public' },
++        correctAnswers: { type: 'array', items: { type: 'number' } },
++      },
++      required: ['title', 'correctAnswers'],
++      additionalProperties: false,
++    },
++    events: {
++      'answer.submitted': {
++        schema: {
++          type: 'object',
++          properties: { roundId: { type: 'string' }, choice: { type: 'number' } },
++          required: ['roundId', 'choice'],
++          additionalProperties: false,
++        },
++        visibility: 'module-private',
++      },
++      'round.opened': {
++        schema: { type: 'object', properties: {}, additionalProperties: false },
++        visibility: 'public',
++      },
++    },
++  },
++];
++
++export const invalidManifestCases: { name: string; value: unknown }[] = [
++  {
++    name: 'appId is not a slug',
++    value: { ...validManifests[0], appId: 'Quiz App' },
++  },
++  {
++    name: 'appId claims the reserved core namespace',
++    value: { ...validManifests[0], appId: 'core' },
++  },
++  {
++    name: 'manifestVersion is not a positive integer',
++    value: { ...validManifests[0], manifestVersion: 0 },
++  },
++  {
++    name: 'contractRange is not a semver range',
++    value: { ...validManifests[0], contractRange: 'whatever' },
++  },
++  {
++    name: 'event short name would forge a namespace',
++    value: {
++      ...validManifests[0],
++      events: { 'Bad.Key!': { schema: { type: 'object' }, visibility: 'public' } },
++    },
++  },
++  {
++    name: 'event declares an unknown visibility ceiling',
++    value: {
++      ...validManifests[0],
++      events: { 'answer.submitted': { schema: { type: 'object' }, visibility: 'secret' } },
++    },
++  },
++  {
++    name: 'event definition misses its visibility ceiling (REQ-CTR-009 makes it mandatory)',
++    value: {
++      ...validManifests[0],
++      events: { 'answer.submitted': { schema: { type: 'object' } } },
++    },
++  },
++  {
++    name: 'manifest carries a capabilities field (rewards is phase 3 — design §5)',
++    value: { ...validManifests[0], capabilities: ['rewards'] },
++  },
++];
+diff --git a/packages/sdk/src/manifest/manifest.schema.ts b/packages/sdk/src/manifest/manifest.schema.ts
+new file mode 100644
+index 0000000..678eeae
+--- /dev/null
++++ b/packages/sdk/src/manifest/manifest.schema.ts
+@@ -0,0 +1,38 @@
++import { z } from 'zod';
++import { validRange } from 'semver';
++import { visibilitySchema } from '../visibility/visibility';
++import { appIdSchema, shortEventNameSchema } from '../events/event-type';
++
++// A serialized JSON Schema as carried inside the manifest. ADR-006: the settings and
++// event-type schemas of a given app "переносятся как сериализуемая JSON Schema
++// внутри манифеста". Deliberately structural rather than a full JSON Schema
++// meta-schema: authoring correctness is guaranteed upstream by defineApp, which is
++// the only sanctioned way to produce one.
++export const jsonSchemaObjectSchema = z.record(z.string(), z.unknown());
++export type JsonSchemaObject = z.infer<typeof jsonSchemaObjectSchema>;
++
++// NB for a future reader: .refine() is legal HERE. The guard in define-app.ts bans
++// refinements only in APP-AUTHORED schemas, because those get converted to JSON
++// Schema and the refinement would vanish silently. This schema is core-owned zod and
++// is never converted — there is nothing to lose. Do not "fix" this.
++export const contractRangeSchema = z
++  .string()
++  .refine((range) => validRange(range) !== null, { message: 'not a valid semver range' });
++
++// Per-type exposure ceiling is mandatory (REQ-CTR-009, ADR-008 §2).
++export const manifestEventSchema = z.strictObject({
++  schema: jsonSchemaObjectSchema,
++  visibility: visibilitySchema,
++});
++
++// The manifest (design §5). strictObject: an unknown field is refused rather than
++// ignored — notably `capabilities`, which ADR-003 will introduce for rewards in
++// phase 3 and which must not appear as empty scaffolding now (CLAUDE.md §2.3).
++export const appManifestSchema = z.strictObject({
++  appId: appIdSchema,
++  manifestVersion: z.number().int().positive(),
++  contractRange: contractRangeSchema,
++  appSettings: jsonSchemaObjectSchema,
++  events: z.record(shortEventNameSchema, manifestEventSchema),
++});
++export type AppManifest = z.infer<typeof appManifestSchema>;
+diff --git a/packages/sdk/src/visibility/visibility.contract.spec.ts b/packages/sdk/src/visibility/visibility.contract.spec.ts
+new file mode 100644
+index 0000000..50415aa
+--- /dev/null
++++ b/packages/sdk/src/visibility/visibility.contract.spec.ts
+@@ -0,0 +1,34 @@
++import {
++  VISIBILITY_LEVELS,
++  visibilitySchema,
++  exposureRank,
++  isWithinCeiling,
++  DEFAULT_VISIBILITY,
++} from './visibility';
++import { ceilingCases } from './visibility.fixtures';
++
++describe('visibility contract', () => {
++  it('declares exactly the three levels of REQ-CORE-005', () => {
++    expect([...VISIBILITY_LEVELS]).toEqual(['public', 'organizer', 'module-private']);
++  });
++
++  it('rejects an unknown level', () => {
++    expect(visibilitySchema.safeParse('secret').success).toBe(false);
++  });
++
++  it('orders levels by exposure: public > organizer > module-private', () => {
++    expect(exposureRank('public')).toBeGreaterThan(exposureRank('organizer'));
++    expect(exposureRank('organizer')).toBeGreaterThan(exposureRank('module-private'));
++  });
++
++  it.each(ceilingCases.map((c) => [c.name, c.actual, c.ceiling, c.within] as const))(
++    'ceiling rule: %s',
++    (_name, actual, ceiling, within) => {
++      expect(isWithinCeiling(actual, ceiling)).toBe(within);
++    },
++  );
++
++  it('defaults to the most protected level (fail-safe, ADR-008)', () => {
++    expect(DEFAULT_VISIBILITY).toBe('module-private');
++  });
++});
+diff --git a/packages/sdk/src/visibility/visibility.fixtures.ts b/packages/sdk/src/visibility/visibility.fixtures.ts
+new file mode 100644
+index 0000000..48998ae
+--- /dev/null
++++ b/packages/sdk/src/visibility/visibility.fixtures.ts
+@@ -0,0 +1,20 @@
++import type { Visibility } from './visibility';
++
++// The ceiling rule of REQ-CTR-009: the level declared for a type is the MAXIMUM
++// allowed exposure. Equal or better-protected passes; more exposed is rejected.
++export const ceilingCases: {
++  name: string;
++  actual: Visibility;
++  ceiling: Visibility;
++  within: boolean;
++}[] = [
++  { name: 'public under a public ceiling', actual: 'public', ceiling: 'public', within: true },
++  { name: 'organizer under a public ceiling', actual: 'organizer', ceiling: 'public', within: true },
++  { name: 'module-private under a public ceiling', actual: 'module-private', ceiling: 'public', within: true },
++  { name: 'public under an organizer ceiling', actual: 'public', ceiling: 'organizer', within: false },
++  { name: 'organizer under an organizer ceiling', actual: 'organizer', ceiling: 'organizer', within: true },
++  { name: 'module-private under an organizer ceiling', actual: 'module-private', ceiling: 'organizer', within: true },
++  { name: 'public under a module-private ceiling', actual: 'public', ceiling: 'module-private', within: false },
++  { name: 'organizer under a module-private ceiling', actual: 'organizer', ceiling: 'module-private', within: false },
++  { name: 'module-private under a module-private ceiling', actual: 'module-private', ceiling: 'module-private', within: true },
++];
+diff --git a/packages/sdk/src/visibility/visibility.ts b/packages/sdk/src/visibility/visibility.ts
+new file mode 100644
+index 0000000..8507d53
+--- /dev/null
++++ b/packages/sdk/src/visibility/visibility.ts
+@@ -0,0 +1,25 @@
++import { z } from 'zod';
++
++// Visibility levels of room state, log events and appSettings (REQ-CORE-005).
++export const VISIBILITY_LEVELS = ['public', 'organizer', 'module-private'] as const;
++export const visibilitySchema = z.enum(VISIBILITY_LEVELS);
++export type Visibility = z.infer<typeof visibilitySchema>;
++
++// Exposure lattice: public > organizer > module-private. Written down explicitly
++// because REQ-CTR-009 has nothing to enforce without an order (design §4.5).
++const EXPOSURE_RANK: Record<Visibility, number> = {
++  public: 2,
++  organizer: 1,
++  'module-private': 0,
++};
++
++export const exposureRank = (level: Visibility): number => EXPOSURE_RANK[level];
++
++// A declared level is a CEILING: REQ-CTR-009 calls it the maximum allowed level and
++// rejects an event whose actual visibility is weaker (= more exposed) than declared.
++export const isWithinCeiling = (actual: Visibility, ceiling: Visibility): boolean =>
++  EXPOSURE_RANK[actual] <= EXPOSURE_RANK[ceiling];
++
++// Fail-safe default for an unannotated appSettings property (REQ-CORE-008, ADR-008):
++// to leak, an author must write `public` explicitly — forgetting closes, never opens.
++export const DEFAULT_VISIBILITY: Visibility = 'module-private';
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index cab6ecc..5d9d4ed 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -123,30 +123,36 @@ importers:
+         version: 7.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
+   packages/sdk:
+     dependencies:
++      semver:
++        specifier: ^7.8.5
++        version: 7.8.5
+       zod:
+         specifier: ^4.0.0
+         version: 4.4.3
+     devDependencies:
+       '@types/jest':
+         specifier: ^29.5.14
+         version: 29.5.14
+       '@types/node':
+         specifier: ^24.0.0
+         version: 24.13.3
++      '@types/semver':
++        specifier: ^7.7.1
++        version: 7.7.1
+       jest:
+         specifier: ^29.7.0
+         version: 29.7.0(@types/node@24.13.3)
+       ts-jest:
+         specifier: ^29.2.5
+         version: 29.4.11(@babel/core@7.29.7)(@jest/transform@29.7.0)(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7))(jest-util@29.7.0)(jest@29.7.0(@types/node@24.13.3))(typescript@5.9.3)
+       typescript:
+         specifier: ^5.7.0
+         version: 5.9.3
+ 
+@@ -800,20 +806,23 @@ packages:
+ 
+   '@types/node@24.13.3':
+     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
+ 
+   '@types/pg@8.20.0':
+     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
+ 
+   '@types/react@19.2.17':
+     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
+ 
++  '@types/semver@7.7.1':
++    resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
++
+   '@types/stack-utils@2.0.3':
+     resolution: {integrity: sha512-9aEbYZ3TbYMznPdcdr3SmIrLXwC/AKZXQeCf9Pgao5CKb8CyHuEX5jzWPTkvregvhRJHcpRO6BFoGW9ycaOkYw==}
+ 
+   '@types/yargs-parser@21.0.3':
+     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
+ 
+   '@types/yargs@17.0.35':
+     resolution: {integrity: sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==}
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0':
+@@ -3286,20 +3295,22 @@ snapshots:
+   '@types/pg@8.20.0':
+     dependencies:
+       '@types/node': 24.13.3
+       pg-protocol: 1.15.0
+       pg-types: 2.2.0
+ 
+   '@types/react@19.2.17':
+     dependencies:
+       csstype: 3.2.3
+ 
++  '@types/semver@7.7.1': {}
++
+   '@types/stack-utils@2.0.3': {}
+ 
+   '@types/yargs-parser@21.0.3': {}
+ 
+   '@types/yargs@17.0.35':
+     dependencies:
+       '@types/yargs-parser': 21.0.3
+ 
+   '@typescript-eslint/eslint-plugin@8.64.0(@typescript-eslint/parser@8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
+     dependencies:

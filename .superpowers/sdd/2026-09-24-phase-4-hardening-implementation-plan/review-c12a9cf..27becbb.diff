@@ -1,0 +1,275 @@
+# Review package: c12a9cf..HEAD
+
+## Commits
+27becbb feat(core): GET /metrics (open, REQ-OPS-004) + observability boundary rules and probes
+
+## Files changed
+ .dependency-cruiser.cjs                            | 31 ++++++++++++++
+ packages/core/src/index.ts                         |  1 +
+ .../core/src/observability/metrics.controller.ts   | 22 ++++++++++
+ .../src/observability/observability.int-spec.ts    | 50 ++++++++++++++++++++++
+ .../core/src/observability/observability.module.ts | 12 ++++++
+ scripts/verify-guardrails.mjs                      | 29 +++++++++++++
+ 6 files changed, 145 insertions(+)
+
+## Diff
+diff --git a/.dependency-cruiser.cjs b/.dependency-cruiser.cjs
+index ab948b6..a15dc03 100644
+--- a/.dependency-cruiser.cjs
++++ b/.dependency-cruiser.cjs
+@@ -65,20 +65,51 @@ module.exports = {
+       severity: 'error',
+       from: {
+         path: '^packages/core/src',
+         // int-spec — миниатюра composition root: интеграционный тест законно
+         // собирает реальный RewardsModule/RewardsService для проверки связки
+         // (guest-sweep.int-spec, app-runtime.int-spec); правило про продакшн-код.
+         pathNot: ['^packages/core/src/rewards', '^packages/core/src/index\\.ts$', '[.]int-spec[.]ts$'],
+       },
+       to: { path: '^packages/core/src/rewards' },
+     },
++    {
++      name: 'observability-is-leaf',
++      comment:
++        'core/observability — лист: не импортирует доменные модули ядра ' +
++        '(REQ-OPS-004, дизайн ф.4 §6; доменные импортируют его, не наоборот). ' +
++        'config — инфраструктурное исключение (APP_CONFIG для pino-фабрики).',
++      severity: 'error',
++      // int-spec — миниатюра composition root (прецедент rewards-only-through-di-tokens):
++      // спека собирает реальный ConfigModule/TEST_CONFIG; правило про продакшн-код.
++      from: { path: '^packages/core/src/observability', pathNot: ['[.]spec[.]ts$', '[.]int-spec[.]ts$'] },
++      to: {
++        path: '^packages/core/src',
++        pathNot: ['^packages/core/src/observability', '^packages/core/src/config'],
++      },
++    },
++    {
++      name: 'observability-libs-contained',
++      comment:
++        'Библиотеки наблюдаемости (nestjs-pino/pino/pino-http/prom-client) импортируются ' +
++        'только в core/observability, barrel core и bootstrap apps/server (дизайн ф.4 §6).',
++      severity: 'error',
++      from: {
++        pathNot: [
++          '^packages/core/src/observability',
++          '^packages/core/src/index[.]ts$',
++          '^apps/server/src/main[.]ts$',
++          '[/\\\\]dist[/\\\\]',
++        ],
++      },
++      to: { path: 'node_modules/(nestjs-pino|pino-http|prom-client|pino)[/\\\\]' },
++    },
+     {
+       name: 'no-circular',
+       comment: 'Циклические зависимости запрещены.',
+       severity: 'error',
+       from: {},
+       to: { circular: true },
+     },
+     {
+       name: 'not-to-unresolvable',
+       comment: 'Импорт несуществующего модуля — ошибка (ловит опечатки; делает gate-probe независимым от порядка задач).',
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index ccb6377..8acccc7 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -57,15 +57,16 @@ export * from './auth/auth.module';
+ export * from './oauth/oauth.constants';
+ export * from './oauth/oauth.errors';
+ export { OAUTH_PROVIDER_CLIENT } from './oauth/oauth-provider.client';
+ export type { OAuthProviderClient, ProviderProfile } from './oauth/oauth-provider.client';
+ export * from './oauth/oauth.module';
+ export * from './transport/transport.module';
+ export * from './transport/http-exception.filter';
+ export * from './transport/auth.tokens';
+ export * from './observability/metrics.module';
+ export * from './observability/metrics.service';
++export * from './observability/observability.module';
+ // Testing harness — осознанное расширение barrel (design §9): e2e-спеки apps/server
+ // строятся на том же testcontainer-посеве, что и core int-спеки.
+ export * from './testing/postgres.testcontainer';
+ export * from './testing/seed-identity';
+ export * from './testing/test-config';
+diff --git a/packages/core/src/observability/metrics.controller.ts b/packages/core/src/observability/metrics.controller.ts
+new file mode 100644
+index 0000000..ff48949
+--- /dev/null
++++ b/packages/core/src/observability/metrics.controller.ts
+@@ -0,0 +1,22 @@
++import { Controller, Get, Res } from '@nestjs/common';
++import { MetricsService } from './metrics.service';
++
++// Core не знает fastify (ReplyLike-прецедент http-exception.filter): структурный
++// минимум ответа; FastifyReply совместим по форме.
++interface MetricsReply {
++  header(name: string, value: string): unknown;
++  send(body: string): unknown;
++}
++
++// REQ-OPS-004: экспозиция Prometheus text format. Открытый (решение владельца,
++// дизайн ф.4 §0.3) — как /health; авторизация и CORS-гейты не применяются.
++@Controller()
++export class MetricsController {
++  constructor(private readonly metrics: MetricsService) {}
++
++  @Get('metrics')
++  async getMetrics(@Res() reply: MetricsReply): Promise<void> {
++    reply.header('Content-Type', this.metrics.contentType);
++    reply.send(await this.metrics.render());
++  }
++}
+diff --git a/packages/core/src/observability/observability.int-spec.ts b/packages/core/src/observability/observability.int-spec.ts
+new file mode 100644
+index 0000000..67c87a3
+--- /dev/null
++++ b/packages/core/src/observability/observability.int-spec.ts
+@@ -0,0 +1,50 @@
++import { Test, type TestingModule } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { ConfigModule } from '../config/config.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import { TEST_CONFIG } from '../testing/test-config';
++import { MetricsService } from './metrics.service';
++import { ObservabilityModule } from './observability.module';
++
++// HTTP-граница экспозиции метрик (REQ-OPS-004, дизайн ф.4 §3/§0.3): fastify-
++// адаптер, дерево ConfigModule + ObservabilityModule. БД не нужна — контроллер
++// читает только registry MetricsService. Эндпоинт открытый (решение владельца)
++// — как /health: авторизация и CORS-гейты не применяются.
++describe('Observability /metrics (int)', () => {
++  let moduleRef: TestingModule;
++  let app: NestFastifyApplication;
++
++  beforeAll(async () => {
++    moduleRef = await Test.createTestingModule({
++      imports: [ConfigModule, ObservabilityModule],
++    })
++      // ConfigModule читает process.env — в int-лайне подменяем инертным конфигом.
++      .overrideProvider(APP_CONFIG)
++      .useValue(TEST_CONFIG)
++      .compile();
++    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    await app.init();
++    await app.listen(0, '127.0.0.1');
++  });
++
++  afterAll(async () => {
++    await app.close();
++  });
++
++  it('GET /metrics — 200, text format, 4 метрики REQ-OPS-004', async () => {
++    const metrics = moduleRef.get(MetricsService);
++    metrics.connectionAdded('11111111-1111-4111-8111-111111111111');
++    const res = await app.inject({ method: 'GET', url: '/metrics' });
++    expect(res.statusCode).toBe(200);
++    expect(res.headers['content-type']).toContain('text/plain');
++    expect(res.body).toContain('mymozhem_active_connections{roomId="11111111-1111-4111-8111-111111111111"} 1');
++    expect(res.body).toContain('mymozhem_publish_to_deliver_seconds');
++    expect(res.body).toContain('mymozhem_replay_duration_seconds');
++    expect(res.body).toContain('mymozhem_event_commit_errors_total');
++  });
++
++  it('GET /metrics не требует авторизации (открытый — решение владельца, дизайн §0.3)', async () => {
++    const res = await app.inject({ method: 'GET', url: '/metrics' }); // без заголовков
++    expect(res.statusCode).toBe(200);
++  });
++});
+diff --git a/packages/core/src/observability/observability.module.ts b/packages/core/src/observability/observability.module.ts
+new file mode 100644
+index 0000000..a03d93e
+--- /dev/null
++++ b/packages/core/src/observability/observability.module.ts
+@@ -0,0 +1,12 @@
++import { Module } from '@nestjs/common';
++import { MetricsController } from './metrics.controller';
++import { MetricsModule } from './metrics.module';
++
++// Фасад наблюдаемости (ф.4): /metrics + (батч C) pino-конфигурация. Листовой —
++// доменные модули импортируют его, не наоборот (observability-is-leaf).
++@Module({
++  imports: [MetricsModule],
++  controllers: [MetricsController],
++  exports: [MetricsModule],
++})
++export class ObservabilityModule {}
+diff --git a/scripts/verify-guardrails.mjs b/scripts/verify-guardrails.mjs
+index 743a26c..45156c1 100644
+--- a/scripts/verify-guardrails.mjs
++++ b/scripts/verify-guardrails.mjs
+@@ -80,20 +80,37 @@ writeFileSync(webSocketProbe, "import 'socket.io-client';\nexport const probe =
+ // web-no-cross-app-imports — путь в core только через sdk, дизайн UI-среза §2).
+ // Цель — apps/server/src/main.ts: не под ^packages/, поэтому импорт матчит
+ // ТОЛЬКО новое правило и не может быть замаскирован соседним (web-only-through-sdk
+ // ловит apps/web → packages/*, apps-only-through-core-entrypoint — apps/* → core/src).
+ const crossAppProbe = 'apps/web/src/__probe-cross-app__.ts';
+ writeFileSync(
+   crossAppProbe,
+   "import '../../server/src/main';\nexport const probe = 1;\n",
+ );
+ 
++// 9) Observability-leaf probe: observability импортирует доменный модуль
++// (forbidden: observability-is-leaf). Относительный импорт (прецедент probe 4).
++const obsLeafProbe = 'packages/core/src/observability/__probe-leaf.ts';
++writeFileSync(
++  obsLeafProbe,
++  "import '../room/room.module';\nexport const probe = 1;\n",
++);
++
++// 10) Observability-libs probe: prom-client вне observability
++// (forbidden: observability-libs-contained). Пакетный spec — правило матчится
++// по node_modules-пути резолва (прецедент probe 7).
++const obsLibsProbe = 'packages/core/src/room/__probe-obs-libs.ts';
++writeFileSync(
++  obsLibsProbe,
++  "import 'prom-client';\nexport const probe = 1;\n",
++);
++
+ try {
+   expectFailure(
+     'sdk → core import (dependency-cruiser)',
+     `pnpm exec depcruise ${boundaryProbe} --config .dependency-cruiser.cjs`,
+     'sdk-is-leaf',
+   );
+   expectFailure(
+     'module-level mutable export (eslint)',
+     `pnpm exec eslint ${mutableProbe} --no-ignore`,
+     'REQ-CORE-004',
+@@ -121,26 +138,38 @@ try {
+   expectFailure(
+     'socket.io-client outside web/src/realtime (dependency-cruiser)',
+     `pnpm exec depcruise ${webSocketProbe} --config .dependency-cruiser.cjs`,
+     'web-socketio-only-in-realtime',
+   );
+   expectFailure(
+     'web → other apps/* import (dependency-cruiser)',
+     `pnpm exec depcruise ${crossAppProbe} --config .dependency-cruiser.cjs`,
+     'web-no-cross-app-imports',
+   );
++  expectFailure(
++    'observability → core domain import (dependency-cruiser)',
++    `pnpm exec depcruise ${obsLeafProbe} --config .dependency-cruiser.cjs`,
++    'observability-is-leaf',
++  );
++  expectFailure(
++    'prom-client outside observability (dependency-cruiser)',
++    `pnpm exec depcruise ${obsLibsProbe} --config .dependency-cruiser.cjs`,
++    'observability-libs-contained',
++  );
+ } finally {
+   rmSync(boundaryProbe, { force: true });
+   rmSync('scripts/__probe__', { recursive: true, force: true });
+   rmSync(appsProbe, { force: true });
+   rmSync(rewardsProbe, { force: true });
+   rmSync(mathRandomProbe, { force: true });
+   rmSync(webCoreProbe, { force: true });
+   rmSync(webSocketProbe, { force: true });
+   rmSync(crossAppProbe, { force: true });
++  rmSync(obsLeafProbe, { force: true });
++  rmSync(obsLibsProbe, { force: true });
+ }
+ 
+ if (process.exitCode) {
+   console.error('\nGuardrails are NOT enforcing. Fix before merge.');
+ } else {
+   console.log('\nAll guardrails verified alive.');
+ }
