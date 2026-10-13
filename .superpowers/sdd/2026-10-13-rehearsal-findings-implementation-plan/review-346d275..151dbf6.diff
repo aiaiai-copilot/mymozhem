@@ -1,0 +1,216 @@
+# Review package: 346d2753ddba8843a774713f2f7f9398f3eae1aa..151dbf6584ab6a6953b58c5189665bd49c68fca2
+
+## Commits
+151dbf6 feat(core): COOKIE_SECURE — Secure-атрибут refresh-куки отделён от NODE_ENV (находка №2, plain-HTTP LAN self-hosted)
+
+## Files changed
+ docker-compose.yml                                 |  3 ++
+ packages/core/src/config/config.schema.spec.ts     | 11 +++++++
+ packages/core/src/config/config.schema.ts          |  4 +++
+ packages/core/src/testing/test-config.ts           |  1 +
+ packages/core/src/transport/refresh-cookie.spec.ts | 37 ++++++++++++++++++++++
+ packages/core/src/transport/refresh-cookie.ts      | 11 +++++--
+ 6 files changed, 65 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 3271a1b..30ea880 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -17,20 +17,23 @@ services:
+   server:
+     build: .
+     environment:
+       DATABASE_URL: postgresql://mymozhem:mymozhem@postgres:5432/mymozhem?schema=public
+       # REQ-SEC-002: обязателен, >=32 байта; без значения в окружении compose не стартует.
+       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (>=32 bytes)}
+       # REQ-SEC-008: allowlist origin через запятую; пусто = CORS-заголовки не выдаются.
+       CORS_ORIGINS: ${CORS_ORIGINS:-}
+       # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
+       TRUST_PROXY: ${TRUST_PROXY:-false}
++      # ADR-012 self-hosted (находка №2): auto = Secure при NODE_ENV=production.
++      # false — ТОЛЬКИ plain-HTTP LAN-стенд первого события (см. чеклист §0.4).
++      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+       # ADR-012 §2: bootstrap единственного организатора инстанса. Обязателен
+       # (>=32 байта); без значения в окружении compose не стартует.
+       ORGANIZER_SETUP_TOKEN: ${ORGANIZER_SETUP_TOKEN:?ORGANIZER_SETUP_TOKEN is required (>=32 bytes)}
+       # ADR-012 §4: призовой режим выключен по умолчанию; on — юридическая
+       # ответственность организатора (лотереи, налоги).
+       PRIZE_MODE: ${PRIZE_MODE:-off}
+       # UI-срез (дизайн §2): same-origin раздача собранного SPA из того же образа
+       # (build-стейдж Dockerfile собирает apps/web турбо-таской в /app/apps/web/dist).
+       WEB_STATIC_DIR: /app/apps/web/dist
+       PORT: 3000
+diff --git a/packages/core/src/config/config.schema.spec.ts b/packages/core/src/config/config.schema.spec.ts
+index 74c655b..0184f50 100644
+--- a/packages/core/src/config/config.schema.spec.ts
++++ b/packages/core/src/config/config.schema.spec.ts
+@@ -118,20 +118,31 @@ describe('loadConfig', () => {
+   it('applies transport defaults', () => {
+     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
+     expect(cfg.ACCESS_TOKEN_TTL).toBe(900);
+     expect(cfg.GUEST_TTL).toBe(86400);
+     expect(cfg.REFRESH_TOKEN_TTL).toBe(2_592_000);
+     expect(cfg.REFRESH_RATE_LIMIT).toBe(10);
+     expect(cfg.TRUST_PROXY).toBe(false);
+     expect(cfg.CORS_ORIGINS).toEqual([]);
+   });
+ 
++  it('COOKIE_SECURE: дефолт auto; принимает true/false; прочее — отказ', () => {
++    const base = {
++      DATABASE_URL: 'postgresql://localhost:5432/x',
++      JWT_SECRET: 'x'.repeat(32),
++      ORGANIZER_SETUP_TOKEN: 'y'.repeat(32),
++    };
++    expect(configSchema.parse(base).COOKIE_SECURE).toBe('auto');
++    expect(configSchema.parse({ ...base, COOKIE_SECURE: 'false' }).COOKIE_SECURE).toBe('false');
++    expect(() => configSchema.parse({ ...base, COOKIE_SECURE: 'maybe' })).toThrow();
++  });
++
+   it('parses TRUST_PROXY and CORS_ORIGINS', () => {
+     const cfg = loadConfig({
+       ...base,
+       TRUST_PROXY: 'true',
+       CORS_ORIGINS: 'https://a.example, https://b.example',
+     } as NodeJS.ProcessEnv);
+     expect(cfg.TRUST_PROXY).toBe(true);
+     expect(cfg.CORS_ORIGINS).toEqual(['https://a.example', 'https://b.example']);
+   });
+ 
+diff --git a/packages/core/src/config/config.schema.ts b/packages/core/src/config/config.schema.ts
+index 871d432..3fb537a 100644
+--- a/packages/core/src/config/config.schema.ts
++++ b/packages/core/src/config/config.schema.ts
+@@ -42,20 +42,24 @@ export const configSchema = z.object({
+   // reconnect/replay, 10/мин. Объём amendment v1.3: потолок — ф.1; экспоненциальный
+   // бэкофф и конфигурируемый режим — ф.4.
+   RECONNECT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).default(10),
+   // REQ-RT-012 (§4 max_event_payload): 16 КБ, диапазон 1 КБ … 256 КБ (байты).
+   MAX_EVENT_PAYLOAD_BYTES: z.coerce.number().int().min(1024).max(262_144).default(16_384),
+   // Доверие к X-Forwarded-For — свойство деплоя, не кода (transport design §6).
+   TRUST_PROXY: z
+     .enum(['true', 'false'])
+     .default('false')
+     .transform((v) => v === 'true'),
++  // ADR-012 self-hosted (находка №2): Secure-атрибут refresh-куки отделён от
++  // NODE_ENV. auto — прежнее поведение (production = Secure); false — только
++  // plain-HTTP LAN/self-hosted стенд. Hosted-деплой флаг не выставляет.
++  COOKIE_SECURE: z.enum(['auto', 'true', 'false']).default('auto'),
+   // REQ-SEC-008: allowlist origin; wildcard в production запрещён (superRefine).
+   CORS_ORIGINS: z
+     .string()
+     .default('')
+     .transform((s) =>
+       s
+         .split(',')
+         .map((o) => o.trim())
+         .filter(Boolean),
+     ),
+diff --git a/packages/core/src/testing/test-config.ts b/packages/core/src/testing/test-config.ts
+index b08daee..a7ccfd5 100644
+--- a/packages/core/src/testing/test-config.ts
++++ b/packages/core/src/testing/test-config.ts
+@@ -15,20 +15,21 @@ export const TEST_CONFIG: AppConfig = {
+   GUEST_TTL: 86_400,
+   CLEANUP_INTERVAL: 3_600,
+   // REFRESH_TOKEN_TTL — новый дефолт §4 (30 сут): registered-ветки int-спеков должны
+   // видеть TTL > GUEST_TTL (гостевой cap применяется при выдаче, не в конфиге).
+   REFRESH_TOKEN_TTL: 2_592_000,
+   REFRESH_RATE_LIMIT: 10,
+   EVENT_EMIT_RATE_LIMIT_PER_MIN: 30,
+   MAX_EVENT_PAYLOAD_BYTES: 16_384,
+   RECONNECT_RATE_LIMIT_PER_MIN: 10,
+   TRUST_PROXY: false,
++  COOKIE_SECURE: 'auto',
+   CORS_ORIGINS: [],
+   // ADR-012: bootstrap организатора и призовой режим (тестовые значения инертны).
+   ORGANIZER_SETUP_TOKEN: 'test-only-organizer-setup-token!!',
+   ORGANIZER_RATE_LIMIT: 10,
+   PRIZE_MODE: 'off',
+   LOG_LEVEL: 'warn', // меньше шума в лане; спеки на уровень конструируют конфиг сами
+ };
+ 
+ // Структурный no-op фейк PinoLogger (REQ-OPS-004) для прямых — вне DI — конструкций
+ // сервисов в int/e2e-спеках: DI-деревья получают настоящий PinoLogger транзитивно
+diff --git a/packages/core/src/transport/refresh-cookie.spec.ts b/packages/core/src/transport/refresh-cookie.spec.ts
+new file mode 100644
+index 0000000..4f7d671
+--- /dev/null
++++ b/packages/core/src/transport/refresh-cookie.spec.ts
+@@ -0,0 +1,37 @@
++import { TEST_CONFIG } from '../testing/test-config';
++import type { AppConfig } from '../config/config.schema';
++import type { ReplyLike } from './http.types';
++import { setRefreshCookie } from './refresh-cookie';
++
++// Фейк ReplyLike: интересует только options.secure переданный в setCookie.
++class FakeReply implements ReplyLike {
++  cookieOptions: { secure: boolean } | null = null;
++  setCookie(_name: string, _value: string, options: { secure: boolean }): unknown {
++    this.cookieOptions = options;
++    return this;
++  }
++  clearCookie(): unknown {
++    return this;
++  }
++  redirect(): unknown {
++    return this;
++  }
++}
++
++const cfg = (over: Partial<AppConfig>): AppConfig => ({ ...TEST_CONFIG, ...over });
++
++// Находка №2: LAN-стенд под NODE_ENV=production по plain HTTP — Secure-кука
++// браузером не принимается. Флаг COOKIE_SECURE отделяет « Secure-атрибут» от
++// NODE_ENV; дефолт auto = прежнее поведение (дизайн §2).
++describe('setRefreshCookie + COOKIE_SECURE', () => {
++  it.each([
++    ['auto + production → secure', cfg({ COOKIE_SECURE: 'auto', NODE_ENV: 'production' }), true],
++    ['auto + development → не secure', cfg({ COOKIE_SECURE: 'auto', NODE_ENV: 'development' }), false],
++    ["'true' принудительно secure даже в development", cfg({ COOKIE_SECURE: 'true', NODE_ENV: 'development' }), true],
++    ["'false' снимает secure даже в production (plain-HTTP LAN)", cfg({ COOKIE_SECURE: 'false', NODE_ENV: 'production' }), false],
++  ] as const)('%s', (_label, config, expectedSecure) => {
++    const reply = new FakeReply();
++    setRefreshCookie(reply, 'refresh-token', config, 'REGISTERED');
++    expect(reply.cookieOptions?.secure).toBe(expectedSecure);
++  });
++});
+diff --git a/packages/core/src/transport/refresh-cookie.ts b/packages/core/src/transport/refresh-cookie.ts
+index 75f94be..bc6be5a 100644
+--- a/packages/core/src/transport/refresh-cookie.ts
++++ b/packages/core/src/transport/refresh-cookie.ts
+@@ -1,25 +1,32 @@
+ import type { AppConfig } from '../config/config.schema';
+ import { REFRESH_COOKIE } from '../auth/auth.constants';
+ import type { ReplyLike } from './http.types';
+ 
+ // httpOnly + SameSite=Strict + Path=/auth: кука не уходит никуда, кроме
+-// refresh-эндпоинта (REQ-ID-008). Secure — только в production (dev/e2e по http).
++// refresh-эндпоинта (REQ-ID-008). Secure — только в production (dev/e2e по http);
++// флаг COOKIE_SECURE (находка №2) позволяет снять/выставить атрибут явно.
+ // maxAge повторяет sessionExpiry (design §5 — одна норма в двух местах, менять вместе):
+ // GUEST → min(REFRESH, GUEST_TTL) (REQ-ID-016); REGISTERED → REFRESH_TOKEN_TTL.
+ export function setRefreshCookie(
+   reply: ReplyLike,
+   refreshToken: string,
+   config: AppConfig,
+   kind: 'GUEST' | 'REGISTERED',
+ ): void {
+   const maxAge = kind === 'GUEST'
+     ? Math.min(config.REFRESH_TOKEN_TTL, config.GUEST_TTL)
+     : config.REFRESH_TOKEN_TTL;
++  // COOKIE_SECURE (находка №2): auto — по NODE_ENV (прежняя норма), явное
++  // значение побеждает (false — только plain-HTTP LAN, см. чеклист события).
++  const secure =
++    config.COOKIE_SECURE === 'auto'
++      ? config.NODE_ENV === 'production'
++      : config.COOKIE_SECURE === 'true';
+   void reply.setCookie(REFRESH_COOKIE, refreshToken, {
+     httpOnly: true,
+-    secure: config.NODE_ENV === 'production',
++    secure,
+     sameSite: 'strict',
+     path: '/auth',
+     maxAge,
+   });
+ }
