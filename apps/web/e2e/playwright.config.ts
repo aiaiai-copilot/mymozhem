@@ -14,6 +14,9 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 15_000 },
   reporter: [['list']],
+  // Пин «сьют = один файл»: рядом живут *.vitest.spec.ts (vitest-спеки e2e),
+  // которые playwright подхватывать не должен.
+  testMatch: 'smoke.spec.ts',
   use: {
     baseURL: 'http://localhost:3000',
   },

@@ -14,7 +14,9 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/**/*.spec.ts'],
+    // Суффикс .vitest.spec.ts — e2e-спеки, которые playwright НЕ подхватывает:
+    // у обоих playwright-конфигов явный testMatch.
+    include: ['src/**/*.spec.ts', 'e2e/**/*.vitest.spec.ts'],
     // До батчей C/D спек нет, а turbo-гейт `test` обязан оставаться зелёным
     // (REQ-DEV-001): пустой пакет — не падение.
     passWithNoTests: true,
