@@ -6,6 +6,7 @@ import fastifyHelmet from '@fastify/helmet';
 import { tokenResponseSchema } from '@mymozhem/sdk';
 import { loadConfig, startTestDb, TEST_CONFIG, TokenService, type TestDb } from '@mymozhem/core';
 import { AppModule } from '../src/app.module';
+import { HELMET_OPTIONS } from '../src/security-headers';
 
 jest.setTimeout(120_000);
 
@@ -42,7 +43,7 @@ async function createApp(envOverrides: Record<string, string> = {}): Promise<Nes
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.register(fastifyCookie);
-    await app.register(fastifyHelmet);
+    await app.register(fastifyHelmet, HELMET_OPTIONS);
     await app.register(fastifyCors, { origin: corsOrigins });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();

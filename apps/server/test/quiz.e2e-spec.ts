@@ -19,6 +19,7 @@ import {
   type TestDb,
 } from '@mymozhem/core';
 import { AppModule } from '../src/app.module';
+import { HELMET_OPTIONS } from '../src/security-headers';
 
 jest.setTimeout(180_000);
 
@@ -55,7 +56,7 @@ async function createApp(envOverrides: Record<string, string> = {}): Promise<Nes
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.register(fastifyCookie);
-    await app.register(fastifyHelmet);
+    await app.register(fastifyHelmet, HELMET_OPTIONS);
     await app.register(fastifyCors, { origin: config.CORS_ORIGINS });
     app.useWebSocketAdapter(new ConfigurableIoAdapter(config, app.getHttpAdapter().getHttpServer()));
     await app.init();
