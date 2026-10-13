@@ -33,6 +33,13 @@ export interface GuestSession {
 export class SessionStore implements TokenProvider {
   private accessToken: string | null = null;
 
+  // Single-flight (находка №4): конкурентные refresh (HostGate, 401-retry
+  // ApiClient, refresh-хук RoomConnection) шлют ОДНУ refresh-куку; strict-ротация
+  // читает повторное предъявление как кражу и гасит семью. In-flight промис
+  // мемоизируется: конкуренты делят один запрос. Мемо сбрасывается на ЛЮБОМ
+  // settle — retry после провала разрешён, следующий refresh работает.
+  private inFlightRefresh: Promise<void> | null = null;
+
   constructor(private readonly refreshFn: () => Promise<string>) {}
 
   getAccessToken(): string | null {
@@ -45,7 +52,14 @@ export class SessionStore implements TokenProvider {
   }
 
   async refresh(): Promise<void> {
-    this.accessToken = await this.refreshFn();
+    this.inFlightRefresh ??= this.refreshFn()
+      .then((token) => {
+        this.accessToken = token;
+      })
+      .finally(() => {
+        this.inFlightRefresh = null;
+      });
+    return this.inFlightRefresh;
   }
 
   static loadGuest(): GuestSession | null {
@@ -81,5 +95,12 @@ export class SessionStore implements TokenProvider {
 
   static saveHostRoomCode(code: string): void {
     localStorage.setItem(HOST_ROOM_CODE_KEY, code);
+  }
+
+  // Стейл-roomId консоли (находка №3): комната из прошлой БД — оба ключа
+  // снимаются атомарно, чтобы гейт не увидел половину состояния.
+  static clearHostRoom(): void {
+    localStorage.removeItem(HOST_ROOM_KEY);
+    localStorage.removeItem(HOST_ROOM_CODE_KEY);
   }
 }
