@@ -1,0 +1,163 @@
+# Review package: 1cfbcce..HEAD
+
+## Commits
+972efed fix(web): single-flight refresh в SessionStore — конкурентные refresh делят один запрос (находка №4, rotation race)
+
+## Files changed
+ apps/web/src/state/session.spec.ts | 64 ++++++++++++++++++++++++++++++++++++++
+ apps/web/src/state/session.ts      | 23 +++++++++++++-
+ 2 files changed, 86 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/apps/web/src/state/session.spec.ts b/apps/web/src/state/session.spec.ts
+index 22715cc..7da0320 100644
+--- a/apps/web/src/state/session.spec.ts
++++ b/apps/web/src/state/session.spec.ts
+@@ -88,11 +88,75 @@ describe('SessionStore', () => {
+ 
+     expect(store.getAccessToken()).toBeNull();
+     store.setAccessToken('old-token');
+     expect(store.getAccessToken()).toBe('old-token');
+ 
+     await store.refresh();
+     // После refresh getAccessToken обязан отдавать уже новый токен — иначе retry
+     // по 401 в api-client ушёл бы со старым (контракт TokenProvider).
+     expect(store.getAccessToken()).toBe('new-token');
+   });
++
++  it('single-flight: конкурентные refresh() делят один вызов refreshFn (находка №4)', async () => {
++    // HostGate + 401-retry ApiClient + refresh-хук RoomConnection могут дёрнуть
++    // refresh одновременно с ОДНОЙ refresh-кукой; strict-ротация видит повторное
++    // предъявление и гасит семью («rotation race lost» на репетиции 2026-10-13).
++    let calls = 0;
++    let resolveFn!: (token: string) => void;
++    const store = new SessionStore(
++      () =>
++        new Promise<string>((resolve) => {
++          calls += 1;
++          resolveFn = resolve;
++        }),
++    );
++
++    const p1 = store.refresh();
++    const p2 = store.refresh();
++    const p3 = store.refresh();
++    resolveFn('tok-1');
++    await Promise.all([p1, p2, p3]);
++
++    expect(calls).toBe(1);
++    expect(store.getAccessToken()).toBe('tok-1');
++  });
++
++  it('после settle следующий refresh вызывает refreshFn снова', async () => {
++    let calls = 0;
++    const store = new SessionStore(() => {
++      calls += 1;
++      return Promise.resolve(`tok-${calls}`);
++    });
++
++    await store.refresh();
++    await store.refresh();
++
++    expect(calls).toBe(2);
++    expect(store.getAccessToken()).toBe('tok-2');
++  });
++
++  it('провал refresh не затирает токен и не блокирует следующую попытку (Review Focus 2)', async () => {
++    let calls = 0;
++    const store = new SessionStore(() => {
++      calls += 1;
++      return calls === 1 ? Promise.reject(new Error('network')) : Promise.resolve('tok-recovered');
++    });
++    store.setAccessToken('tok-old');
++
++    await expect(store.refresh()).rejects.toThrow('network');
++    expect(store.getAccessToken()).toBe('tok-old'); // провал ≠ потеря токена
++
++    await store.refresh(); // retry разрешён: мемо сброшен и на reject
++    expect(store.getAccessToken()).toBe('tok-recovered');
++    expect(calls).toBe(2);
++  });
++
++  it('clearHostRoom: сносит оба host-ключа (потребитель — консоль, находка №3)', () => {
++    SessionStore.saveHostRoomId('room-1');
++    SessionStore.saveHostRoomCode('ABCD-2345');
++
++    SessionStore.clearHostRoom();
++
++    expect(SessionStore.loadHostRoomId()).toBeNull();
++    expect(SessionStore.loadHostRoomCode()).toBeNull();
++  });
+ });
+diff --git a/apps/web/src/state/session.ts b/apps/web/src/state/session.ts
+index 9590bb3..4bbbd5f 100644
+--- a/apps/web/src/state/session.ts
++++ b/apps/web/src/state/session.ts
+@@ -26,33 +26,47 @@ const HOST_ROOM_CODE_KEY = 'mm.host.roomCode';
+ export interface GuestSession {
+   code: string;
+   displayName: string;
+ }
+ 
+ // Access-токен — в памяти (TTL ≤ 15 мин, refresh по 401); localStorage — только
+ // переживающая перезагрузку идентификация (код/имя гостя, roomId организатора).
+ export class SessionStore implements TokenProvider {
+   private accessToken: string | null = null;
+ 
++  // Single-flight (находка №4): конкурентные refresh (HostGate, 401-retry
++  // ApiClient, refresh-хук RoomConnection) шлют ОДНУ refresh-куку; strict-ротация
++  // читает повторное предъявление как кражу и гасит семью. In-flight промис
++  // мемоизируется: конкуренты делят один запрос. Мемо сбрасывается на ЛЮБОМ
++  // settle — retry после провала разрешён, следующий refresh работает.
++  private inFlightRefresh: Promise<void> | null = null;
++
+   constructor(private readonly refreshFn: () => Promise<string>) {}
+ 
+   getAccessToken(): string | null {
+     return this.accessToken;
+   }
+ 
+   // Не часть TokenProvider — страницы (Task 11+) ставят токен после login/guest-auth.
+   setAccessToken(token: string): void {
+     this.accessToken = token;
+   }
+ 
+   async refresh(): Promise<void> {
+-    this.accessToken = await this.refreshFn();
++    this.inFlightRefresh ??= this.refreshFn()
++      .then((token) => {
++        this.accessToken = token;
++      })
++      .finally(() => {
++        this.inFlightRefresh = null;
++      });
++    return this.inFlightRefresh;
+   }
+ 
+   static loadGuest(): GuestSession | null {
+     try {
+       const raw = localStorage.getItem(GUEST_KEY);
+       return raw ? (JSON.parse(raw) as GuestSession) : null;
+     } catch {
+       // Битая запись (посторонний код, старая версия) — читается как «гостя нет»,
+       // а не как падение загрузки страницы.
+       return null;
+@@ -75,11 +89,18 @@ export class SessionStore implements TokenProvider {
+     localStorage.setItem(HOST_ROOM_KEY, id);
+   }
+ 
+   static loadHostRoomCode(): string | null {
+     return localStorage.getItem(HOST_ROOM_CODE_KEY);
+   }
+ 
+   static saveHostRoomCode(code: string): void {
+     localStorage.setItem(HOST_ROOM_CODE_KEY, code);
+   }
++
++  // Стейл-roomId консоли (находка №3): комната из прошлой БД — оба ключа
++  // снимаются атомарно, чтобы гейт не увидел половину состояния.
++  static clearHostRoom(): void {
++    localStorage.removeItem(HOST_ROOM_KEY);
++    localStorage.removeItem(HOST_ROOM_CODE_KEY);
++  }
+ }
