@@ -125,6 +125,17 @@ describe('loadConfig', () => {
     expect(cfg.CORS_ORIGINS).toEqual([]);
   });
 
+  it('COOKIE_SECURE: дефолт auto; принимает true/false; прочее — отказ', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://localhost:5432/x',
+      JWT_SECRET: 'x'.repeat(32),
+      ORGANIZER_SETUP_TOKEN: 'y'.repeat(32),
+    };
+    expect(configSchema.parse(base).COOKIE_SECURE).toBe('auto');
+    expect(configSchema.parse({ ...base, COOKIE_SECURE: 'false' }).COOKIE_SECURE).toBe('false');
+    expect(() => configSchema.parse({ ...base, COOKIE_SECURE: 'maybe' })).toThrow();
+  });
+
   it('parses TRUST_PROXY and CORS_ORIGINS', () => {
     const cfg = loadConfig({
       ...base,

@@ -22,6 +22,7 @@ export const TEST_CONFIG: AppConfig = {
   MAX_EVENT_PAYLOAD_BYTES: 16_384,
   RECONNECT_RATE_LIMIT_PER_MIN: 10,
   TRUST_PROXY: false,
+  COOKIE_SECURE: 'auto',
   CORS_ORIGINS: [],
   // ADR-012: bootstrap организатора и призовой режим (тестовые значения инертны).
   ORGANIZER_SETUP_TOKEN: 'test-only-organizer-setup-token!!',

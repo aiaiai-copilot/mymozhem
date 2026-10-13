@@ -49,6 +49,10 @@ export const configSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  // ADR-012 self-hosted (находка №2): Secure-атрибут refresh-куки отделён от
+  // NODE_ENV. auto — прежнее поведение (production = Secure); false — только
+  // plain-HTTP LAN/self-hosted стенд. Hosted-деплой флаг не выставляет.
+  COOKIE_SECURE: z.enum(['auto', 'true', 'false']).default('auto'),
   // REQ-SEC-008: allowlist origin; wildcard в production запрещён (superRefine).
   CORS_ORIGINS: z
     .string()
