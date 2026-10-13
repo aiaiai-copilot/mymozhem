@@ -23,6 +23,11 @@ const commandErrorText = (e: unknown): string => {
   return 'Ошибка сети. Команда не выполнена.';
 };
 
+// Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
+// ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
+export const isStaleRoomJoinError = (code: string | null): boolean =>
+  code === 'ACTOR_NOT_MEMBER' || code === 'NOT_FOUND';
+
 // Консоль ведущего (бриф Task 14): код комнаты крупно + копируемые ссылки,
 // баннер соединения, пульт квиза по проекции лога. Переиспользует hostSession/
 // hostClient Task 13 — второй SessionStore на host-флоу не заводим.
@@ -43,6 +48,17 @@ export function ConsolePage() {
 
   const binding = useRoomBinding(roomId, hostSession);
   const feed = useRoomFeed(roomId, hostClient, binding.events);
+
+  const [roomGone, setRoomGone] = useState(false);
+
+  // Однократно на переход joinError: ключи снимаем атомарно (clearHostRoom),
+  // иначе следующий заход на /host снова приведёт в мёртвую комнату.
+  useEffect(() => {
+    if (isStaleRoomJoinError(binding.joinError)) {
+      SessionStore.clearHostRoom();
+      setRoomGone(true);
+    }
+  }, [binding.joinError]);
 
   // Пин приложения — из payload core.room.activated (REQ-RT-004: ACTIVE
   // замораживает пару appId/manifestVersion). Парсим той же схемой, что ядро
@@ -98,6 +114,18 @@ export function ConsolePage() {
     return (
       <main>
         <p>Переход…</p>
+      </main>
+    );
+  }
+
+  if (roomGone) {
+    return (
+      <main>
+        <h1>Комната не найдена</h1>
+        <p>Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.</p>
+        <p>
+          <a href="/host/setup">К настройке комнаты</a>
+        </p>
       </main>
     );
   }
