@@ -6,6 +6,11 @@ import { RoomConnection, type ConnectionState } from '../realtime/room-connectio
 import { createSocket } from '../realtime/socket-like';
 import { LogStore } from './log-store';
 
+// Код отказа стартового join (находка №3): ApiError несёт wire-код; сетевые
+// отказы (не ApiError) — null, их место — баннер 'disconnected', не экраны ошибок.
+export const joinErrorCode = (e: unknown): string | null =>
+  e instanceof ApiError ? e.code : null;
+
 // Тонкий React-клей поверх RoomConnection + LogStore (дизайн §3): вся фолд-логика
 // (буфер до snapshot, перефолд на resync) уже оттестирована в LogStore и
 // RoomConnection; хук только поднимает их колбэки в useState. Новый roomId →
@@ -13,19 +18,26 @@ import { LogStore } from './log-store';
 export function useRoomBinding(
   roomId: string | null,
   tokens: TokenProvider,
+  // opts НЕ входит в deps effect: объект-литерал перезапускал бы effect на
+  // каждый рендер; колбэк читается из замыкания effect — потребители передают
+  // стабильные useCallback.
+  opts?: { onSessionDead?: () => void },
 ): {
   connectionState: ConnectionState;
   events: ProjectedEvent[];
   appSettings: Record<string, unknown>;
+  joinError: string | null;
   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
 } {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [events, setEvents] = useState<ProjectedEvent[]>([]);
   const [appSettings, setAppSettings] = useState<Record<string, unknown>>({});
+  const [joinError, setJoinError] = useState<string | null>(null);
   const connRef = useRef<RoomConnection | null>(null);
 
   useEffect(() => {
     if (!roomId) return;
+    setJoinError(null);
     const store = new LogStore();
     // Refresh-хук: протухший access-токен — единственная самовосстанавливающаяся
     // причина handshake-отказов (refresh-кука живёт дольше); RoomConnection сам
@@ -34,6 +46,7 @@ export function useRoomBinding(
       createSocket(() => tokens.getAccessToken()),
       roomId,
       () => tokens.refresh(),
+      opts?.onSessionDead,
     );
     connRef.current = conn;
     conn.onEvent((e) => {
@@ -63,7 +76,10 @@ export function useRoomBinding(
         setAppSettings(snapshot.appSettings);
         setEvents(store.all());
       })
-      .catch(() => setConnectionState('disconnected'));
+      .catch((e: unknown) => {
+        setJoinError(joinErrorCode(e));
+        setConnectionState('disconnected');
+      });
     return () => {
       // Обнуляем ref ДО следующего effect (cleanup всегда предшествует ему):
       // publish на уже закрытом соединении обязан отказать NOT_CONNECTED,
@@ -77,6 +93,7 @@ export function useRoomBinding(
     connectionState,
     events,
     appSettings,
+    joinError,
     publish: (type, payload) => {
       const conn = connRef.current;
       // roomId === null → effect не поднимал соединение; publish без комнаты —

@@ -288,6 +288,48 @@ describe('RoomConnection', () => {
     expect(states).toEqual(['live', 'disconnected', 'disconnected']);
   });
 
+  it('провал refresh-хука → onSessionDead + состояние disconnected (находка №5)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let sessionDead = 0;
+    const states: ConnectionState[] = [];
+    const conn = new RoomConnection(
+      socket,
+      ROOM_ID,
+      () => Promise.reject(new Error('refresh cookie dead')),
+      () => {
+        sessionDead += 1;
+      },
+    );
+    conn.onStateChange((s) => states.push(s));
+
+    socket.triggerConnect();
+    await conn.join();
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+
+    await flushMicrotasks();
+
+    expect(sessionDead).toBe(1);
+    expect(states[states.length - 1]).toBe('disconnected');
+  });
+
+  it('обычный disconnect (сеть) → onSessionDead НЕ стреляет (Review Focus 5)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let sessionDead = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, undefined, () => {
+      sessionDead += 1;
+    });
+
+    socket.triggerConnect();
+    await conn.join();
+    socket.triggerDisconnect();
+    await flushMicrotasks();
+
+    expect(sessionDead).toBe(0);
+  });
+
   it('без refresh-хука connect_error — no-op: ни состояния, ни исключений', async () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });

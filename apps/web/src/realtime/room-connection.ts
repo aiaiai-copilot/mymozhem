@@ -33,6 +33,10 @@ export class RoomConnection {
     // чтобы спека управляла успехом/провалом без реальной сети. Опционально —
     // без хука connect_error остаётся no-op'ом, как раньше.
     private readonly refreshAccessToken?: () => Promise<void>,
+    // Триггер «сессия мертва» (находка №5): стреляет ТОЛЬКО из провала refresh
+    // (мёртвая refresh-кука, self-heal невозможен). Обычный disconnect сюда НЕ
+    // ведёт — сетевой обрыв лечит сам socket.io. Потребитель — автоперезаход.
+    private readonly onSessionDead?: () => void,
   ) {
     // Reconnect → re-subscribe → свежий snapshot в onResync (полный перефолд, дизайн §3).
     // Первый connect приходит до join() → joined=false → no-op (только состояние).
@@ -66,7 +70,15 @@ export class RoomConnection {
       // re-subscribe: дальше — re-join путь страницы.
       if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
       this.refreshAttempted = true;
-      void this.refreshAccessToken().catch(() => this.stateCb?.('disconnected'));
+      // Провал refresh = мёртвая refresh-кука: self-heal невозможен, это единственная
+      // ветка «сессия мертва» (находка №5). Состояние — disconnected (баннер честен
+      // на время перезахода), onSessionDead — триггер автоперезахода страницы.
+      // Обычный onDisconnect сюда НЕ ведёт: сетевой обрыв лечит сам socket.io.
+      void this.refreshAccessToken()
+        .catch(() => {
+          this.stateCb?.('disconnected');
+          this.onSessionDead?.();
+        });
     });
     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));
   }
