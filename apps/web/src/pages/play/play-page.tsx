@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
 import {
@@ -8,7 +8,8 @@ import {
 } from '@mymozhem/app-quiz';
 import { ApiClient } from '../../api/api-client';
 import { ApiError } from '../../api/api-error';
-import { joinRoom, listMembers, refreshSession } from '../../api/endpoints';
+import { listMembers, refreshSession } from '../../api/endpoints';
+import { rejoinAsGuest } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
 import { rosterNames } from '../../components/roster-names';
 import { Standings } from '../../components/standings';
@@ -61,6 +62,30 @@ export function PlayPage() {
   );
   const [autoJoinError, setAutoJoinError] = useState<string | null>(null);
   const autoJoinStarted = useRef(false);
+  const rejoinInFlight = useRef(false);
+
+  // Перезаход с новой identity (находка №5): общий путь для авто-входа §5
+  // (TTL протух на загрузке) и onSessionDead (кука умерла на живой странице).
+  // Гард: один перезаход в полёте — повторный onSessionDead не плодит identity.
+  const rejoin = useCallback(async () => {
+    const s = SessionStore.loadGuest();
+    if (!s || rejoinInFlight.current) return;
+    rejoinInFlight.current = true;
+    try {
+      const res = await rejoinAsGuest(anonClient, s);
+      session.setAccessToken(res.accessToken);
+      setRejoined(true);
+      setRoomId(res.roomId);
+    } catch {
+      // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
+      // его и честно показываем форму, а не вечный «Входим…».
+      SessionStore.clearGuest();
+      setSaved(null);
+      setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+    } finally {
+      rejoinInFlight.current = false;
+    }
+  }, [session]);
 
   // Авто-вход (дизайн §5): сначала silent refresh — refresh-кука жива → та же
   // identity и прежние очки. TTL протух → повторный join создаёт НОВУЮ identity
@@ -83,27 +108,22 @@ export function PlayPage() {
         if (!resumedRoomId) throw new Error('refreshed token without roomId');
         setRoomId(resumedRoomId);
       } catch {
-        try {
-          const res = await joinRoom(anonClient, { code: s.code, displayName: s.displayName });
-          session.setAccessToken(res.accessToken);
-          const claims = decodeAccessClaims(res.accessToken);
-          if (!claims.roomId) throw new Error('join token without roomId');
-          setRejoined(true);
-          setRoomId(claims.roomId);
-        } catch {
-          // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
-          // его и честно показываем форму, а не вечный «Входим…».
-          SessionStore.clearGuest();
-          setSaved(null);
-          setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
-        }
+        await rejoin();
       } finally {
         setAutoJoinPending(false);
       }
     })();
-  }, [autoJoinPending, session]);
+  }, [autoJoinPending, session, rejoin]);
 
-  const binding = useRoomBinding(roomId, session);
+  const binding = useRoomBinding(roomId, session, {
+    onSessionDead: useCallback(() => {
+      // Rebind при том же roomId (Review Focus 1): React не перезапустит effect
+      // при одинаковом значении deps — сначала отвязываемся (cleanup закроет
+      // мёртвое соединение), rejoin следующим тиком установит roomId заново.
+      setRoomId(null);
+      setTimeout(() => void rejoin(), 0);
+    }, [rejoin]),
+  });
   const events = binding.events;
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
