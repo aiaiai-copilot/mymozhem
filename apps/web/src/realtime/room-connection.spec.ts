@@ -62,12 +62,17 @@ class FakeSocket implements SocketLike {
   }
 
   triggerConnect(): void {
+    // Инвариант connected держит сам фейк (Minor-3 таск-ревью батча D);
+    // wakeUp-тесты ставят поле вручную, потому что triggerConnect после join
+    // дёргает re-subscribe и потребовал бы запрограммированный ack.
+    this.connected = true;
     this.connectCbs.forEach((cb) => cb());
   }
   triggerConnectError(err: Error = new Error('SESSION_INVALID')): void {
     this.connectErrorCbs.forEach((cb) => cb(err));
   }
   triggerDisconnect(): void {
+    this.connected = false;
     this.disconnectCbs.forEach((cb) => cb());
   }
   triggerEvent(payload: unknown): void {
@@ -213,6 +218,23 @@ describe('RoomConnection', () => {
     expect((err as ApiError).status).toBe(0);
   });
 
+  it('успешный refresh после connect_error → немедленный кик reconnect (CONNECT_ERROR — терминальный teardown)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID, () => Promise.resolve());
+    await conn.join();
+    socket.connected = false;
+
+    // Auth-отказ handshake — терминален для socket.io (4.8.3): CONNECT_ERROR →
+    // Socket.destroy() → Manager._close(skipReconnect=true) — retry НЕ
+    // планируется никогда (находка №8: «refresh 200 → тишина»). После успешного
+    // refresh клиент обязан перезапустить соединение сам — официальный паттерн.
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(socket.kickCount).toBe(1);
+  });
+
   it('connect_error после join → ровно один refresh на стрик обрыва (не на каждый retry)', async () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
@@ -223,9 +245,9 @@ describe('RoomConnection', () => {
     });
     await conn.join();
 
-    // Телефон проспал TTL access-токена: socket.io ретраит handshake со старым
-    // токеном, gateway отвечает SESSION_INVALID на каждый retry — refresh
-    // обязан уйти один раз, иначе retry-шторм превратился бы в refresh-шторм.
+    // Обрыв + протухший за сон access-токен: каждый handshake-отказ серии
+    // (SESSION_INVALID) приходит в connect_error — refresh обязан уйти один
+    // раз на стрик, иначе retry-шторм превратился бы в refresh-шторм.
     socket.triggerDisconnect();
     socket.triggerConnectError();
     socket.triggerConnectError();
@@ -292,6 +314,9 @@ describe('RoomConnection', () => {
     await flushMicrotasks();
 
     expect(refreshes).toBe(1);
+    // Провал refresh — мёртвая refresh-кука: кик бессмысленен (токен не
+    // обновлён), перезаход drives onSessionDead-путь страницы.
+    expect(socket.kickCount).toBe(0);
     // 'disconnected' от самого обрыва + явный 'disconnected' после провала refresh
     // (тот же контракт, что у упавшего re-subscribe): retry — забота потребителя.
     expect(states).toEqual(['live', 'disconnected', 'disconnected']);

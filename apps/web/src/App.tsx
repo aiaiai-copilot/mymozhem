@@ -1,6 +1,6 @@
 import { Route, Routes } from 'react-router-dom';
 import { LandingPage } from './pages/landing';
-import { HOST_NEW_PATH } from './routes';
+import { HOST_CONSOLE_PATH, HOST_NEW_PATH } from './routes';
 import { ConsolePage } from './pages/host/console-page';
 import { HostGate } from './pages/host/host-gate';
 import { HostLoginPage } from './pages/host/host-login-page';
@@ -21,7 +21,7 @@ export function App() {
       <Route path="/host/login" element={<HostLoginPage />} />
       <Route path="/host" element={<HostGate />} />
       <Route path={HOST_NEW_PATH} element={<SetupPage />} />
-      <Route path="/host/console" element={<ConsolePage />} />
+      <Route path={HOST_CONSOLE_PATH} element={<ConsolePage />} />
       <Route path="/play/:code?" element={<PlayPage />} />
       <Route path="/screen/:code" element={<ScreenPage />} />
       <Route path="*" element={<NotFoundPage />} />

@@ -32,15 +32,22 @@ export const createSocket = (getAccessToken: () => string | null): SocketLike =>
     emitWithAck: (event, payload) => socket.emitWithAck(event, payload),
     disconnect: () => socket.disconnect(),
     isConnected: () => socket.connected,
-    // WebKit выбрасывает pending backoff-таймер замороженной вкладки: Manager
-    // застревает с _reconnecting=true без запланированной попытки, а все
-    // внутренние retry-пути (reconnect/maybeReconnectOnOpen) заперты этим флагом
-    // — вечный «Переподключаемся…» (socket.io-client 4.8.3, manager.js).
-    // Наивный connect() здесь no-op: Socket.connect() открывает Manager только
-    // при !_reconnecting (socket.js). _close() сбрасывает _reconnecting и чистит
-    // таймеры (публичен по d.ts, подчёркнут по конвенции — не переопределять
-    // без ревью при апгрейде socket.io-client), connect() стартует немедленную
-    // попытку в обход backoff; токен перечитывается auth-колбэком.
+    // Принудительный немедленный reconnect в обход backoff (находка №8).
+    // Два застрявших состояния Manager'а socket.io-client 4.8.3:
+    // 1) auth-отказ handshake (CONNECT_ERROR) — терминальный teardown:
+    //    Socket.destroy() → Manager._destroy → _close(skipReconnect=true);
+    //    retry не планируется НИКОГДА, ни в одном браузере — перезапуск
+    //    только ручной (официальный паттерн: connect() из connect_error);
+    // 2) транспортный обрыв в замороженной вкладке WebKit — backoff-таймер
+    //    выброшен браузером, _reconnecting=true навсегда (все retry-пути
+    //    заперты этим флагом; Socket.connect() при _reconnecting=true —
+    //    no-op, socket.js).
+    // _close() сбрасывает оба состояния (skipReconnect/_reconnecting, чистит
+    // таймеры, backoff.reset() — идемпотентно для состояния 1), connect()
+    // стартует немедленную попытку в обход backoff и переподписывает Socket
+    // на Manager (subEvents — destroy() в состоянии 1 их снял). Токен
+    // перечитывается auth-колбэком. _close публичен по d.ts, подчёркнут по
+    // конвенции — tripwire при апгрейде socket.io-client.
     kickReconnect: () => {
       socket.io._close();
       socket.connect();

@@ -8,6 +8,7 @@ import {
 } from '@mymozhem/app-lottery';
 import { ApiError } from '../../api/api-error';
 import { activateRoom, configureRoom, createRoom } from '../../api/endpoints';
+import { HOST_CONSOLE_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
 import { hostClient, hostSession } from './host-session';
 import { QuizEditor } from './quiz-editor';
@@ -78,7 +79,7 @@ export function SetupPage() {
     setSubmitError(null);
     void configureRoom(hostClient, roomId, { appId, manifestVersion, settings })
       .then(() => activateRoom(hostClient, roomId))
-      .then(() => navigate('/host/console'))
+      .then(() => navigate(HOST_CONSOLE_PATH))
       .catch((e: unknown) => setSubmitError(submitErrorText(e)))
       .finally(() => setBusy(false));
   };

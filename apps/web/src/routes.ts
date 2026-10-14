@@ -4,3 +4,4 @@
 // на несуществующий /host/setup). Константа добавляется, когда у пути появляется
 // второй потребитель; однопотребительские маршруты остаются литералами в App.tsx.
 export const HOST_NEW_PATH = '/host/new';
+export const HOST_CONSOLE_PATH = '/host/console';

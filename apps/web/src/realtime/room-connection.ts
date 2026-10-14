@@ -58,23 +58,24 @@ export class RoomConnection {
     });
     this.socket.onConnectError(() => {
       // Handshake-отказ при ранее присоединённой комнате: типовой случай —
-      // протухший за время сна телефона access-токен (gateway на любой
+      // протухший за время сна/простоя access-токен (gateway на любой
       // auth-отказ отвечает одинаковым SESSION_INVALID, причины на клиенте не
-      // различить надёжно, поэтому не фильтруем по err). Без refresh socket.io
-      // ретраил бы handshake со старым токеном бесконечно, а REST-401 (единственный
-      // иной триггер refresh) никогда не наступил бы — вечный «Переподключаемся…».
-      // Refresh — ровно один на стрик обрыва, иначе retry-шторм превратился бы
-      // в refresh-шторм; после успешного refresh очередной retry socket.io
-      // перечитает свежий токен через auth-колбэк сам. Провал refresh (мёртвая
-      // refresh-кука) — явный 'disconnected', тот же контракт, что у упавшего
-      // re-subscribe: дальше — re-join путь страницы.
+      // различить надёжно, поэтому не фильтруем по err). CONNECT_ERROR
+      // ТЕРМИНАЛЕН для socket.io-client (4.8.3): Socket.destroy() →
+      // Manager._destroy → _close(skipReconnect=true) — библиотека НЕ
+      // планирует retry никогда, ни в одном браузере (находка №8: «refresh
+      // 200 → тишина» — это by-design teardown, а не заморозка таймера;
+      // перезапуск — только ручной connect(), официальный паттерн socket.io).
+      // Поэтому: refresh — ровно один на стрик обрыва (иначе retry-шторм
+      // превратился бы в refresh-шторм), успех → немедленный kickReconnect
+      // со свежим токеном. Провал refresh (мёртвая refresh-кука) — кик
+      // бессмысленен: явный 'disconnected' + onSessionDead (автоперезаход
+      // страницы, находка №5). Обычный onDisconnect сюда НЕ ведёт: сетевой
+      // обрыв лечит сам socket.io (там skipReconnect=false, backoff жив).
       if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
       this.refreshAttempted = true;
-      // Провал refresh = мёртвая refresh-кука: self-heal невозможен, это единственная
-      // ветка «сессия мертва» (находка №5). Состояние — disconnected (баннер честен
-      // на время перезахода), onSessionDead — триггер автоперезахода страницы.
-      // Обычный onDisconnect сюда НЕ ведёт: сетевой обрыв лечит сам socket.io.
       void this.refreshAccessToken()
+        .then(() => this.socket.kickReconnect())
         .catch(() => {
           this.stateCb?.('disconnected');
           this.onSessionDead?.();
