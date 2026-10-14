@@ -6,6 +6,7 @@ import { ApiError } from '../../api/api-error';
 import { completeRoom } from '../../api/endpoints';
 import { ConnectionBanner } from '../../components/connection-banner';
 import { Winners } from '../../components/winners';
+import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
@@ -124,7 +125,7 @@ export function ConsolePage() {
         <h1>Комната не найдена</h1>
         <p>Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.</p>
         <p>
-          <a href="/host/setup">К настройке комнаты</a>
+          <a href={HOST_NEW_PATH}>К настройке комнаты</a>
         </p>
       </main>
     );
