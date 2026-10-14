@@ -25,7 +25,9 @@ export const createSocket = (getAccessToken: () => string | null): SocketLike =>
   return {
     onConnect: (cb) => socket.on('connect', cb),
     // Отказ handshake (gateway auth-middleware отвечает SESSION_INVALID) приходит
-    // именно сюда, а не в disconnect: socket.io молча ретраит, 'connect' не наступает.
+    // именно сюда, а не в disconnect; для auth-отказа он терминален — retry
+    // не планируется никогда (teardown, см. комментарий kickReconnect ниже):
+    // восстановление — только refresh + кик в RoomConnection.
     onConnectError: (cb) => socket.on('connect_error', cb),
     onDisconnect: (cb) => socket.on('disconnect', cb),
     onEvent: (cb) => socket.on(REALTIME_MESSAGES.EVENT, cb),
