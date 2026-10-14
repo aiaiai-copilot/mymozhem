@@ -111,3 +111,23 @@ Task 8: minor (deferred, косметика): строка протокола 0.
 Сквозной сценарий refresh→onSessionDead→rejoin→rebind прослежен ревьюером: петля стерильна (refreshAttempted/conn + rejoinInFlight/страница + терминальные fail-пути), Review Focus 1 закрыт промежуточным setRoomId(null), обратная совместимость 2/3-аргументных вызовов сохранена.
 Триаж deferred-миноров: все 14 stay-deferred (A: 4, B: 7, C: 3 — обоснования в вердикте ревьюера). Ride-along кандидаты владельцу (вне объёма пакета): пин полного набора атрибутов refresh-куки (REQ-ID-008); усиление RF5-негативного теста resolving-хуком (room-connection.spec.ts:317-331).
 Финревью: Important (процесс) — вложенный .superpowers/sdd/.gitignore (*) снова создан sdd-скриптами и игнорирует артефакты батча C → снят, леджер коммитится (прецедент 1cfbcce/718f93a, решение владельца 329a942).
+
+## Батч D (приёмочные находки 2026-10-14): Tasks 9–10 — сессия 2026-10-14
+
+Происхождение: ручная приёмка пакета 2026-10-14 (сырой протокол `docs/sessions/2026-10-14-acceptance-raw-notes.md`, коммит 53ff10f): строки 0.4/7.1/11.1/12.2 ✅, находки A (404-ссылка T6 — чинить до мерджа) и №8 (WebKit reconnect — решение владельца: чинить в этом же пакете). Дизайн — bounded brainstorm в чате, одобрен владельцем. Мелочи: оговорка §0.4 — внесена; дубли в ростере — оставлены записью в протоколе (без действий).
+
+Task 9: complete (commit 9b36613). routes.ts — HOST_NEW_PATH единый источник (роутер + ссылка), пин-спека wire-значения. RED: module not found → GREEN.
+Task 10: complete (commit c10bcb4 + fix-волна cf3cefc). SocketLike += isConnected/kickReconnect (`io._close()` + `connect()`), RoomConnection.wakeUp (гард joined && !connected), wiring useRoomBinding (visibilitychange/focus/pageshow через createFocusRefetcher-дедуп). RED: `conn.wakeUp is not a function` ×3 → GREEN.
+
+Таск-ревью (sonnet, 53ff10f..c10bcb4): вердикт needs-fix (узкий объём). Critical нет.
+- **Important #1 (принят, fix-волна cf3cefc):** первичная модель №8 («WebKit выбрасывает backoff-таймер») опровергнута исходниками 4.8.3 для наблюдавшегося пути: CONNECT_ERROR терминален (Socket.destroy → Manager._close(skipReconnect=true)) — retry не планируется никогда, ни в одном браузере; ветка «refresh успешен» не имела триггера повтора (foreground-обрыв на границе TTL → вечный баннер без сна вкладки). Фикс: `.then(() => kickReconnect())` после успешного refresh (официальный паттерн), пин kickCount===0 на провале refresh; комментарии обоих файлов переписаны под фактический механизм (оба застрявших состояния). Модель заморозки таймера остаётся верной для транспортного обрыва — wakeUp-кик её покрывает.
+- Minor #2 (принят, cf3cefc): '/host/new' имел третьего литерального потребителя (host-gate-flow.ts) + '/host/console' три потребителя — переведены на константы routes.ts, HostGateTarget типизирован от констант; '/' осознанно литералом (корень не 404-able). Пин HOST_CONSOLE_PATH в routes.spec (RED: missing export → GREEN).
+- Minor #3 (принят, cf3cefc): FakeSocket держит инвариант connected сам (triggerConnect/triggerDisconnect); wakeUp-тесты ставят поле вручную сознательно (triggerConnect после join дёргал бы re-subscribe без ack — комментарий в фейке).
+
+Эмпирика после fix-волны: web 19 файлов/117 тестов PASS (+2: кик после refresh, пин HOST_CONSOLE_PATH), lint/typecheck web PASS, boundary 0/744, guardrails alive. Таск-ревьюер независимо прогнал: vitest 115/115 (до fix-волны), eslint, tsc, depcruise — зелёные.
+
+Формализация (commit aff840d + правка аддендума fix-волной): таблица протокола чеклиста — 0.4/7.1/11.1/12.2 ✅ (комментарии из сырого протокола, прежние ❌ сохранены историей), новая строка 8.2 (WebKit-регресс №8, ⬜ до повторной приёмки на Safari/iOS), оговорка §0.4 п.8 (не исключать localhost-участников на bare-run), аддендум плана — батч D.
+
+Опыт сессии: (1) таск-ревью со сверкой по исходникам node_modules опровергло правдоподобную, но неверную модель дефекта (замороженный таймер) и нашло residual-дыру в «прежнем пути» refresh — ревью ДО мерджа снова окупилось; (2) официальный паттерн socket.io (ручной connect() из connect_error после обновления auth) — канон, которому код теперь следует; (3) CONNECT_ERROR-teardown объясняет задним числом и «Chrome не пострадал»: его reconnect'ы просто не пересекали TTL (transport-drop path с skipReconnect=false работает везде на переднем плане).
+
+Осталось до мерджа: ручной прогон строки 8.2 владельцем (Safari/iOS сон > TTL → reconnect без reload) + финальное ревью пакета батча D → мердж no-ff по ритуалу.
