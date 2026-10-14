@@ -21,6 +21,9 @@ class FakeSocket implements SocketLike {
   private readonly disconnectCbs: Array<() => void> = [];
   private readonly eventCbs: Array<(payload: unknown) => void> = [];
   disconnected = false;
+  // Состояние соединения и счётчик киков — для wakeUp (находка №8).
+  connected = false;
+  kickCount = 0;
 
   programAck(event: string, ack: unknown): void {
     const queue = this.ackQueue.get(event) ?? [];
@@ -51,14 +54,25 @@ class FakeSocket implements SocketLike {
   disconnect(): void {
     this.disconnected = true;
   }
+  isConnected(): boolean {
+    return this.connected;
+  }
+  kickReconnect(): void {
+    this.kickCount += 1;
+  }
 
   triggerConnect(): void {
+    // Инвариант connected держит сам фейк (Minor-3 таск-ревью батча D);
+    // wakeUp-тесты ставят поле вручную, потому что triggerConnect после join
+    // дёргает re-subscribe и потребовал бы запрограммированный ack.
+    this.connected = true;
     this.connectCbs.forEach((cb) => cb());
   }
   triggerConnectError(err: Error = new Error('SESSION_INVALID')): void {
     this.connectErrorCbs.forEach((cb) => cb(err));
   }
   triggerDisconnect(): void {
+    this.connected = false;
     this.disconnectCbs.forEach((cb) => cb());
   }
   triggerEvent(payload: unknown): void {
@@ -204,6 +218,23 @@ describe('RoomConnection', () => {
     expect((err as ApiError).status).toBe(0);
   });
 
+  it('успешный refresh после connect_error → немедленный кик reconnect (CONNECT_ERROR — терминальный teardown)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID, () => Promise.resolve());
+    await conn.join();
+    socket.connected = false;
+
+    // Auth-отказ handshake — терминален для socket.io (4.8.3): CONNECT_ERROR →
+    // Socket.destroy() → Manager._close(skipReconnect=true) — retry НЕ
+    // планируется никогда (находка №8: «refresh 200 → тишина»). После успешного
+    // refresh клиент обязан перезапустить соединение сам — официальный паттерн.
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(socket.kickCount).toBe(1);
+  });
+
   it('connect_error после join → ровно один refresh на стрик обрыва (не на каждый retry)', async () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
@@ -214,9 +245,9 @@ describe('RoomConnection', () => {
     });
     await conn.join();
 
-    // Телефон проспал TTL access-токена: socket.io ретраит handshake со старым
-    // токеном, gateway отвечает SESSION_INVALID на каждый retry — refresh
-    // обязан уйти один раз, иначе retry-шторм превратился бы в refresh-шторм.
+    // Обрыв + протухший за сон access-токен: каждый handshake-отказ серии
+    // (SESSION_INVALID) приходит в connect_error — refresh обязан уйти один
+    // раз на стрик, иначе retry-шторм превратился бы в refresh-шторм.
     socket.triggerDisconnect();
     socket.triggerConnectError();
     socket.triggerConnectError();
@@ -283,9 +314,54 @@ describe('RoomConnection', () => {
     await flushMicrotasks();
 
     expect(refreshes).toBe(1);
+    // Провал refresh — мёртвая refresh-кука: кик бессмысленен (токен не
+    // обновлён), перезаход drives onSessionDead-путь страницы.
+    expect(socket.kickCount).toBe(0);
     // 'disconnected' от самого обрыва + явный 'disconnected' после провала refresh
     // (тот же контракт, что у упавшего re-subscribe): retry — забота потребителя.
     expect(states).toEqual(['live', 'disconnected', 'disconnected']);
+  });
+
+  it('провал refresh-хука → onSessionDead + состояние disconnected (находка №5)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let sessionDead = 0;
+    const states: ConnectionState[] = [];
+    const conn = new RoomConnection(
+      socket,
+      ROOM_ID,
+      () => Promise.reject(new Error('refresh cookie dead')),
+      () => {
+        sessionDead += 1;
+      },
+    );
+    conn.onStateChange((s) => states.push(s));
+
+    socket.triggerConnect();
+    await conn.join();
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+
+    await flushMicrotasks();
+
+    expect(sessionDead).toBe(1);
+    expect(states[states.length - 1]).toBe('disconnected');
+  });
+
+  it('обычный disconnect (сеть) → onSessionDead НЕ стреляет (Review Focus 5)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let sessionDead = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, undefined, () => {
+      sessionDead += 1;
+    });
+
+    socket.triggerConnect();
+    await conn.join();
+    socket.triggerDisconnect();
+    await flushMicrotasks();
+
+    expect(sessionDead).toBe(0);
   });
 
   it('без refresh-хука connect_error — no-op: ни состояния, ни исключений', async () => {
@@ -300,5 +376,44 @@ describe('RoomConnection', () => {
     await flushMicrotasks();
 
     expect(states).toEqual(['live']);
+  });
+
+  // wakeUp (находка №8): WebKit выбрасывает backoff-таймер socket.io из
+  // замороженной вкладки — Manager застревает (_reconnecting=true, таймера нет,
+  // все внутренние retry заперты). Кик — явный перезапуск по сигналу пробуждения.
+  it('wakeUp после join при мёртвом соединении — kick reconnect', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    await conn.join();
+    socket.connected = false;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(1);
+
+    // Каждое пробуждение — свежий кик; дедуп парных DOM-событий — забота
+    // вызывающего (createFocusRefetcher в useRoomBinding).
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(2);
+  });
+
+  it('wakeUp при живом соединении — no-op (кик идемпотентен)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    await conn.join();
+    socket.connected = true;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(0);
+  });
+
+  it('wakeUp до join — no-op: начальным подключением управляет сам socket.io', () => {
+    const socket = new FakeSocket();
+    const conn = new RoomConnection(socket, ROOM_ID);
+    socket.connected = false;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(0);
   });
 });

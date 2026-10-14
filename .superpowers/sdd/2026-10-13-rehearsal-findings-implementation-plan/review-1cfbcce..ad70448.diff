@@ -1,0 +1,745 @@
+# Review package: 1cfbcce..HEAD
+
+## Commits
+ad70448 fix(web): автоперезаход при мёртвой сессии — onSessionDead → rejoin без перезагрузки (находка №5)
+98d900c feat(web): onSessionDead в RoomConnection + joinError в useRoomBinding — подложка автоперезахода (№5) и диагностики стейл-roomId (№3)
+972efed fix(web): single-flight refresh в SessionStore — конкурентные refresh делят один запрос (находка №4, rotation race)
+
+## Files changed
+ apps/web/src/pages/play/play-page.tsx         | 56 +++++++++++++++--------
+ apps/web/src/pages/screen/screen-page.tsx     | 58 +++++++++++++++---------
+ apps/web/src/realtime/room-connection.spec.ts | 42 ++++++++++++++++++
+ apps/web/src/realtime/room-connection.ts      | 14 +++++-
+ apps/web/src/state/guest-rejoin.spec.ts       | 58 ++++++++++++++++++++++++
+ apps/web/src/state/guest-rejoin.ts            | 17 +++++++
+ apps/web/src/state/session.spec.ts            | 64 +++++++++++++++++++++++++++
+ apps/web/src/state/session.ts                 | 23 +++++++++-
+ apps/web/src/state/use-room-binding.spec.ts   | 20 +++++++++
+ apps/web/src/state/use-room-binding.ts        | 19 +++++++-
+ 10 files changed, 328 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/pages/play/play-page.tsx b/apps/web/src/pages/play/play-page.tsx
+index b446d36..14a7b30 100644
+--- a/apps/web/src/pages/play/play-page.tsx
++++ b/apps/web/src/pages/play/play-page.tsx
+@@ -1,21 +1,22 @@
+-import { useEffect, useMemo, useRef, useState } from 'react';
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useParams } from 'react-router-dom';
+ import type { RosterEntry } from '@mymozhem/sdk';
+ import {
+   gameFinishedPayload,
+   questionRevealedPayload,
+   quizSettingsSchema,
+ } from '@mymozhem/app-quiz';
+ import { ApiClient } from '../../api/api-client';
+ import { ApiError } from '../../api/api-error';
+-import { joinRoom, listMembers, refreshSession } from '../../api/endpoints';
++import { listMembers, refreshSession } from '../../api/endpoints';
++import { rejoinAsGuest } from '../../state/guest-rejoin';
+ import { ConnectionBanner } from '../../components/connection-banner';
+ import { rosterNames } from '../../components/roster-names';
+ import { Standings } from '../../components/standings';
+ import { Winners } from '../../components/winners';
+ import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
+ import { shouldRefetchRoster } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { JoinForm } from './join-form';
+ 
+@@ -54,20 +55,44 @@ export function PlayPage() {
+   const [client] = useState(() => new ApiClient(session));
+   const [roomId, setRoomId] = useState<string | null>(null);
+   const [rejoined, setRejoined] = useState(false);
+   // Авто-вход имеет смысл, только если URL не указывает на ДРУГУЮ комнату:
+   // чужая ссылка-приглашение — это новый join, а не возобновление сессии.
+   const [autoJoinPending, setAutoJoinPending] = useState(
+     () => saved !== null && (!code || saved.code === code),
+   );
+   const [autoJoinError, setAutoJoinError] = useState<string | null>(null);
+   const autoJoinStarted = useRef(false);
++  const rejoinInFlight = useRef(false);
++
++  // Перезаход с новой identity (находка №5): общий путь для авто-входа §5
++  // (TTL протух на загрузке) и onSessionDead (кука умерла на живой странице).
++  // Гард: один перезаход в полёте — повторный onSessionDead не плодит identity.
++  const rejoin = useCallback(async () => {
++    const s = SessionStore.loadGuest();
++    if (!s || rejoinInFlight.current) return;
++    rejoinInFlight.current = true;
++    try {
++      const res = await rejoinAsGuest(anonClient, s);
++      session.setAccessToken(res.accessToken);
++      setRejoined(true);
++      setRoomId(res.roomId);
++    } catch {
++      // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
++      // его и честно показываем форму, а не вечный «Входим…».
++      SessionStore.clearGuest();
++      setSaved(null);
++      setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
++    } finally {
++      rejoinInFlight.current = false;
++    }
++  }, [session]);
+ 
+   // Авто-вход (дизайн §5): сначала silent refresh — refresh-кука жива → та же
+   // identity и прежние очки. TTL протух → повторный join создаёт НОВУЮ identity
+   // (очки не переносятся, принято для MVP) — честно показываем «вы вошли заново».
+   useEffect(() => {
+     // StrictMode в dev дёргает effect дважды; повторный join создавал бы вторую
+     // identity — страхуемся ref'ом, эффект одноразовый.
+     if (!autoJoinPending || autoJoinStarted.current) return;
+     autoJoinStarted.current = true;
+     const s = SessionStore.loadGuest();
+@@ -76,41 +101,36 @@ export function PlayPage() {
+       return;
+     }
+     void (async () => {
+       try {
+         await session.refresh();
+         const token = session.getAccessToken();
+         const resumedRoomId = token ? decodeAccessClaims(token).roomId : undefined;
+         if (!resumedRoomId) throw new Error('refreshed token without roomId');
+         setRoomId(resumedRoomId);
+       } catch {
+-        try {
+-          const res = await joinRoom(anonClient, { code: s.code, displayName: s.displayName });
+-          session.setAccessToken(res.accessToken);
+-          const claims = decodeAccessClaims(res.accessToken);
+-          if (!claims.roomId) throw new Error('join token without roomId');
+-          setRejoined(true);
+-          setRoomId(claims.roomId);
+-        } catch {
+-          // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
+-          // его и честно показываем форму, а не вечный «Входим…».
+-          SessionStore.clearGuest();
+-          setSaved(null);
+-          setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+-        }
++        await rejoin();
+       } finally {
+         setAutoJoinPending(false);
+       }
+     })();
+-  }, [autoJoinPending, session]);
++  }, [autoJoinPending, session, rejoin]);
+ 
+-  const binding = useRoomBinding(roomId, session);
++  const binding = useRoomBinding(roomId, session, {
++    onSessionDead: useCallback(() => {
++      // Rebind при том же roomId (Review Focus 1): React не перезапустит effect
++      // при одинаковом значении deps — сначала отвязываемся (cleanup закроет
++      // мёртвое соединение), rejoin следующим тиком установит roomId заново.
++      setRoomId(null);
++      setTimeout(() => void rejoin(), 0);
++    }, [rejoin]),
++  });
+   const events = binding.events;
+ 
+   const [members, setMembers] = useState<RosterEntry[]>([]);
+ 
+   // Ростер (ruling 3): join не эмитит событий — первая загрузка на subscribe…
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+     listMembers(client, roomId)
+       .then((r) => {
+diff --git a/apps/web/src/pages/screen/screen-page.tsx b/apps/web/src/pages/screen/screen-page.tsx
+index c82ef3e..a19667e 100644
+--- a/apps/web/src/pages/screen/screen-page.tsx
++++ b/apps/web/src/pages/screen/screen-page.tsx
+@@ -1,11 +1,11 @@
+-import { useEffect, useMemo, useRef, useState } from 'react';
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useParams } from 'react-router-dom';
+ import type { RosterEntry } from '@mymozhem/sdk';
+ import { gameFinishedPayload, questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
+ import { ApiClient } from '../../api/api-client';
+ import { ApiError } from '../../api/api-error';
+ import { joinRoom, listMembers, refreshSession } from '../../api/endpoints';
+ import { ConnectionBanner } from '../../components/connection-banner';
+ import { rosterNames } from '../../components/roster-names';
+ import { Standings } from '../../components/standings';
+ import { Winners } from '../../components/winners';
+@@ -49,49 +49,63 @@ export function ScreenPage() {
+   // НЕ вызывается, потому что play-страница хранит гостевую сессию под тем же
+   // ключом localStorage, и spectator 'Экран' затёр бы её на этом устройстве.
+   // Зритель без состояния: перезагрузка проектора = новый spectator-join по коду.
+   const [session] = useState(
+     () => new SessionStore(async () => (await refreshSession(anonClient)).accessToken),
+   );
+   // Авторизованный клиент поверх SessionStore — для listMembers (auth:true).
+   const [client] = useState(() => new ApiClient(session));
+   const [roomId, setRoomId] = useState<string | null>(null);
+   const [joinError, setJoinError] = useState<string | null>(null);
+-  const joinStarted = useRef(false);
++  const joinInFlight = useRef(false);
+ 
+   // Автоматический spectator-join по коду из :code — единственный вход на экран.
+-  useEffect(() => {
+-    // StrictMode в dev дёргает effect дважды; повторный join создавал бы вторую
+-    // identity — страхуемся ref'ом, эффект одноразовый.
+-    if (joinStarted.current) return;
+-    joinStarted.current = true;
++  // Гард сбрасывается в finally: перезаходу (onSessionDead, находка №5) нужен
++  // повторный вход, а StrictMode-перекрытие по-прежнему отсекает параллельный
++  // дубль (второй эффект видит in-flight join).
++  const joinSpectator = useCallback(async () => {
++    setJoinError(null);
+     if (!code) {
+       setJoinError('В ссылке нет кода комнаты.');
+       return;
+     }
+-    void (async () => {
+-      try {
+-        // displayName фиксированный — экран не спрашивает имя; роль spectator.
+-        const res = await joinRoom(anonClient, { code, displayName: 'Экран', role: 'spectator' });
+-        session.setAccessToken(res.accessToken);
+-        // roomId — только из claims токена: идентичность из аутентифицированного
+-        // контекста, не из URL/payload (REQ-RT-009 по смыслу).
+-        const claims = decodeAccessClaims(res.accessToken);
+-        if (!claims.roomId) throw new Error('join token without roomId');
+-        setRoomId(claims.roomId);
+-      } catch (e) {
+-        setJoinError(joinErrorText(e));
+-      }
+-    })();
++    if (joinInFlight.current) return;
++    joinInFlight.current = true;
++    try {
++      // displayName фиксированный — экран не спрашивает имя; роль spectator.
++      const res = await joinRoom(anonClient, { code, displayName: 'Экран', role: 'spectator' });
++      session.setAccessToken(res.accessToken);
++      // roomId — только из claims токена: идентичность из аутентифицированного
++      // контекста, не из URL/payload (REQ-RT-009 по смыслу).
++      const claims = decodeAccessClaims(res.accessToken);
++      if (!claims.roomId) throw new Error('join token without roomId');
++      setRoomId(claims.roomId);
++    } catch (e) {
++      setJoinError(joinErrorText(e));
++    } finally {
++      joinInFlight.current = false;
++    }
+   }, [code, session]);
+ 
+-  const binding = useRoomBinding(roomId, session);
++  useEffect(() => {
++    void joinSpectator();
++  }, [joinSpectator]);
++
++  const binding = useRoomBinding(roomId, session, {
++    onSessionDead: useCallback(() => {
++      // См. play-page: отвязка → перезаход следующим тиком (rebind при том же
++      // roomId). Перезаход spectator = новый spectator 'Экран'; saveGuest не
++      // трогаем — зритель не затирает guest-сессию play-страницы.
++      setRoomId(null);
++      setTimeout(() => void joinSpectator(), 0);
++    }, [joinSpectator]),
++  });
+   const events = binding.events;
+ 
+   const [members, setMembers] = useState<RosterEntry[]>([]);
+ 
+   // Ростер (ruling 4): join не эмитит событий — первая загрузка на subscribe…
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+     listMembers(client, roomId)
+       .then((r) => {
+diff --git a/apps/web/src/realtime/room-connection.spec.ts b/apps/web/src/realtime/room-connection.spec.ts
+index e40bdd9..ea54980 100644
+--- a/apps/web/src/realtime/room-connection.spec.ts
++++ b/apps/web/src/realtime/room-connection.spec.ts
+@@ -281,20 +281,62 @@ describe('RoomConnection', () => {
+     socket.triggerConnectError();
+     socket.triggerConnectError();
+     await flushMicrotasks();
+ 
+     expect(refreshes).toBe(1);
+     // 'disconnected' от самого обрыва + явный 'disconnected' после провала refresh
+     // (тот же контракт, что у упавшего re-subscribe): retry — забота потребителя.
+     expect(states).toEqual(['live', 'disconnected', 'disconnected']);
+   });
+ 
++  it('провал refresh-хука → onSessionDead + состояние disconnected (находка №5)', async () => {
++    const socket = new FakeSocket();
++    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
++    let sessionDead = 0;
++    const states: ConnectionState[] = [];
++    const conn = new RoomConnection(
++      socket,
++      ROOM_ID,
++      () => Promise.reject(new Error('refresh cookie dead')),
++      () => {
++        sessionDead += 1;
++      },
++    );
++    conn.onStateChange((s) => states.push(s));
++
++    socket.triggerConnect();
++    await conn.join();
++    socket.triggerDisconnect();
++    socket.triggerConnectError();
++
++    await flushMicrotasks();
++
++    expect(sessionDead).toBe(1);
++    expect(states[states.length - 1]).toBe('disconnected');
++  });
++
++  it('обычный disconnect (сеть) → onSessionDead НЕ стреляет (Review Focus 5)', async () => {
++    const socket = new FakeSocket();
++    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
++    let sessionDead = 0;
++    const conn = new RoomConnection(socket, ROOM_ID, undefined, () => {
++      sessionDead += 1;
++    });
++
++    socket.triggerConnect();
++    await conn.join();
++    socket.triggerDisconnect();
++    await flushMicrotasks();
++
++    expect(sessionDead).toBe(0);
++  });
++
+   it('без refresh-хука connect_error — no-op: ни состояния, ни исключений', async () => {
+     const socket = new FakeSocket();
+     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+     const conn = new RoomConnection(socket, ROOM_ID);
+     const states: ConnectionState[] = [];
+     conn.onStateChange((s) => states.push(s));
+     await conn.join();
+ 
+     socket.triggerConnectError();
+     await flushMicrotasks();
+diff --git a/apps/web/src/realtime/room-connection.ts b/apps/web/src/realtime/room-connection.ts
+index 60e36c5..bfd132e 100644
+--- a/apps/web/src/realtime/room-connection.ts
++++ b/apps/web/src/realtime/room-connection.ts
+@@ -26,20 +26,24 @@ export class RoomConnection {
+   private resyncCb: ((s: RoomSnapshot) => void) | null = null;
+   private stateCb: ((s: ConnectionState) => void) | null = null;
+ 
+   constructor(
+     private readonly socket: SocketLike,
+     private readonly roomId: string,
+     // Refresh access-токена при отказе handshake (протухший TTL): инжектируется,
+     // чтобы спека управляла успехом/провалом без реальной сети. Опционально —
+     // без хука connect_error остаётся no-op'ом, как раньше.
+     private readonly refreshAccessToken?: () => Promise<void>,
++    // Триггер «сессия мертва» (находка №5): стреляет ТОЛЬКО из провала refresh
++    // (мёртвая refresh-кука, self-heal невозможен). Обычный disconnect сюда НЕ
++    // ведёт — сетевой обрыв лечит сам socket.io. Потребитель — автоперезаход.
++    private readonly onSessionDead?: () => void,
+   ) {
+     // Reconnect → re-subscribe → свежий snapshot в onResync (полный перефолд, дизайн §3).
+     // Первый connect приходит до join() → joined=false → no-op (только состояние).
+     this.socket.onConnect(() => {
+       // Успешный handshake закрывает стрик обрыва: следующая серия отказов
+       // снова имеет право на один refresh.
+       this.refreshAttempted = false;
+       this.stateCb?.(this.joined ? 'live' : 'connecting');
+       if (this.joined) {
+         // При ошибке subscribe gateway зачищает серверную подписку (registry.remove
+@@ -59,21 +63,29 @@ export class RoomConnection {
+       // различить надёжно, поэтому не фильтруем по err). Без refresh socket.io
+       // ретраил бы handshake со старым токеном бесконечно, а REST-401 (единственный
+       // иной триггер refresh) никогда не наступил бы — вечный «Переподключаемся…».
+       // Refresh — ровно один на стрик обрыва, иначе retry-шторм превратился бы
+       // в refresh-шторм; после успешного refresh очередной retry socket.io
+       // перечитает свежий токен через auth-колбэк сам. Провал refresh (мёртвая
+       // refresh-кука) — явный 'disconnected', тот же контракт, что у упавшего
+       // re-subscribe: дальше — re-join путь страницы.
+       if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
+       this.refreshAttempted = true;
+-      void this.refreshAccessToken().catch(() => this.stateCb?.('disconnected'));
++      // Провал refresh = мёртвая refresh-кука: self-heal невозможен, это единственная
++      // ветка «сессия мертва» (находка №5). Состояние — disconnected (баннер честен
++      // на время перезахода), onSessionDead — триггер автоперезахода страницы.
++      // Обычный onDisconnect сюда НЕ ведёт: сетевой обрыв лечит сам socket.io.
++      void this.refreshAccessToken()
++        .catch(() => {
++          this.stateCb?.('disconnected');
++          this.onSessionDead?.();
++        });
+     });
+     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));
+   }
+ 
+   onEvent(cb: (e: ProjectedEvent) => void): void {
+     this.socket.onEvent((payload) => cb(projectedEventSchema.parse(payload)));
+   }
+ 
+   onResync(cb: (s: RoomSnapshot) => void): void {
+     this.resyncCb = cb;
+diff --git a/apps/web/src/state/guest-rejoin.spec.ts b/apps/web/src/state/guest-rejoin.spec.ts
+new file mode 100644
+index 0000000..65ff40b
+--- /dev/null
++++ b/apps/web/src/state/guest-rejoin.spec.ts
+@@ -0,0 +1,58 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { ApiClient } from '../api/api-client';
++import { rejoinAsGuest } from './guest-rejoin';
++
++const makeToken = (claims: unknown): string =>
++  `hdr.${btoa(JSON.stringify(claims))
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_')
++    .replace(/=+$/, '')}.sig`;
++
++const anon = new ApiClient({ getAccessToken: () => null, refresh: () => Promise.resolve() });
++
++// Автоперезаход (находка №5): мёртвая refresh-кука → новый join по сохранённым
++// code/displayName. roomId берём из claims нового токена, а не из ответа формы —
++// одна точка правды с авто-входом §5.
++describe('rejoinAsGuest', () => {
++  afterEach(() => vi.unstubAllGlobals());
++
++  it('join по сохранённым code/displayName → accessToken + roomId из claims', async () => {
++    const token = makeToken({ sub: 'id-1', kind: 'GUEST', roomId: 'room-9' });
++    // Тип-параметр vi.fn — сигнатура fetch: mock.calls типизирован
++    // [string, RequestInit] для body-assert ниже (без него calls выводится как []).
++    const fetchMock = vi.fn<(input: string, init: RequestInit) => Promise<Response>>(async () =>
++      new Response(
++        // joinResponseSchema (SDK 2.0.0, strict): tokenResponse + displayName;
++        // refreshToken в теле НЕТ — refresh живёт в httpOnly-куке.
++        JSON.stringify({ accessToken: token, tokenType: 'Bearer', expiresIn: 900, displayName: 'Гость 7' }),
++        { status: 201 },
++      ),
++    );
++    vi.stubGlobal('fetch', fetchMock);
++
++    const res = await rejoinAsGuest(anon, { code: 'ABCD-2345', displayName: 'Гость 7' });
++
++    expect(res).toEqual({ accessToken: token, roomId: 'room-9' });
++    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
++    expect(JSON.parse(init.body as string)).toEqual({ code: 'ABCD-2345', displayName: 'Гость 7' });
++  });
++
++  it('токен без roomId → throw (fail-loud, не тихий null)', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async () =>
++        new Response(
++          JSON.stringify({
++            accessToken: makeToken({ sub: 'id-1', kind: 'GUEST' }),
++            tokenType: 'Bearer',
++            expiresIn: 900,
++            displayName: 'x',
++          }),
++          { status: 201 },
++        ),
++      ),
++    );
++
++    await expect(rejoinAsGuest(anon, { code: 'C', displayName: 'x' })).rejects.toThrow('roomId');
++  });
++});
+diff --git a/apps/web/src/state/guest-rejoin.ts b/apps/web/src/state/guest-rejoin.ts
+new file mode 100644
+index 0000000..a111005
+--- /dev/null
++++ b/apps/web/src/state/guest-rejoin.ts
+@@ -0,0 +1,17 @@
++import type { ApiClient } from '../api/api-client';
++import { joinRoom } from '../api/endpoints';
++import { decodeAccessClaims, type GuestSession } from './session';
++
++// Автоперезаход при мёртвой сессии (находка №5): refresh-кука мертва → новый
++// join по сохранённым code/displayName = НОВАЯ identity, очки не переносятся
++// (тот же контракт, что авто-вход дизайна §5, — там тот же путь на загрузке
++// страницы). Вызывающий показывает баннер «вы вошли заново».
++export async function rejoinAsGuest(
++  client: ApiClient,
++  saved: GuestSession,
++): Promise<{ accessToken: string; roomId: string }> {
++  const res = await joinRoom(client, { code: saved.code, displayName: saved.displayName });
++  const claims = decodeAccessClaims(res.accessToken);
++  if (!claims.roomId) throw new Error('join token without roomId');
++  return { accessToken: res.accessToken, roomId: claims.roomId };
++}
+diff --git a/apps/web/src/state/session.spec.ts b/apps/web/src/state/session.spec.ts
+index 22715cc..7da0320 100644
+--- a/apps/web/src/state/session.spec.ts
++++ b/apps/web/src/state/session.spec.ts
+@@ -88,11 +88,75 @@ describe('SessionStore', () => {
+ 
+     expect(store.getAccessToken()).toBeNull();
+     store.setAccessToken('old-token');
+     expect(store.getAccessToken()).toBe('old-token');
+ 
+     await store.refresh();
+     // После refresh getAccessToken обязан отдавать уже новый токен — иначе retry
+     // по 401 в api-client ушёл бы со старым (контракт TokenProvider).
+     expect(store.getAccessToken()).toBe('new-token');
+   });
++
++  it('single-flight: конкурентные refresh() делят один вызов refreshFn (находка №4)', async () => {
++    // HostGate + 401-retry ApiClient + refresh-хук RoomConnection могут дёрнуть
++    // refresh одновременно с ОДНОЙ refresh-кукой; strict-ротация видит повторное
++    // предъявление и гасит семью («rotation race lost» на репетиции 2026-10-13).
++    let calls = 0;
++    let resolveFn!: (token: string) => void;
++    const store = new SessionStore(
++      () =>
++        new Promise<string>((resolve) => {
++          calls += 1;
++          resolveFn = resolve;
++        }),
++    );
++
++    const p1 = store.refresh();
++    const p2 = store.refresh();
++    const p3 = store.refresh();
++    resolveFn('tok-1');
++    await Promise.all([p1, p2, p3]);
++
++    expect(calls).toBe(1);
++    expect(store.getAccessToken()).toBe('tok-1');
++  });
++
++  it('после settle следующий refresh вызывает refreshFn снова', async () => {
++    let calls = 0;
++    const store = new SessionStore(() => {
++      calls += 1;
++      return Promise.resolve(`tok-${calls}`);
++    });
++
++    await store.refresh();
++    await store.refresh();
++
++    expect(calls).toBe(2);
++    expect(store.getAccessToken()).toBe('tok-2');
++  });
++
++  it('провал refresh не затирает токен и не блокирует следующую попытку (Review Focus 2)', async () => {
++    let calls = 0;
++    const store = new SessionStore(() => {
++      calls += 1;
++      return calls === 1 ? Promise.reject(new Error('network')) : Promise.resolve('tok-recovered');
++    });
++    store.setAccessToken('tok-old');
++
++    await expect(store.refresh()).rejects.toThrow('network');
++    expect(store.getAccessToken()).toBe('tok-old'); // провал ≠ потеря токена
++
++    await store.refresh(); // retry разрешён: мемо сброшен и на reject
++    expect(store.getAccessToken()).toBe('tok-recovered');
++    expect(calls).toBe(2);
++  });
++
++  it('clearHostRoom: сносит оба host-ключа (потребитель — консоль, находка №3)', () => {
++    SessionStore.saveHostRoomId('room-1');
++    SessionStore.saveHostRoomCode('ABCD-2345');
++
++    SessionStore.clearHostRoom();
++
++    expect(SessionStore.loadHostRoomId()).toBeNull();
++    expect(SessionStore.loadHostRoomCode()).toBeNull();
++  });
+ });
+diff --git a/apps/web/src/state/session.ts b/apps/web/src/state/session.ts
+index 9590bb3..4bbbd5f 100644
+--- a/apps/web/src/state/session.ts
++++ b/apps/web/src/state/session.ts
+@@ -26,33 +26,47 @@ const HOST_ROOM_CODE_KEY = 'mm.host.roomCode';
+ export interface GuestSession {
+   code: string;
+   displayName: string;
+ }
+ 
+ // Access-токен — в памяти (TTL ≤ 15 мин, refresh по 401); localStorage — только
+ // переживающая перезагрузку идентификация (код/имя гостя, roomId организатора).
+ export class SessionStore implements TokenProvider {
+   private accessToken: string | null = null;
+ 
++  // Single-flight (находка №4): конкурентные refresh (HostGate, 401-retry
++  // ApiClient, refresh-хук RoomConnection) шлют ОДНУ refresh-куку; strict-ротация
++  // читает повторное предъявление как кражу и гасит семью. In-flight промис
++  // мемоизируется: конкуренты делят один запрос. Мемо сбрасывается на ЛЮБОМ
++  // settle — retry после провала разрешён, следующий refresh работает.
++  private inFlightRefresh: Promise<void> | null = null;
++
+   constructor(private readonly refreshFn: () => Promise<string>) {}
+ 
+   getAccessToken(): string | null {
+     return this.accessToken;
+   }
+ 
+   // Не часть TokenProvider — страницы (Task 11+) ставят токен после login/guest-auth.
+   setAccessToken(token: string): void {
+     this.accessToken = token;
+   }
+ 
+   async refresh(): Promise<void> {
+-    this.accessToken = await this.refreshFn();
++    this.inFlightRefresh ??= this.refreshFn()
++      .then((token) => {
++        this.accessToken = token;
++      })
++      .finally(() => {
++        this.inFlightRefresh = null;
++      });
++    return this.inFlightRefresh;
+   }
+ 
+   static loadGuest(): GuestSession | null {
+     try {
+       const raw = localStorage.getItem(GUEST_KEY);
+       return raw ? (JSON.parse(raw) as GuestSession) : null;
+     } catch {
+       // Битая запись (посторонний код, старая версия) — читается как «гостя нет»,
+       // а не как падение загрузки страницы.
+       return null;
+@@ -75,11 +89,18 @@ export class SessionStore implements TokenProvider {
+     localStorage.setItem(HOST_ROOM_KEY, id);
+   }
+ 
+   static loadHostRoomCode(): string | null {
+     return localStorage.getItem(HOST_ROOM_CODE_KEY);
+   }
+ 
+   static saveHostRoomCode(code: string): void {
+     localStorage.setItem(HOST_ROOM_CODE_KEY, code);
+   }
++
++  // Стейл-roomId консоли (находка №3): комната из прошлой БД — оба ключа
++  // снимаются атомарно, чтобы гейт не увидел половину состояния.
++  static clearHostRoom(): void {
++    localStorage.removeItem(HOST_ROOM_KEY);
++    localStorage.removeItem(HOST_ROOM_CODE_KEY);
++  }
+ }
+diff --git a/apps/web/src/state/use-room-binding.spec.ts b/apps/web/src/state/use-room-binding.spec.ts
+new file mode 100644
+index 0000000..134a3ef
+--- /dev/null
++++ b/apps/web/src/state/use-room-binding.spec.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from 'vitest';
++import { ApiError } from '../api/api-error';
++import { joinErrorCode } from './use-room-binding';
++
++// Код отказа стартового join (находка №3): консоль различает «комната из прошлой
++// БД» (ACTOR_NOT_MEMBER → экран «не найдена») и сетевой обрыв (баннер). Хук
++// без DOM-тестов (нет @testing-library/react — известный deferred T10), поэтому
++// маппинг — чистая функция.
++describe('joinErrorCode', () => {
++  it('ApiError → wire-код', () => {
++    expect(joinErrorCode(new ApiError('ACTOR_NOT_MEMBER', 0))).toBe('ACTOR_NOT_MEMBER');
++    expect(joinErrorCode(new ApiError('NOT_FOUND', 404))).toBe('NOT_FOUND');
++  });
++
++  it('не-ApiError (сеть, ZodError) → null', () => {
++    expect(joinErrorCode(new TypeError('fetch failed'))).toBeNull();
++    expect(joinErrorCode(new Error('boom'))).toBeNull();
++    expect(joinErrorCode('строка')).toBeNull();
++  });
++});
+diff --git a/apps/web/src/state/use-room-binding.ts b/apps/web/src/state/use-room-binding.ts
+index fe7fffa..ed71fbb 100644
+--- a/apps/web/src/state/use-room-binding.ts
++++ b/apps/web/src/state/use-room-binding.ts
+@@ -1,46 +1,59 @@
+ import { useEffect, useRef, useState } from 'react';
+ import type { ProjectedEvent } from '@mymozhem/sdk';
+ import { ApiError } from '../api/api-error';
+ import type { TokenProvider } from '../api/token-provider';
+ import { RoomConnection, type ConnectionState } from '../realtime/room-connection';
+ import { createSocket } from '../realtime/socket-like';
+ import { LogStore } from './log-store';
+ 
++// Код отказа стартового join (находка №3): ApiError несёт wire-код; сетевые
++// отказы (не ApiError) — null, их место — баннер 'disconnected', не экраны ошибок.
++export const joinErrorCode = (e: unknown): string | null =>
++  e instanceof ApiError ? e.code : null;
++
+ // Тонкий React-клей поверх RoomConnection + LogStore (дизайн §3): вся фолд-логика
+ // (буфер до snapshot, перефолд на resync) уже оттестирована в LogStore и
+ // RoomConnection; хук только поднимает их колбэки в useState. Новый roomId →
+ // новый effect → новая пара store/conn, старая закрывается cleanup'ом.
+ export function useRoomBinding(
+   roomId: string | null,
+   tokens: TokenProvider,
++  // opts НЕ входит в deps effect: объект-литерал перезапускал бы effect на
++  // каждый рендер; колбэк читается из замыкания effect — потребители передают
++  // стабильные useCallback.
++  opts?: { onSessionDead?: () => void },
+ ): {
+   connectionState: ConnectionState;
+   events: ProjectedEvent[];
+   appSettings: Record<string, unknown>;
++  joinError: string | null;
+   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
+ } {
+   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+   const [events, setEvents] = useState<ProjectedEvent[]>([]);
+   const [appSettings, setAppSettings] = useState<Record<string, unknown>>({});
++  const [joinError, setJoinError] = useState<string | null>(null);
+   const connRef = useRef<RoomConnection | null>(null);
+ 
+   useEffect(() => {
+     if (!roomId) return;
++    setJoinError(null);
+     const store = new LogStore();
+     // Refresh-хук: протухший access-токен — единственная самовосстанавливающаяся
+     // причина handshake-отказов (refresh-кука живёт дольше); RoomConnection сам
+     // дозирует — один вызов на стрик обрыва.
+     const conn = new RoomConnection(
+       createSocket(() => tokens.getAccessToken()),
+       roomId,
+       () => tokens.refresh(),
++      opts?.onSessionDead,
+     );
+     connRef.current = conn;
+     conn.onEvent((e) => {
+       store.pushLive(e);
+       setEvents(store.all());
+     });
+     conn.onResync((snapshot) => {
+       // Re-subscribe → полный перефолд: старый лог с возможными дупами окна
+       // handshake выбрасывается, фолд строится заново от свежего snapshot'а.
+       store.reset();
+@@ -56,33 +69,37 @@ export function useRoomBinding(
+     // навсегда завис бы в 'connecting' с unhandled rejection. Переводим в явный
+     // 'disconnected' через setConnectionState (onStateChange уже подписан выше);
+     // retry — забота потребителя по этому состоянию.
+     void conn
+       .join()
+       .then((snapshot) => {
+         store.applySnapshot(snapshot.events);
+         setAppSettings(snapshot.appSettings);
+         setEvents(store.all());
+       })
+-      .catch(() => setConnectionState('disconnected'));
++      .catch((e: unknown) => {
++        setJoinError(joinErrorCode(e));
++        setConnectionState('disconnected');
++      });
+     return () => {
+       // Обнуляем ref ДО следующего effect (cleanup всегда предшествует ему):
+       // publish на уже закрытом соединении обязан отказать NOT_CONNECTED,
+       // а не уйти emit'ом в мёртвый сокет.
+       connRef.current = null;
+       conn.close();
+     };
+   }, [roomId, tokens]);
+ 
+   return {
+     connectionState,
+     events,
+     appSettings,
++    joinError,
+     publish: (type, payload) => {
+       const conn = connRef.current;
+       // roomId === null → effect не поднимал соединение; publish без комнаты —
+       // явный отказ, а не молчаливый emit в никуда.
+       if (!conn) return Promise.reject(new ApiError('NOT_CONNECTED', 0));
+       return conn.publish(type, payload);
+     },
+   };
+ }

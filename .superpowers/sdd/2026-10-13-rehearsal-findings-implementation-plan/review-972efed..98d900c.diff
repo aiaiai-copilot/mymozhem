@@ -1,0 +1,269 @@
+# Review package: 972efed..HEAD
+
+## Commits
+98d900c feat(web): onSessionDead в RoomConnection + joinError в useRoomBinding — подложка автоперезахода (№5) и диагностики стейл-roomId (№3)
+
+## Files changed
+ apps/web/src/realtime/room-connection.spec.ts | 42 +++++++++++++++++++++++++++
+ apps/web/src/realtime/room-connection.ts      | 14 ++++++++-
+ apps/web/src/state/use-room-binding.spec.ts   | 20 +++++++++++++
+ apps/web/src/state/use-room-binding.ts        | 19 +++++++++++-
+ 4 files changed, 93 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/realtime/room-connection.spec.ts b/apps/web/src/realtime/room-connection.spec.ts
+index e40bdd9..ea54980 100644
+--- a/apps/web/src/realtime/room-connection.spec.ts
++++ b/apps/web/src/realtime/room-connection.spec.ts
+@@ -281,20 +281,62 @@ describe('RoomConnection', () => {
+     socket.triggerConnectError();
+     socket.triggerConnectError();
+     await flushMicrotasks();
+ 
+     expect(refreshes).toBe(1);
+     // 'disconnected' от самого обрыва + явный 'disconnected' после провала refresh
+     // (тот же контракт, что у упавшего re-subscribe): retry — забота потребителя.
+     expect(states).toEqual(['live', 'disconnected', 'disconnected']);
+   });
+ 
++  it('провал refresh-хука → onSessionDead + состояние disconnected (находка №5)', async () => {
++    const socket = new FakeSocket();
++    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
++    let sessionDead = 0;
++    const states: ConnectionState[] = [];
++    const conn = new RoomConnection(
++      socket,
++      ROOM_ID,
++      () => Promise.reject(new Error('refresh cookie dead')),
++      () => {
++        sessionDead += 1;
++      },
++    );
++    conn.onStateChange((s) => states.push(s));
++
++    socket.triggerConnect();
++    await conn.join();
++    socket.triggerDisconnect();
++    socket.triggerConnectError();
++
++    await flushMicrotasks();
++
++    expect(sessionDead).toBe(1);
++    expect(states[states.length - 1]).toBe('disconnected');
++  });
++
++  it('обычный disconnect (сеть) → onSessionDead НЕ стреляет (Review Focus 5)', async () => {
++    const socket = new FakeSocket();
++    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
++    let sessionDead = 0;
++    const conn = new RoomConnection(socket, ROOM_ID, undefined, () => {
++      sessionDead += 1;
++    });
++
++    socket.triggerConnect();
++    await conn.join();
++    socket.triggerDisconnect();
++    await flushMicrotasks();
++
++    expect(sessionDead).toBe(0);
++  });
++
+   it('без refresh-хука connect_error — no-op: ни состояния, ни исключений', async () => {
+     const socket = new FakeSocket();
+     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+     const conn = new RoomConnection(socket, ROOM_ID);
+     const states: ConnectionState[] = [];
+     conn.onStateChange((s) => states.push(s));
+     await conn.join();
+ 
+     socket.triggerConnectError();
+     await flushMicrotasks();
+diff --git a/apps/web/src/realtime/room-connection.ts b/apps/web/src/realtime/room-connection.ts
+index 60e36c5..bfd132e 100644
+--- a/apps/web/src/realtime/room-connection.ts
++++ b/apps/web/src/realtime/room-connection.ts
+@@ -26,20 +26,24 @@ export class RoomConnection {
+   private resyncCb: ((s: RoomSnapshot) => void) | null = null;
+   private stateCb: ((s: ConnectionState) => void) | null = null;
+ 
+   constructor(
+     private readonly socket: SocketLike,
+     private readonly roomId: string,
+     // Refresh access-токена при отказе handshake (протухший TTL): инжектируется,
+     // чтобы спека управляла успехом/провалом без реальной сети. Опционально —
+     // без хука connect_error остаётся no-op'ом, как раньше.
+     private readonly refreshAccessToken?: () => Promise<void>,
++    // Триггер «сессия мертва» (находка №5): стреляет ТОЛЬКО из провала refresh
++    // (мёртвая refresh-кука, self-heal невозможен). Обычный disconnect сюда НЕ
++    // ведёт — сетевой обрыв лечит сам socket.io. Потребитель — автоперезаход.
++    private readonly onSessionDead?: () => void,
+   ) {
+     // Reconnect → re-subscribe → свежий snapshot в onResync (полный перефолд, дизайн §3).
+     // Первый connect приходит до join() → joined=false → no-op (только состояние).
+     this.socket.onConnect(() => {
+       // Успешный handshake закрывает стрик обрыва: следующая серия отказов
+       // снова имеет право на один refresh.
+       this.refreshAttempted = false;
+       this.stateCb?.(this.joined ? 'live' : 'connecting');
+       if (this.joined) {
+         // При ошибке subscribe gateway зачищает серверную подписку (registry.remove
+@@ -59,21 +63,29 @@ export class RoomConnection {
+       // различить надёжно, поэтому не фильтруем по err). Без refresh socket.io
+       // ретраил бы handshake со старым токеном бесконечно, а REST-401 (единственный
+       // иной триггер refresh) никогда не наступил бы — вечный «Переподключаемся…».
+       // Refresh — ровно один на стрик обрыва, иначе retry-шторм превратился бы
+       // в refresh-шторм; после успешного refresh очередной retry socket.io
+       // перечитает свежий токен через auth-колбэк сам. Провал refresh (мёртвая
+       // refresh-кука) — явный 'disconnected', тот же контракт, что у упавшего
+       // re-subscribe: дальше — re-join путь страницы.
+       if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
+       this.refreshAttempted = true;
+-      void this.refreshAccessToken().catch(() => this.stateCb?.('disconnected'));
++      // Провал refresh = мёртвая refresh-кука: self-heal невозможен, это единственная
++      // ветка «сессия мертва» (находка №5). Состояние — disconnected (баннер честен
++      // на время перезахода), onSessionDead — триггер автоперезахода страницы.
++      // Обычный onDisconnect сюда НЕ ведёт: сетевой обрыв лечит сам socket.io.
++      void this.refreshAccessToken()
++        .catch(() => {
++          this.stateCb?.('disconnected');
++          this.onSessionDead?.();
++        });
+     });
+     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));
+   }
+ 
+   onEvent(cb: (e: ProjectedEvent) => void): void {
+     this.socket.onEvent((payload) => cb(projectedEventSchema.parse(payload)));
+   }
+ 
+   onResync(cb: (s: RoomSnapshot) => void): void {
+     this.resyncCb = cb;
+diff --git a/apps/web/src/state/use-room-binding.spec.ts b/apps/web/src/state/use-room-binding.spec.ts
+new file mode 100644
+index 0000000..134a3ef
+--- /dev/null
++++ b/apps/web/src/state/use-room-binding.spec.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from 'vitest';
++import { ApiError } from '../api/api-error';
++import { joinErrorCode } from './use-room-binding';
++
++// Код отказа стартового join (находка №3): консоль различает «комната из прошлой
++// БД» (ACTOR_NOT_MEMBER → экран «не найдена») и сетевой обрыв (баннер). Хук
++// без DOM-тестов (нет @testing-library/react — известный deferred T10), поэтому
++// маппинг — чистая функция.
++describe('joinErrorCode', () => {
++  it('ApiError → wire-код', () => {
++    expect(joinErrorCode(new ApiError('ACTOR_NOT_MEMBER', 0))).toBe('ACTOR_NOT_MEMBER');
++    expect(joinErrorCode(new ApiError('NOT_FOUND', 404))).toBe('NOT_FOUND');
++  });
++
++  it('не-ApiError (сеть, ZodError) → null', () => {
++    expect(joinErrorCode(new TypeError('fetch failed'))).toBeNull();
++    expect(joinErrorCode(new Error('boom'))).toBeNull();
++    expect(joinErrorCode('строка')).toBeNull();
++  });
++});
+diff --git a/apps/web/src/state/use-room-binding.ts b/apps/web/src/state/use-room-binding.ts
+index fe7fffa..ed71fbb 100644
+--- a/apps/web/src/state/use-room-binding.ts
++++ b/apps/web/src/state/use-room-binding.ts
+@@ -1,46 +1,59 @@
+ import { useEffect, useRef, useState } from 'react';
+ import type { ProjectedEvent } from '@mymozhem/sdk';
+ import { ApiError } from '../api/api-error';
+ import type { TokenProvider } from '../api/token-provider';
+ import { RoomConnection, type ConnectionState } from '../realtime/room-connection';
+ import { createSocket } from '../realtime/socket-like';
+ import { LogStore } from './log-store';
+ 
++// Код отказа стартового join (находка №3): ApiError несёт wire-код; сетевые
++// отказы (не ApiError) — null, их место — баннер 'disconnected', не экраны ошибок.
++export const joinErrorCode = (e: unknown): string | null =>
++  e instanceof ApiError ? e.code : null;
++
+ // Тонкий React-клей поверх RoomConnection + LogStore (дизайн §3): вся фолд-логика
+ // (буфер до snapshot, перефолд на resync) уже оттестирована в LogStore и
+ // RoomConnection; хук только поднимает их колбэки в useState. Новый roomId →
+ // новый effect → новая пара store/conn, старая закрывается cleanup'ом.
+ export function useRoomBinding(
+   roomId: string | null,
+   tokens: TokenProvider,
++  // opts НЕ входит в deps effect: объект-литерал перезапускал бы effect на
++  // каждый рендер; колбэк читается из замыкания effect — потребители передают
++  // стабильные useCallback.
++  opts?: { onSessionDead?: () => void },
+ ): {
+   connectionState: ConnectionState;
+   events: ProjectedEvent[];
+   appSettings: Record<string, unknown>;
++  joinError: string | null;
+   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
+ } {
+   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+   const [events, setEvents] = useState<ProjectedEvent[]>([]);
+   const [appSettings, setAppSettings] = useState<Record<string, unknown>>({});
++  const [joinError, setJoinError] = useState<string | null>(null);
+   const connRef = useRef<RoomConnection | null>(null);
+ 
+   useEffect(() => {
+     if (!roomId) return;
++    setJoinError(null);
+     const store = new LogStore();
+     // Refresh-хук: протухший access-токен — единственная самовосстанавливающаяся
+     // причина handshake-отказов (refresh-кука живёт дольше); RoomConnection сам
+     // дозирует — один вызов на стрик обрыва.
+     const conn = new RoomConnection(
+       createSocket(() => tokens.getAccessToken()),
+       roomId,
+       () => tokens.refresh(),
++      opts?.onSessionDead,
+     );
+     connRef.current = conn;
+     conn.onEvent((e) => {
+       store.pushLive(e);
+       setEvents(store.all());
+     });
+     conn.onResync((snapshot) => {
+       // Re-subscribe → полный перефолд: старый лог с возможными дупами окна
+       // handshake выбрасывается, фолд строится заново от свежего snapshot'а.
+       store.reset();
+@@ -56,33 +69,37 @@ export function useRoomBinding(
+     // навсегда завис бы в 'connecting' с unhandled rejection. Переводим в явный
+     // 'disconnected' через setConnectionState (onStateChange уже подписан выше);
+     // retry — забота потребителя по этому состоянию.
+     void conn
+       .join()
+       .then((snapshot) => {
+         store.applySnapshot(snapshot.events);
+         setAppSettings(snapshot.appSettings);
+         setEvents(store.all());
+       })
+-      .catch(() => setConnectionState('disconnected'));
++      .catch((e: unknown) => {
++        setJoinError(joinErrorCode(e));
++        setConnectionState('disconnected');
++      });
+     return () => {
+       // Обнуляем ref ДО следующего effect (cleanup всегда предшествует ему):
+       // publish на уже закрытом соединении обязан отказать NOT_CONNECTED,
+       // а не уйти emit'ом в мёртвый сокет.
+       connRef.current = null;
+       conn.close();
+     };
+   }, [roomId, tokens]);
+ 
+   return {
+     connectionState,
+     events,
+     appSettings,
++    joinError,
+     publish: (type, payload) => {
+       const conn = connRef.current;
+       // roomId === null → effect не поднимал соединение; publish без комнаты —
+       // явный отказ, а не молчаливый emit в никуда.
+       if (!conn) return Promise.reject(new ApiError('NOT_CONNECTED', 0));
+       return conn.publish(type, payload);
+     },
+   };
+ }

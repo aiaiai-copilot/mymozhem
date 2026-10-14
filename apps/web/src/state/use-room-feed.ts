@@ -6,6 +6,7 @@ import type { ApiClient } from '../api/api-client';
 import { listMembers } from '../api/endpoints';
 import { rosterNames } from '../components/roster-names';
 import { deriveRoomStatus, projectLottery, projectQuiz } from './projections';
+import { createFocusRefetcher } from './focus-refetch';
 import { shouldRefetchRoster } from './roster-refetch';
 
 // Общий клей «лог → ростер + проекции» (ruling Task 14): до этого блок копировался
@@ -60,6 +61,22 @@ export function useRoomFeed(
     if (!last || !shouldRefetchRoster(last.type)) return;
     refetchMembers();
   }, [events, refetchMembers]);
+
+  // Рефетч по возврату во вкладку (находка №6): join не эмитит событий — ростер
+  // стейл, пока ведущий был в другой вкладке. Без поллинга (решение владельца);
+  // дедуп парных visibilitychange/focus — в createFocusRefetcher.
+  useEffect(() => {
+    if (!roomId) return;
+    const onFocus = createFocusRefetcher(() => {
+      if (document.visibilityState === 'visible') refetchMembers();
+    });
+    document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [roomId, refetchMembers]);
 
   const names = useMemo(() => rosterNames(members), [members]);
 

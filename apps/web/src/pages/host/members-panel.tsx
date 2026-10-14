@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { RosterEntry } from '@mymozhem/sdk';
 import { ApiError } from '../../api/api-error';
-import { excludeMember } from '../../api/endpoints';
+import { excludeMember, listMembers } from '../../api/endpoints';
 import { displayNameOf } from '../../components/roster-names';
 import { hostClient } from './host-session';
 
@@ -29,6 +29,24 @@ interface MembersPanelProps {
   onChanged: () => void;
 }
 
+// Оркестрация exclude с рефетчем-в-момент-действия (находка №6) — вынесена из
+// компонента для теста без DOM (прецедент: чистые экспорты quiz-controls).
+// 'stale' — identity уже не в активном ростере (перезаход): exclude не шлём,
+// вызывающий обновляет ростер и просит выбрать заново.
+export async function excludeIfStillActive(
+  deps: {
+    listMembers: (roomId: string) => Promise<{ members: RosterEntry[] }>;
+    excludeMember: (roomId: string, identityId: string) => Promise<unknown>;
+  },
+  roomId: string,
+  identityId: string,
+): Promise<'excluded' | 'stale'> {
+  const fresh = await deps.listMembers(roomId);
+  if (!fresh.members.some((m) => m.identityId === identityId)) return 'stale';
+  await deps.excludeMember(roomId, identityId);
+  return 'excluded';
+}
+
 // Панель участников (бриф Task 15): ростер participant/spectator + «Исключить».
 // Organizer/moderator в список не попадают: ORGANIZER сервер исключить не даст
 // (TargetNotExcludable), а moderator в MVP-флоу не создаётся.
@@ -42,8 +60,20 @@ export function MembersPanel({ roomId, members, names, disabled, onChanged }: Me
     if (disabled || excludingId !== null) return; // одна команда за раз
     setExcludingId(identityId);
     setError(null);
-    void excludeMember(hostClient, roomId, identityId)
-      .then(() => onChanged())
+    void excludeIfStillActive(
+      {
+        listMembers: (r) => listMembers(hostClient, r),
+        excludeMember: (r, id) => excludeMember(hostClient, r, id),
+      },
+      roomId,
+      identityId,
+    )
+      .then((result) => {
+        // Стейл-ростер (№6): участник перезашёл между загрузкой и кликом —
+        // показываем свежий список и просим выбрать заново, exclude не ушёл.
+        if (result === 'stale') setError('Участник перезашёл — список обновлён, выберите заново.');
+        onChanged();
+      })
       .catch((e: unknown) => setError(excludeErrorText(e)))
       .finally(() => setExcludingId(null));
   };

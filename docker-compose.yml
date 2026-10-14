@@ -24,6 +24,9 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       # REQ-ID-006: доверие X-Forwarded-For — свойство деплоя (за reverse-proxy = true).
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      # ADR-012 self-hosted (находка №2): auto = Secure при NODE_ENV=production.
+      # false — ТОЛЬКИ plain-HTTP LAN-стенд первого события (см. чеклист §0.4).
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
       # ADR-012 §2: bootstrap единственного организатора инстанса. Обязателен
       # (>=32 байта); без значения в окружении compose не стартует.
       ORGANIZER_SETUP_TOKEN: ${ORGANIZER_SETUP_TOKEN:?ORGANIZER_SETUP_TOKEN is required (>=32 bytes)}

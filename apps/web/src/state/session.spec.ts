@@ -95,4 +95,68 @@ describe('SessionStore', () => {
     // по 401 в api-client ушёл бы со старым (контракт TokenProvider).
     expect(store.getAccessToken()).toBe('new-token');
   });
+
+  it('single-flight: конкурентные refresh() делят один вызов refreshFn (находка №4)', async () => {
+    // HostGate + 401-retry ApiClient + refresh-хук RoomConnection могут дёрнуть
+    // refresh одновременно с ОДНОЙ refresh-кукой; strict-ротация видит повторное
+    // предъявление и гасит семью («rotation race lost» на репетиции 2026-10-13).
+    let calls = 0;
+    let resolveFn!: (token: string) => void;
+    const store = new SessionStore(
+      () =>
+        new Promise<string>((resolve) => {
+          calls += 1;
+          resolveFn = resolve;
+        }),
+    );
+
+    const p1 = store.refresh();
+    const p2 = store.refresh();
+    const p3 = store.refresh();
+    resolveFn('tok-1');
+    await Promise.all([p1, p2, p3]);
+
+    expect(calls).toBe(1);
+    expect(store.getAccessToken()).toBe('tok-1');
+  });
+
+  it('после settle следующий refresh вызывает refreshFn снова', async () => {
+    let calls = 0;
+    const store = new SessionStore(() => {
+      calls += 1;
+      return Promise.resolve(`tok-${calls}`);
+    });
+
+    await store.refresh();
+    await store.refresh();
+
+    expect(calls).toBe(2);
+    expect(store.getAccessToken()).toBe('tok-2');
+  });
+
+  it('провал refresh не затирает токен и не блокирует следующую попытку (Review Focus 2)', async () => {
+    let calls = 0;
+    const store = new SessionStore(() => {
+      calls += 1;
+      return calls === 1 ? Promise.reject(new Error('network')) : Promise.resolve('tok-recovered');
+    });
+    store.setAccessToken('tok-old');
+
+    await expect(store.refresh()).rejects.toThrow('network');
+    expect(store.getAccessToken()).toBe('tok-old'); // провал ≠ потеря токена
+
+    await store.refresh(); // retry разрешён: мемо сброшен и на reject
+    expect(store.getAccessToken()).toBe('tok-recovered');
+    expect(calls).toBe(2);
+  });
+
+  it('clearHostRoom: сносит оба host-ключа (потребитель — консоль, находка №3)', () => {
+    SessionStore.saveHostRoomId('room-1');
+    SessionStore.saveHostRoomCode('ABCD-2345');
+
+    SessionStore.clearHostRoom();
+
+    expect(SessionStore.loadHostRoomId()).toBeNull();
+    expect(SessionStore.loadHostRoomCode()).toBeNull();
+  });
 });

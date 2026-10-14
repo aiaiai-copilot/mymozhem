@@ -1,0 +1,269 @@
+# Review package: 9091d01..c04af02
+
+## Commits
+c04af02 fix(web): exclude с рефетчем ростера в момент действия + рефетч по фокусу окна (находка №6)
+
+## Files changed
+ apps/web/src/pages/host/members-panel.spec.ts | 52 +++++++++++++++++++++++++++
+ apps/web/src/pages/host/members-panel.tsx     | 36 +++++++++++++++++--
+ apps/web/src/state/focus-refetch.spec.ts      | 20 +++++++++++
+ apps/web/src/state/focus-refetch.ts           | 16 +++++++++
+ apps/web/src/state/use-room-feed.ts           | 17 +++++++++
+ 5 files changed, 138 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/pages/host/members-panel.spec.ts b/apps/web/src/pages/host/members-panel.spec.ts
+new file mode 100644
+index 0000000..c711ab8
+--- /dev/null
++++ b/apps/web/src/pages/host/members-panel.spec.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from 'vitest';
++import type { RosterEntry } from '@mymozhem/sdk';
++import { excludeIfStillActive } from './members-panel';
++
++// rosterEntrySchema (SDK, strict): { identityId: uuid, displayName: string|null,
++// role: lowercase } — joinedAt на wire НЕТ, фикстура минимальна.
++const entry = (identityId: string): RosterEntry => ({
++  identityId,
++  displayName: 'Игрок',
++  role: 'participant',
++});
++
++// Рефетч в момент действия (находка №6): join не эмитит событий (I-3), ростер
++// консоли стейл — «Исключить» по прежней identity перезашедшего бьёт мимо.
++// Перед exclude ростер рефетчится; ушедшей identity exclude НЕ отправляется.
++describe('excludeIfStillActive', () => {
++  it('identity активна в свежем ростере → exclude отправлен (listMembers ДО exclude)', async () => {
++    const calls: string[] = [];
++    const deps = {
++      listMembers: async () => {
++        calls.push('list');
++        return { members: [entry('id-1')] };
++      },
++      excludeMember: async () => {
++        calls.push('exclude');
++      },
++    };
++
++    const result = await excludeIfStillActive(deps, 'room-1', 'id-1');
++
++    expect(result).toBe('excluded');
++    expect(calls).toEqual(['list', 'exclude']);
++  });
++
++  it('identity исчезла (перезаход) → exclude НЕ отправлен', async () => {
++    const calls: string[] = [];
++    const deps = {
++      listMembers: async () => {
++        calls.push('list');
++        return { members: [entry('id-new')] };
++      },
++      excludeMember: async () => {
++        calls.push('exclude');
++      },
++    };
++
++    const result = await excludeIfStillActive(deps, 'room-1', 'id-1');
++
++    expect(result).toBe('stale');
++    expect(calls).toEqual(['list']);
++  });
++});
+diff --git a/apps/web/src/pages/host/members-panel.tsx b/apps/web/src/pages/host/members-panel.tsx
+index 4dbf346..d3d46a3 100644
+--- a/apps/web/src/pages/host/members-panel.tsx
++++ b/apps/web/src/pages/host/members-panel.tsx
+@@ -1,14 +1,14 @@
+ import { useState } from 'react';
+ import type { RosterEntry } from '@mymozhem/sdk';
+ import { ApiError } from '../../api/api-error';
+-import { excludeMember } from '../../api/endpoints';
++import { excludeMember, listMembers } from '../../api/endpoints';
+ import { displayNameOf } from '../../components/roster-names';
+ import { hostClient } from './host-session';
+ 
+ // UX-маппинг ошибок exclude — тот же стиль, что commandErrorText на
+ // console-page: человеческий глагол + честный код (REQ-SEC-006).
+ const excludeErrorText = (e: unknown): string => {
+   if (e instanceof ApiError) return `Не удалось исключить (${e.code}).`;
+   return 'Ошибка сети. Участник не исключён.';
+ };
+ 
+@@ -22,35 +22,65 @@ interface MembersPanelProps {
+   // нужен, рефетч после exclude делает onChanged (см. ниже).
+   members: RosterEntry[];
+   names: Map<string, string>;
+   // Терминальный статус: исключать в завершённой/отменённой комнате незачем.
+   disabled: boolean;
+   // Exclude не эмитит публичных событий (CORE_EVENTS — только lifecycle), поэтому
+   // событийный рефетч useRoomFeed его не увидит — ростер рефетчим вручную (бриф).
+   onChanged: () => void;
+ }
+ 
++// Оркестрация exclude с рефетчем-в-момент-действия (находка №6) — вынесена из
++// компонента для теста без DOM (прецедент: чистые экспорты quiz-controls).
++// 'stale' — identity уже не в активном ростере (перезаход): exclude не шлём,
++// вызывающий обновляет ростер и просит выбрать заново.
++export async function excludeIfStillActive(
++  deps: {
++    listMembers: (roomId: string) => Promise<{ members: RosterEntry[] }>;
++    excludeMember: (roomId: string, identityId: string) => Promise<unknown>;
++  },
++  roomId: string,
++  identityId: string,
++): Promise<'excluded' | 'stale'> {
++  const fresh = await deps.listMembers(roomId);
++  if (!fresh.members.some((m) => m.identityId === identityId)) return 'stale';
++  await deps.excludeMember(roomId, identityId);
++  return 'excluded';
++}
++
+ // Панель участников (бриф Task 15): ростер participant/spectator + «Исключить».
+ // Organizer/moderator в список не попадают: ORGANIZER сервер исключить не даст
+ // (TargetNotExcludable), а moderator в MVP-флоу не создаётся.
+ export function MembersPanel({ roomId, members, names, disabled, onChanged }: MembersPanelProps) {
+   const [excludingId, setExcludingId] = useState<string | null>(null);
+   const [error, setError] = useState<string | null>(null);
+ 
+   // Reason с формы не собираем (functional-minimum): без тела сервер парсит {}
+   // (endpoints.excludeMember), повторное исключение — типизированный no-op.
+   const exclude = (identityId: string) => {
+     if (disabled || excludingId !== null) return; // одна команда за раз
+     setExcludingId(identityId);
+     setError(null);
+-    void excludeMember(hostClient, roomId, identityId)
+-      .then(() => onChanged())
++    void excludeIfStillActive(
++      {
++        listMembers: (r) => listMembers(hostClient, r),
++        excludeMember: (r, id) => excludeMember(hostClient, r, id),
++      },
++      roomId,
++      identityId,
++    )
++      .then((result) => {
++        // Стейл-ростер (№6): участник перезашёл между загрузкой и кликом —
++        // показываем свежий список и просим выбрать заново, exclude не ушёл.
++        if (result === 'stale') setError('Участник перезашёл — список обновлён, выберите заново.');
++        onChanged();
++      })
+       .catch((e: unknown) => setError(excludeErrorText(e)))
+       .finally(() => setExcludingId(null));
+   };
+ 
+   const excludable = members.filter((m) => m.role === 'participant' || m.role === 'spectator');
+ 
+   return (
+     <section>
+       <h2>Участники ({excludable.length})</h2>
+       {excludable.length === 0 ? <p>Пока никого нет.</p> : null}
+diff --git a/apps/web/src/state/focus-refetch.spec.ts b/apps/web/src/state/focus-refetch.spec.ts
+new file mode 100644
+index 0000000..adec51c
+--- /dev/null
++++ b/apps/web/src/state/focus-refetch.spec.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it, vi } from 'vitest';
++import { createFocusRefetcher } from './focus-refetch';
++
++// Дедуп рефетча по фокусу (находка №6): visibilitychange и focus приходят парой
++// на одно возвращение во вкладку — ростер дёргаем не чаще minIntervalMs.
++describe('createFocusRefetcher', () => {
++  it('события в пределах окна → один рефетч; после окна → следующий', () => {
++    const refetch = vi.fn();
++    let now = 1_000;
++    const onFocus = createFocusRefetcher(refetch, 2_000, () => now);
++
++    onFocus(); // t=1000 → рефетч
++    now = 2_000;
++    onFocus(); // внутри окна → пропуск
++    now = 3_500; // 3500-1000 = 2500 > 2000
++    onFocus(); // рефетч
++
++    expect(refetch).toHaveBeenCalledTimes(2);
++  });
++});
+diff --git a/apps/web/src/state/focus-refetch.ts b/apps/web/src/state/focus-refetch.ts
+new file mode 100644
+index 0000000..bf83405
+--- /dev/null
++++ b/apps/web/src/state/focus-refetch.ts
+@@ -0,0 +1,16 @@
++// Дедуп рефетча по фокусу окна (находка №6): visibilitychange→visible и focus
++// приходят парой; не чаще одного вызова в minIntervalMs. Чистая фабрика —
++// тест без DOM; visibility-фильтр остаётся в вызывающем (use-room-feed).
++export function createFocusRefetcher(
++  refetch: () => void,
++  minIntervalMs = 2_000,
++  now: () => number = Date.now,
++): () => void {
++  let last = -Infinity;
++  return () => {
++    const t = now();
++    if (t - last < minIntervalMs) return;
++    last = t;
++    refetch();
++  };
++}
+diff --git a/apps/web/src/state/use-room-feed.ts b/apps/web/src/state/use-room-feed.ts
+index 4aaf2df..e4e6bcb 100644
+--- a/apps/web/src/state/use-room-feed.ts
++++ b/apps/web/src/state/use-room-feed.ts
+@@ -1,18 +1,19 @@
+ import { useCallback, useEffect, useMemo, useState } from 'react';
+ import type { ProjectedEvent, RoomStatus, RosterEntry } from '@mymozhem/sdk';
+ import type { LotteryState } from '@mymozhem/app-lottery';
+ import type { QuizState } from '@mymozhem/app-quiz';
+ import type { ApiClient } from '../api/api-client';
+ import { listMembers } from '../api/endpoints';
+ import { rosterNames } from '../components/roster-names';
+ import { deriveRoomStatus, projectLottery, projectQuiz } from './projections';
++import { createFocusRefetcher } from './focus-refetch';
+ import { shouldRefetchRoster } from './roster-refetch';
+ 
+ // Общий клей «лог → ростер + проекции» (ruling Task 14): до этого блок копировался
+ // в play-page и screen-page; консоль — третий потребитель, поэтому клей поднят
+ // в хук. Миграция play/screen на него — отдельный follow-up, здесь не делается.
+ // Все хуки безусловны (гейта eslint-plugin-react-hooks нет): roomId === null —
+ // это «нет привязки», effects просто не стартуют, как в useRoomBinding.
+ export function useRoomFeed(
+   roomId: string | null,
+   client: ApiClient,
+@@ -54,20 +55,36 @@ export function useRoomFeed(
+     };
+   }, [roomId, client]);
+ 
+   // …и событийный рефетч там, где имена появляются на экране (табло/победители).
+   useEffect(() => {
+     const last = events[events.length - 1];
+     if (!last || !shouldRefetchRoster(last.type)) return;
+     refetchMembers();
+   }, [events, refetchMembers]);
+ 
++  // Рефетч по возврату во вкладку (находка №6): join не эмитит событий — ростер
++  // стейл, пока ведущий был в другой вкладке. Без поллинга (решение владельца);
++  // дедуп парных visibilitychange/focus — в createFocusRefetcher.
++  useEffect(() => {
++    if (!roomId) return;
++    const onFocus = createFocusRefetcher(() => {
++      if (document.visibilityState === 'visible') refetchMembers();
++    });
++    document.addEventListener('visibilitychange', onFocus);
++    window.addEventListener('focus', onFocus);
++    return () => {
++      document.removeEventListener('visibilitychange', onFocus);
++      window.removeEventListener('focus', onFocus);
++    };
++  }, [roomId, refetchMembers]);
++
+   const names = useMemo(() => rosterNames(members), [members]);
+ 
+   // recordedAt — момент приёма: wire его не несёт (I-1); влияет только на
+   // отображение, баллы едут в payload question.revealed.
+   const quiz = useMemo(() => projectQuiz(events, new Date().toISOString()), [events]);
+   const lottery = useMemo(() => projectLottery(events, new Date().toISOString()), [events]);
+   const status = useMemo(() => deriveRoomStatus(events), [events]);
+ 
+   return { members, names, quiz, lottery, status, refetchMembers };
+ }

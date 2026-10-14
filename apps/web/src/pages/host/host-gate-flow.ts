@@ -1,4 +1,5 @@
 import { decodeAccessClaims, SessionStore } from '../../state/session';
+import { HOST_CONSOLE_PATH, HOST_NEW_PATH } from '../../routes';
 
 // Структурный минимум сессии для гейта (реализация — hostSession, SessionStore).
 export interface GateSession {
@@ -6,7 +7,9 @@ export interface GateSession {
   refresh(): Promise<void>;
 }
 
-export type HostGateTarget = '/host/console' | '/host/new' | '/';
+// Тип — от констант routes.ts (находка A): navigate гейта не может разъехаться
+// с роутером. '/' остаётся литералом — корень зарегистрирован всегда.
+export type HostGateTarget = typeof HOST_CONSOLE_PATH | typeof HOST_NEW_PATH | '/';
 
 // Маршрут гейта /host. СНАЧАЛА токен в памяти: его только что поставил login по
 // setup-токену (ADR-012 §2), а refresh-кука на plain-HTTP LAN не живёт (Secure)
@@ -29,5 +32,5 @@ export async function resolveHostGateTarget(session: GateSession): Promise<HostG
   } catch {
     return '/';
   }
-  return SessionStore.loadHostRoomId() ? '/host/console' : '/host/new';
+  return SessionStore.loadHostRoomId() ? HOST_CONSOLE_PATH : HOST_NEW_PATH;
 }

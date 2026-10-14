@@ -1,0 +1,248 @@
+# Review package: c04af02..9d2ad16
+
+## Commits
+9d2ad16 feat(web): LAN playwright-smoke с fail-closed валидацией baseURL + чеклист bare-run стенда (находка №7, дизайн §8.2)
+
+## Files changed
+ apps/web/e2e/lan-base-url.ts                       | 31 ++++++++++++++++++++
+ apps/web/e2e/lan-base-url.vitest.spec.ts           | 34 ++++++++++++++++++++++
+ apps/web/e2e/playwright.config.lan.ts              | 19 ++++++++++++
+ apps/web/e2e/playwright.config.ts                  |  3 ++
+ apps/web/package.json                              |  1 +
+ apps/web/vite.config.ts                            |  4 ++-
+ .../2026-09-23-ui-slice-smoke-checklist.md         | 21 +++++++++++++
+ 7 files changed, 112 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/apps/web/e2e/lan-base-url.ts b/apps/web/e2e/lan-base-url.ts
+new file mode 100644
+index 0000000..f348468
+--- /dev/null
++++ b/apps/web/e2e/lan-base-url.ts
+@@ -0,0 +1,31 @@
++// Fail-closed валидация LAN_BASE_URL (дизайн §8.2): только localhost или
++// RFC1918-адрес по plain http. Любой другой хост/схема (включая публичный прод)
++// — отказ ДО старта тестов. Возвращает origin (без пути/trailing slash).
++export function assertLanBaseUrl(raw: string | undefined): string {
++  if (!raw) {
++    throw new Error('LAN_BASE_URL обязателен (например http://192.168.0.186:3000)');
++  }
++  let url: URL;
++  try {
++    url = new URL(raw);
++  } catch {
++    throw new Error(`LAN_BASE_URL не является URL: ${raw}`);
++  }
++  if (url.protocol !== 'http:') {
++    throw new Error(`LAN_BASE_URL: разрешён только plain http LAN-стенда, получено ${url.protocol}//`);
++  }
++  const host = url.hostname;
++  if (host === 'localhost' || host === '127.0.0.1') return url.origin;
++  const m = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
++  const isPrivate =
++    m !== null &&
++    (Number(m[1]) === 10 ||
++      (Number(m[1]) === 172 && Number(m[2]) >= 16 && Number(m[2]) <= 31) ||
++      (Number(m[1]) === 192 && Number(m[2]) === 168));
++  if (!isPrivate) {
++    throw new Error(
++      `LAN_BASE_URL: хост ${host} не localhost/RFC1918 — прогон e2e по внешнему адресу запрещён`,
++    );
++  }
++  return url.origin;
++}
+diff --git a/apps/web/e2e/lan-base-url.vitest.spec.ts b/apps/web/e2e/lan-base-url.vitest.spec.ts
+new file mode 100644
+index 0000000..785712d
+--- /dev/null
++++ b/apps/web/e2e/lan-base-url.vitest.spec.ts
+@@ -0,0 +1,34 @@
++import { describe, expect, it } from 'vitest';
++import { assertLanBaseUrl } from './lan-base-url';
++
++// Fail-closed валидация LAN_BASE_URL (дизайн §8.2): только localhost/RFC1918 по
++// plain http. Прогон e2e по внешнему адресу запрещён конфигурационно — интент
++// «никогда не production» базового playwright.config.ts здесь машинный.
++describe('assertLanBaseUrl', () => {
++  it.each([
++    ['http://192.168.0.186:3000', 'http://192.168.0.186:3000'],
++    ['http://10.0.0.5:3000', 'http://10.0.0.5:3000'],
++    ['http://172.16.1.1:3000', 'http://172.16.1.1:3000'],
++    ['http://172.31.255.254:3000', 'http://172.31.255.254:3000'],
++    ['http://localhost:3000', 'http://localhost:3000'],
++    ['http://127.0.0.1:3000/', 'http://127.0.0.1:3000'], // origin без trailing slash
++  ])('разрешён: %s', (input, expected) => {
++    expect(assertLanBaseUrl(input)).toBe(expected);
++  });
++
++  it.each([
++    ['https://192.168.0.186:3000', 'plain http'], // TLS на LAN-стенде нет
++    ['http://8.8.8.8:3000', 'RFC1918'], // публичный IP
++    ['http://172.15.0.1:3000', 'RFC1918'], // вне диапазона 172.16–31
++    ['http://172.32.0.1:3000', 'RFC1918'],
++    ['http://192.167.0.1:3000', 'RFC1918'],
++    ['http://mymozhem.example.com', 'RFC1918'], // домен, не IP
++    ['not-a-url', 'URL'],
++  ])('отказ: %s', (input, marker) => {
++    expect(() => assertLanBaseUrl(input)).toThrow(marker);
++  });
++
++  it('отсутствующая переменная — отказ с подсказкой формата', () => {
++    expect(() => assertLanBaseUrl(undefined)).toThrow('LAN_BASE_URL обязателен');
++  });
++});
+diff --git a/apps/web/e2e/playwright.config.lan.ts b/apps/web/e2e/playwright.config.lan.ts
+new file mode 100644
+index 0000000..592483c
+--- /dev/null
++++ b/apps/web/e2e/playwright.config.lan.ts
+@@ -0,0 +1,19 @@
++import { defineConfig } from '@playwright/test';
++import { assertLanBaseUrl } from './lan-base-url';
++
++// LAN-вариант smoke (дизайн 2026-10-13 §8.2, находки репетиции): прогон против
++// стенда по IP машины — ловит класс «браузер × топология», невидимый с localhost
++// (CSP, Secure-кука, NAT). Сьют/таймауты идентичны базовому конфигу; baseURL —
++// из LAN_BASE_URL с fail-closed валидацией (только localhost/RFC1918 по http).
++export default defineConfig({
++  workers: 1,
++  retries: 1,
++  timeout: 90_000,
++  expect: { timeout: 15_000 },
++  reporter: [['list']],
++  testMatch: 'smoke.spec.ts',
++  use: {
++    baseURL: assertLanBaseUrl(process.env.LAN_BASE_URL),
++  },
++  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
++});
+diff --git a/apps/web/e2e/playwright.config.ts b/apps/web/e2e/playwright.config.ts
+index 97258df..b4a8346 100644
+--- a/apps/web/e2e/playwright.config.ts
++++ b/apps/web/e2e/playwright.config.ts
+@@ -7,15 +7,18 @@ import { defineConfig } from '@playwright/test';
+ export default defineConfig({
+   // Один сьют, последовательные шаги тремя browser-context'ами в одном test —
+   // параллелизм и шардирование бессмысленны и вредны (общий код комнаты).
+   workers: 1,
+   // Один retry против транзиентов сети/docker; детерминированный дефект
+   // retry не маскирует — ассерты строгие.
+   retries: 1,
+   timeout: 90_000,
+   expect: { timeout: 15_000 },
+   reporter: [['list']],
++  // Пин «сьют = один файл»: рядом живут *.vitest.spec.ts (vitest-спеки e2e),
++  // которые playwright подхватывать не должен.
++  testMatch: 'smoke.spec.ts',
+   use: {
+     baseURL: 'http://localhost:3000',
+   },
+   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+ });
+diff --git a/apps/web/package.json b/apps/web/package.json
+index 3ca3133..e2c6b54 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,20 +1,21 @@
+ {
+   "name": "@mymozhem/web",
+   "private": true,
+   "version": "0.0.0",
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+     "build": "vite build",
+     "test": "vitest run",
+     "test:e2e": "playwright test --config e2e/playwright.config.ts",
++    "test:e2e:lan": "playwright test --config e2e/playwright.config.lan.ts",
+     "lint": "eslint src",
+     "typecheck": "tsc -p tsconfig.json --noEmit"
+   },
+   "dependencies": {
+     "@mymozhem/app-lottery": "workspace:*",
+     "@mymozhem/app-quiz": "workspace:*",
+     "@mymozhem/sdk": "workspace:*",
+     "react": "^18.3.1",
+     "react-dom": "^18.3.1",
+     "react-router-dom": "^6.30.6",
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 3f33525..4d7c601 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -7,16 +7,18 @@ export default defineConfig({
+   server: {
+     proxy: {
+       '/rooms': 'http://localhost:3000',
+       '/auth': 'http://localhost:3000',
+       '/health': 'http://localhost:3000',
+       '/socket.io': { target: 'http://localhost:3000', ws: true },
+     },
+   },
+   test: {
+     environment: 'node',
+-    include: ['src/**/*.spec.ts'],
++    // Суффикс .vitest.spec.ts — e2e-спеки, которые playwright НЕ подхватывает:
++    // у обоих playwright-конфигов явный testMatch.
++    include: ['src/**/*.spec.ts', 'e2e/**/*.vitest.spec.ts'],
+     // До батчей C/D спек нет, а turbo-гейт `test` обязан оставаться зелёным
+     // (REQ-DEV-001): пустой пакет — не падение.
+     passWithNoTests: true,
+   },
+ });
+diff --git a/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md b/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
+index 03f6b4d..0fb61bc 100644
+--- a/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
++++ b/docs/sessions/2026-09-23-ui-slice-smoke-checklist.md
+@@ -23,20 +23,40 @@
+ Refresh-кука одна на origin (`mm_refresh`, path `/auth`): вход организатора по setup-токену затирает гостевую куку участника и наоборот. **Правило прогона:** консоль ведущего — в одном браузере (или профиле), тест-игрок с десктопа — в другом браузере/профиле/окне инкогнито; телефоны — отдельные устройства, там проблемы нет. Нарушение правила выглядит как «участника внезапно разлогинило / консоль потеряла сессию» — это не баг, а следствие shared-куки.
+ 
+ **Наблюдаемый результат:** после входа организатора вкладка участника в другом браузере продолжает получать события; в том же браузере — не проверяем.
+ 
+ ### 0.3. LAN по plain HTTP — известное ограничение розыгрыша
+ 
+ `crypto.randomUUID()` — secure-context-only API: на `http://<ip>` (не localhost) кнопка розыгрыша («Разыграть участника», а при `PRIZE_MODE=on` и «Разыграть») не сможет сгенерировать drawId. Клиент показывает честную ошибку «Действие не выполнено: браузер не даёт сгенерировать идентификатор розыгрыша (нужен HTTPS или localhost)» (`apps/web/src/pages/host/prizes-panel.tsx:31-32`), а не мёртвую кнопку. **Если событие планируется по LAN по plain HTTP — это норма платформы, решение о fallback (TLS-терминатор / иной источник drawId) принимает владелец до события**, не ведущий в моменте.
+ 
+ **Наблюдаемый результат (контрольный прогон):** консоль по `http://<ip>` → «Разыграть участника» → текст ошибки в панели призов; по `http://localhost:3000` на машине стенда — розыгрыш проходит (строка 9).
+ 
++### 0.4. Стенд на событие — bare-run сервера (находка №7)
++
++docker NAT скрывает реальные IP клиентов (exclusion по IP банит всех, rate-limit
++общий — воспроизведено на репетиции 2026-10-13). На событие сервер запускается
++НА ХОСТЕ, в контейнере остаётся только БД:
++
++1. `docker compose up postgres` (только БД).
++2. `pnpm build` из корня.
++3. Сервер на хосте: `DATABASE_URL=postgresql://mymozhem:mymozhem@localhost:5432/mymozhem JWT_SECRET=... ORGANIZER_SETUP_TOKEN=... PRIZE_MODE=off COOKIE_SECURE=false pnpm --filter @mymozhem/server start`.
++   ВНИМАНИЕ: compose по умолчанию НЕ публикует порт 5432 на хост — для bare-run
++   добавить в docker-compose.override.yml или пробросить порт одноразово
++   (`docker compose run`-стиль не подходит; см. комментарий в docker-compose.yml).
++4. Web отдаётся тем же сервером (WEB_STATIC_DIR) — один origin на LAN-IP хоста.
++5. COOKIE_SECURE=false — ТОЛЬКИ для plain-HTTP LAN (находка №2): иначе телефоны
++   не примут refresh-куку и сессия будет с 15-минутным потолком.
++6. Контрольная строка: участник с телефона исключается → ROOM_JOIN_DENIED
++   получает ТОЛЬКО он, остальные продолжают. Вторая контрольная: вход 5+
++   устройств подряд без 429.
++7. Перед гостями: LAN-smoke — `LAN_BASE_URL=http://<IP-хоста>:3000 pnpm --filter @mymozhem/web test:e2e:lan`.
++
+ ---
+ 
+ ## 1. Вход организатора по setup-токену
+ 
+ Playwright-smoke проходит этот путь целиком (`apps/web/e2e/smoke.spec.ts`, шаг 1); здесь — ручная проверка с токеном стенда.
+ 
+ **Прогон:**
+ 1.1. Открыть лендинг → «Войти по токену организатора».
+ **Результат:** переход на `/host/login` (router-навигация, без перезагрузки), форма с полем «Токен организатора».
+ 1.2. Ввести setup-токен стенда → «Войти».
+@@ -159,10 +179,11 @@ Playwright-smoke проходит этот путь целиком (`apps/web/e2
+ | 4.1 | экран read-only | ✅ | playwright smoke 2026-10-13: spectator-view без форм, статус на месте |
+ | 5.1–5.3 | ведение: open/answer/close/reveal, табло сходится | ✅ | playwright smoke 2026-10-13 + ручной прогон 2026-10-13 (комната nvyt7vum): open → варианты у обоих игроков; ack «Ответ принят.» у каждого; close → «Верно!»/«Неверно.», табло сходится на клиентах; лог сервера: opened → 2×(submitted module-private + accepted public) → closed → revealed |
+ | 6.1 | обрыв Wi-Fi → перефолд | ✅ | Ручной прогон 2026-10-13 (iPhone по LAN, комната nvyt7vum, вопрос 2 открыт): Wi-Fi off ~10 с → баннер «Нет соединения. Переподключаемся…»; Wi-Fi on → автоматический reconnect/перефолд без F5, вопрос на месте, ответ после переподключения принят («Ответ принят.») |
+ | 7.1 | reload консоли mid-event | ❌ | Ручной прогон 2026-10-13: F5 на консоли в разгар вопроса 2 → access-токен потерян (память), 3 параллельных refresh → все «rotation race lost» → сессия мертва, консоль не восстановилась. ТРЕТЬЕ воспроизведение за день (strict-ротация refresh-токена уязвима к гонке/обрыву ответа при перезагрузке). Кандидат на фикс ДО события: разбор ротации (single-flight refresh, grace-окно прежнего токена) — решение владельца. Обход: перелогин по setup-токену (~10 с) |
+ | 8.1 | пауза >15 мин → silent refresh | ✅ | Ручной прогон 2026-10-13: консоль без перезагрузки с 17:53, в 18:14 команда/рефетч после протухшего access-токена — сервер: `jwt expired` → молчаливый refresh успешен (localhost-кука жива) → retry 200. Пользователем незаметно |
+ | 9.1–9.4 | приз/розыгрыш/fulfill/revoke (при `PRIZE_MODE=on`) | n/a | стенд репетиции в дефолте ADR-012 (`PRIZE_MODE=off`) — строки непроходимы по постановке |
+ | 9.5 | безпризовой розыгрыш (дефолт `PRIZE_MODE=off`) | ✅ | 2026-10-13 (временный rehearsal-спек против стенда, удалён после прогона): «Разыграть участника» → победитель виден в консоли, у участника и на экране, строка без «приз …»; контроль гейта: «Добавить приз» → «Призовой режим выключен на этом сервере.» |
+ | 10.1 | конец колоды: disabled + confirm | ✅ | playwright smoke 2026-10-13 (confirm accept) + ручной прогон 2026-10-13: после вопроса 2 «Открыть вопрос»/«Закрыть вопрос» disabled; «Завершить квиз» → «Отмена» — игра жива, ничего не изменилось |
+ | 11.1 | exclude → дисконнект | ⚠️ частично | Ручной прогон 2026-10-13: exclude закоммичен (soft-delete + Exclusion — проверено по БД) ✅. НО: (а) «Исключить» попало по прежней identity перезашедшего телефона — ростер консоли стейл, join не эмитит событий (находка №6); (б) блок по IP на compose-стенде видит всех клиентов под IP docker-шлюза — exclusion заблокировал вход ВСЕМ (находка №7, воспроизведено curl с localhost → ROOM_JOIN_DENIED). Живой дисконнект актуального клиента не продемонстрирован (серверная сторона покрыта e2e, REQ-SEC-003) |
+ | 12.1–12.2 | завершение + reload участника | ✅ 12.1 / ❌ 12.2 (LAN) | 12.1 — 2026-10-13: «Игра завершена» + «Ваши очки: N» + итоговое табло у участника, в логе game.finish → game.finished. 12.2 — reload участника на LAN: silent refresh невозможен (Secure-кука по plain HTTP не живёт, находка №2) → честная форма входа «Сохранённая сессия недействительна»; повторный join отклонён ROOM_JOIN_DENIED из-за находки №7 (exclusion по gateway-IP заблокировал всех). На localhost с живой кукой путь «та же identity → финальное табло» ожидаем, но в прогоне не демонстрирован |
++| 0.4 | стенд на событие: bare-run + COOKIE_SECURE=false + LAN-smoke | ⬜ | Добавлено 2026-10-13 (сессия 38, пакет фиксов репетиции); прогон — при подготовке первого события |

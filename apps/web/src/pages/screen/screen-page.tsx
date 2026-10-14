@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
 import { gameFinishedPayload, questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
@@ -56,35 +56,49 @@ export function ScreenPage() {
   const [client] = useState(() => new ApiClient(session));
   const [roomId, setRoomId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
-  const joinStarted = useRef(false);
+  const joinInFlight = useRef(false);
 
   // Автоматический spectator-join по коду из :code — единственный вход на экран.
-  useEffect(() => {
-    // StrictMode в dev дёргает effect дважды; повторный join создавал бы вторую
-    // identity — страхуемся ref'ом, эффект одноразовый.
-    if (joinStarted.current) return;
-    joinStarted.current = true;
+  // Гард сбрасывается в finally: перезаходу (onSessionDead, находка №5) нужен
+  // повторный вход, а StrictMode-перекрытие по-прежнему отсекает параллельный
+  // дубль (второй эффект видит in-flight join).
+  const joinSpectator = useCallback(async () => {
+    setJoinError(null);
     if (!code) {
       setJoinError('В ссылке нет кода комнаты.');
       return;
     }
-    void (async () => {
-      try {
-        // displayName фиксированный — экран не спрашивает имя; роль spectator.
-        const res = await joinRoom(anonClient, { code, displayName: 'Экран', role: 'spectator' });
-        session.setAccessToken(res.accessToken);
-        // roomId — только из claims токена: идентичность из аутентифицированного
-        // контекста, не из URL/payload (REQ-RT-009 по смыслу).
-        const claims = decodeAccessClaims(res.accessToken);
-        if (!claims.roomId) throw new Error('join token without roomId');
-        setRoomId(claims.roomId);
-      } catch (e) {
-        setJoinError(joinErrorText(e));
-      }
-    })();
+    if (joinInFlight.current) return;
+    joinInFlight.current = true;
+    try {
+      // displayName фиксированный — экран не спрашивает имя; роль spectator.
+      const res = await joinRoom(anonClient, { code, displayName: 'Экран', role: 'spectator' });
+      session.setAccessToken(res.accessToken);
+      // roomId — только из claims токена: идентичность из аутентифицированного
+      // контекста, не из URL/payload (REQ-RT-009 по смыслу).
+      const claims = decodeAccessClaims(res.accessToken);
+      if (!claims.roomId) throw new Error('join token without roomId');
+      setRoomId(claims.roomId);
+    } catch (e) {
+      setJoinError(joinErrorText(e));
+    } finally {
+      joinInFlight.current = false;
+    }
   }, [code, session]);
 
-  const binding = useRoomBinding(roomId, session);
+  useEffect(() => {
+    void joinSpectator();
+  }, [joinSpectator]);
+
+  const binding = useRoomBinding(roomId, session, {
+    onSessionDead: useCallback(() => {
+      // См. play-page: отвязка → перезаход следующим тиком (rebind при том же
+      // roomId). Перезаход spectator = новый spectator 'Экран'; saveGuest не
+      // трогаем — зритель не затирает guest-сессию play-страницы.
+      setRoomId(null);
+      setTimeout(() => void joinSpectator(), 0);
+    }, [joinSpectator]),
+  });
   const events = binding.events;
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
