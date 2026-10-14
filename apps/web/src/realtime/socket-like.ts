@@ -11,6 +11,9 @@ export interface SocketLike {
   onEvent(cb: (payload: unknown) => void): void;
   emitWithAck(event: string, payload: unknown): Promise<unknown>;
   disconnect(): void;
+  isConnected(): boolean;
+  // Принудительный немедленный reconnect в обход backoff-таймера (находка №8).
+  kickReconnect(): void;
 }
 
 export const createSocket = (getAccessToken: () => string | null): SocketLike => {
@@ -28,5 +31,19 @@ export const createSocket = (getAccessToken: () => string | null): SocketLike =>
     onEvent: (cb) => socket.on(REALTIME_MESSAGES.EVENT, cb),
     emitWithAck: (event, payload) => socket.emitWithAck(event, payload),
     disconnect: () => socket.disconnect(),
+    isConnected: () => socket.connected,
+    // WebKit выбрасывает pending backoff-таймер замороженной вкладки: Manager
+    // застревает с _reconnecting=true без запланированной попытки, а все
+    // внутренние retry-пути (reconnect/maybeReconnectOnOpen) заперты этим флагом
+    // — вечный «Переподключаемся…» (socket.io-client 4.8.3, manager.js).
+    // Наивный connect() здесь no-op: Socket.connect() открывает Manager только
+    // при !_reconnecting (socket.js). _close() сбрасывает _reconnecting и чистит
+    // таймеры (публичен по d.ts, подчёркнут по конвенции — не переопределять
+    // без ревью при апгрейде socket.io-client), connect() стартует немедленную
+    // попытку в обход backoff; токен перечитывается auth-колбэком.
+    kickReconnect: () => {
+      socket.io._close();
+      socket.connect();
+    },
   };
 };

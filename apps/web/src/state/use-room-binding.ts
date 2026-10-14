@@ -4,6 +4,7 @@ import { ApiError } from '../api/api-error';
 import type { TokenProvider } from '../api/token-provider';
 import { RoomConnection, type ConnectionState } from '../realtime/room-connection';
 import { createSocket } from '../realtime/socket-like';
+import { createFocusRefetcher } from './focus-refetch';
 import { LogStore } from './log-store';
 
 // Код отказа стартового join (находка №3): ApiError несёт wire-код; сетевые
@@ -62,6 +63,18 @@ export function useRoomBinding(
       setEvents(store.all());
     });
     conn.onStateChange(setConnectionState);
+    // Кик reconnect'а при пробуждении вкладки (находка №8): WebKit выбрасывает
+    // backoff-таймер socket.io из замороженной вкладки — вечный баннер до reload.
+    // pageshow — возврат из bfcache (ключевой сигнал iOS Safari),
+    // visibilitychange/focus — парный сигнал десктопа; дедуп парных событий —
+    // тот же createFocusRefetcher, что у ростера (находка №6). Протухший токен
+    // при пробуждении обслуживает существующий путь connect_error → refresh.
+    const onWake = createFocusRefetcher(() => {
+      if (document.visibilityState === 'visible') conn.wakeUp();
+    });
+    document.addEventListener('visibilitychange', onWake);
+    window.addEventListener('focus', onWake);
+    window.addEventListener('pageshow', onWake);
     // join() НЕ идемпотентен (второй вызов = второй subscribe) — ровно один вызов
     // на effect. Стартовый отказ обязан обрабатываться: gateway при ошибке subscribe
     // зачищает серверную подписку (registry.remove + socket.leave + ack-ошибка,
@@ -81,6 +94,9 @@ export function useRoomBinding(
         setConnectionState('disconnected');
       });
     return () => {
+      document.removeEventListener('visibilitychange', onWake);
+      window.removeEventListener('focus', onWake);
+      window.removeEventListener('pageshow', onWake);
       // Обнуляем ref ДО следующего effect (cleanup всегда предшествует ему):
       // publish на уже закрытом соединении обязан отказать NOT_CONNECTED,
       // а не уйти emit'ом в мёртвый сокет.

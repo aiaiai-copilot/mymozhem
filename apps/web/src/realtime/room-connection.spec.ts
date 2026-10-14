@@ -21,6 +21,9 @@ class FakeSocket implements SocketLike {
   private readonly disconnectCbs: Array<() => void> = [];
   private readonly eventCbs: Array<(payload: unknown) => void> = [];
   disconnected = false;
+  // Состояние соединения и счётчик киков — для wakeUp (находка №8).
+  connected = false;
+  kickCount = 0;
 
   programAck(event: string, ack: unknown): void {
     const queue = this.ackQueue.get(event) ?? [];
@@ -50,6 +53,12 @@ class FakeSocket implements SocketLike {
   }
   disconnect(): void {
     this.disconnected = true;
+  }
+  isConnected(): boolean {
+    return this.connected;
+  }
+  kickReconnect(): void {
+    this.kickCount += 1;
   }
 
   triggerConnect(): void {
@@ -342,5 +351,44 @@ describe('RoomConnection', () => {
     await flushMicrotasks();
 
     expect(states).toEqual(['live']);
+  });
+
+  // wakeUp (находка №8): WebKit выбрасывает backoff-таймер socket.io из
+  // замороженной вкладки — Manager застревает (_reconnecting=true, таймера нет,
+  // все внутренние retry заперты). Кик — явный перезапуск по сигналу пробуждения.
+  it('wakeUp после join при мёртвом соединении — kick reconnect', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    await conn.join();
+    socket.connected = false;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(1);
+
+    // Каждое пробуждение — свежий кик; дедуп парных DOM-событий — забота
+    // вызывающего (createFocusRefetcher в useRoomBinding).
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(2);
+  });
+
+  it('wakeUp при живом соединении — no-op (кик идемпотентен)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    const conn = new RoomConnection(socket, ROOM_ID);
+    await conn.join();
+    socket.connected = true;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(0);
+  });
+
+  it('wakeUp до join — no-op: начальным подключением управляет сам socket.io', () => {
+    const socket = new FakeSocket();
+    const conn = new RoomConnection(socket, ROOM_ID);
+    socket.connected = false;
+
+    conn.wakeUp();
+    expect(socket.kickCount).toBe(0);
   });
 });

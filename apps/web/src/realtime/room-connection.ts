@@ -115,6 +115,16 @@ export class RoomConnection {
     this.socket.disconnect();
   }
 
+  // Кик reconnect'а при пробуждении вкладки (находка №8): WebKit теряет
+  // backoff-таймер socket.io в замороженной вкладке — вечный баннер
+  // «Переподключаемся…» до reload. Вызов — из DOM-слушателей useRoomBinding
+  // (visibilitychange/focus/pageshow). Гард joined: начальным подключением
+  // управляет сам socket.io, кик нужен только против застрявшего backoff
+  // после установленной привязки. На живом соединении — no-op.
+  wakeUp(): void {
+    if (this.joined && !this.socket.isConnected()) this.socket.kickReconnect();
+  }
+
   private async subscribeOnce(): Promise<RoomSnapshot> {
     const ack: unknown = await this.socket.emitWithAck(
       REALTIME_MESSAGES.SUBSCRIBE,
