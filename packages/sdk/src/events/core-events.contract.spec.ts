@@ -4,6 +4,7 @@ import { resolveTypeOwner } from './event-type';
 describe('core event registry', () => {
   it('registers exactly the lifecycle transitions of REQ-RT-005', () => {
     expect(Object.keys(CORE_EVENTS).sort()).toEqual([
+      'member.joined',
       'room.activated',
       'room.cancelled',
       'room.completed',
@@ -40,6 +41,26 @@ describe('core event registry', () => {
   it('rejects payload on the terminal transitions', () => {
     expect(CORE_EVENTS['room.completed'].schema.safeParse({}).success).toBe(true);
     expect(CORE_EVENTS['room.completed'].schema.safeParse({ reason: 'x' }).success).toBe(false);
+  });
+
+  // member.joined announces a membership becoming visible on the roster; the payload
+  // is exactly the joining identity, nothing more (strict object).
+  it('validates the member.joined payload as the joining identity', () => {
+    const def = CORE_EVENTS['member.joined'];
+    const schema = def.schema;
+    expect(def.visibility).toBe('public');
+    expect(def.version).toBe(1);
+    expect(
+      schema.safeParse({ identityId: '7c9e6679-7425-40de-944b-e07fc1f90ae7' }).success,
+    ).toBe(true);
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(
+      schema.safeParse({
+        identityId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+        displayName: 'x',
+      }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ identityId: 'not-a-uuid' }).success).toBe(false);
   });
 
   it('declares a positive schemaVersion for every type', () => {

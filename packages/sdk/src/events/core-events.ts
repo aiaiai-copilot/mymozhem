@@ -39,6 +39,15 @@ export const CORE_EVENTS = {
     visibility: 'public',
     version: 1,
   },
+  // A membership becoming visible on the roster; the payload is exactly the joining
+  // identity (design/UI slice — the roster refetch trigger on every contour).
+  'member.joined': {
+    schema: z.strictObject({
+      identityId: z.uuid(),
+    }),
+    visibility: 'public',
+    version: 1,
+  },
 } as const satisfies Record<string, EventTypeDefinition>;
 
 export type CoreEventName = keyof typeof CORE_EVENTS;
