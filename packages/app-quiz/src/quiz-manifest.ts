@@ -11,7 +11,10 @@ import {
 } from './quiz-events';
 
 export const QUIZ_APP_ID = 'quiz';
-export const QUIZ_MANIFEST_VERSION = 2;
+// v3: durationSec вопроса + серверный openedAt в question.opened (дизайн/UI-срез,
+// Task 3). Совместимости с v2 нет: реестр знает только v3, комнаты quiz@2 после
+// редеплоя получают APP_MANIFEST_UNKNOWN (принято дизайном §13, прецедент lottery@1).
+export const QUIZ_MANIFEST_VERSION = 3;
 export function buildQuizManifest(): AppManifest {
   return defineApp({
     appId: QUIZ_APP_ID,

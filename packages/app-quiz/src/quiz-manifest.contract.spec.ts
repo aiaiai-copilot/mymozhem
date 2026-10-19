@@ -37,10 +37,10 @@ describe('quiz manifest', () => {
     expect(manifest.manifestVersion).toBe(QUIZ_MANIFEST_VERSION);
   });
 
-  // Фаза 3 (REQ-RWD-001, REQ-RT-004): пин версии 2 и capability rewards —
-  // начисления баллов уходят эффектами, исполняемыми рантаймом.
-  it('pins manifestVersion 2 with the rewards capability', () => {
-    expect(QUIZ_MANIFEST_VERSION).toBe(2);
+  // v3 (дизайн/UI-срез, Task 3): durationSec вопроса + серверный openedAt в
+  // question.opened. Capability rewards — с фазы 3 (REQ-RWD-001, REQ-RT-004).
+  it('pins manifestVersion 3 with the rewards capability', () => {
+    expect(QUIZ_MANIFEST_VERSION).toBe(3);
     expect(manifest.capabilities).toEqual(['rewards']);
   });
 
@@ -81,6 +81,19 @@ describe('registered appSettings JSON Schema', () => {
     expect(validate({ ...validSettings, correctAnswers: [0] })).toBe(true);
   });
 
+  // durationSec вопроса (v3): input-режим регистрации (C-9.1) — у defaulted
+  // ключа допустимо отсутствие на гейте; null = «без лимита», диапазон 5–600.
+  const durationSecValid: ReadonlyArray<readonly [string, unknown]> = [
+    ['durationSec omitted (defaulted at registration)', validSettings],
+    ['durationSec at the upper bound (600)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 600 }] }],
+    ['durationSec null (no time limit)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: null }] }],
+    ['durationSec at the lower bound (5)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 5 }] }],
+  ];
+
+  it.each(durationSecValid)('accepts %s', (_description, settings) => {
+    expect(validate(settings)).toBe(true);
+  });
+
   const invalidSettings: ReadonlyArray<readonly [string, unknown]> = [
     ['empty questions', { ...validSettings, questions: [] }],
     ['minAnswerIntervalMs below zero', { ...validSettings, minAnswerIntervalMs: -1 }],
@@ -90,6 +103,9 @@ describe('registered appSettings JSON Schema', () => {
       { ...validSettings, questions: [{ text: 'Q?', options: ['only'] }] },
     ],
     ['a question with an empty text', { ...validSettings, questions: [{ text: '', options: ['a', 'b'] }] }],
+    ['durationSec below the minimum (3)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 3 }] }],
+    ['durationSec above the maximum (601)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 601 }] }],
+    ['a non-integer durationSec', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 30.5 }] }],
   ];
 
   it.each(invalidSettings)('rejects %s', (_description, settings) => {
@@ -108,6 +124,18 @@ describe('registered event JSON Schemas', () => {
 
   const PAYLOAD_CASES: ReadonlyArray<readonly [string, string, unknown, boolean]> = [
     ['question.opened accepts a valid payload', 'question.opened', { questionIndex: 0 }, true],
+    [
+      'question.opened accepts an ISO openedAt (server-stamped on commit)',
+      'question.opened',
+      { questionIndex: 0, openedAt: '2026-10-19T12:00:00.000Z' },
+      true,
+    ],
+    [
+      'question.opened rejects a non-ISO openedAt',
+      'question.opened',
+      { questionIndex: 0, openedAt: 'in a minute' },
+      false,
+    ],
     ['question.opened rejects a string questionIndex', 'question.opened', { questionIndex: '0' }, false],
     ['question.opened rejects an extra key', 'question.opened', { questionIndex: 0, extra: 1 }, false],
     ['answer.submitted accepts a valid payload', 'answer.submitted', { questionIndex: 0, optionIndex: 1 }, true],

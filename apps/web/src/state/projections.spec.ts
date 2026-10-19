@@ -34,8 +34,9 @@ describe('projectQuiz — golden', () => {
     expect(state.accepting).toBe(false);
     expect(state.totals).toEqual({ [PLAYER_1]: 110, [PLAYER_2]: 100 });
     expect(state.finished).toBe(true);
-    // recordedAt проекции — ровно переданная строка (openedAt текущего вопроса).
-    expect(state.openedAt).toBe(RECORDED_AT);
+    // openedAt текущего вопроса — серверный штамп из payload question.opened
+    // (манифест v3), а не клиентский recordedAt приёма.
+    expect(state.openedAt).toBe('2026-09-23T12:05:00.000Z');
     // Локальный seq нумерует quiz-события в порядке приёма (core отфильтрован):
     // ответы второго вопроса — 7-е и 8-е quiz-события лога.
     expect(state.answers).toEqual({

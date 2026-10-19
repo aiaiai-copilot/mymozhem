@@ -1,7 +1,13 @@
 import { z } from 'zod';
 
 // Payload-схемы (источник типов для handler'ов и манифеста).
-export const questionOpenedPayload = z.strictObject({ questionIndex: z.number().int().min(0) });
+export const questionOpenedPayload = z.strictObject({
+  questionIndex: z.number().int().min(0),
+  // v3: момент открытия вопроса. Опционален на проводе; на коммите всегда
+  // перезаписывается серверным ctx.now (REQ-RT-009) — клиентское значение
+  // значения не имеет. Отсутствует только в логах, записанных до v3.
+  openedAt: z.iso.datetime().optional(),
+});
 export const answerSubmittedPayload = z.strictObject({
   questionIndex: z.number().int().min(0),
   optionIndex: z.number().int().min(0),

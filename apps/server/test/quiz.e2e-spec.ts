@@ -29,8 +29,8 @@ const ORG = '00000000-0000-4000-8000-000000000001';
 
 const QUIZ_SETTINGS: QuizSettings = {
   questions: [
-    { text: '2+2?', options: ['3', '4'] },
-    { text: 'Столица Франции?', options: ['Лион', 'Париж'] },
+    { text: '2+2?', options: ['3', '4'], durationSec: 30 },
+    { text: 'Столица Франции?', options: ['Лион', 'Париж'], durationSec: 30 },
   ],
   correctAnswers: [1, 1],
   minAnswerIntervalMs: 0,
@@ -396,7 +396,8 @@ describe('Quiz (e2e, приёмка фазы 2)', () => {
     const late = await joinGuest(room.code, 'Late');
     const ack = await subscribe(late.socket, room.id);
     const opened = ack.snapshot.events.find((e) => e.type === 'quiz.question.opened');
-    expect(opened?.payload).toEqual({ questionIndex: 0 });
+    // openedAt — серверный штамп коммита (манифест v3), значение недетерминировано.
+    expect(opened?.payload).toEqual({ questionIndex: 0, openedAt: expect.any(String) });
     // correctAnswers в snapshot нет даже на late-join (public-проекция appSettings).
     expect(ack.snapshot.appSettings).not.toHaveProperty('correctAnswers');
 

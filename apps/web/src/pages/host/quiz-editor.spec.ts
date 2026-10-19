@@ -24,10 +24,11 @@ describe('buildQuizSettings', () => {
 
     // correctAnswers собираются из радио «правильный» каждого вопроса — индекс
     // в массиве совпадает с индексом вопроса, значение — с выбранным вариантом.
+    // durationSec форма пока не редактирует (Task 10) — схема подставляет дефолт 30.
     expect(quizSettingsSchema.parse(settings)).toEqual({
       questions: [
-        { text: 'Столица Франции?', options: ['Париж', 'Лион'] },
-        { text: '2+2?', options: ['3', '4', '5'] },
+        { text: 'Столица Франции?', options: ['Париж', 'Лион'], durationSec: 30 },
+        { text: '2+2?', options: ['3', '4', '5'], durationSec: 30 },
       ],
       correctAnswers: [0, 1],
       minAnswerIntervalMs: 0,
@@ -44,6 +45,7 @@ describe('buildQuizSettings', () => {
     expect(quizSettingsSchema.parse(settings).questions[0]).toEqual({
       text: 'Вопрос?',
       options: ['а', 'б'],
+      durationSec: 30,
     });
   });
 
