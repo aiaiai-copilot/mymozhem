@@ -46,6 +46,13 @@ const makeService = (db: TestDb) => {
       new JoinRateLimiter(1000),
       TEST_CONFIG,
       fakeLogger,
+      outbox,
+      new EventLogService(
+        new AppRegistryService([validManifests[0]]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+        outbox,
+      ),
     ),
     TEST_CONFIG,
   );
@@ -578,6 +585,13 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        emptyRegistryOutbox,
+        new EventLogService(
+          new AppRegistryService([]),
+          new EventEmitLimiter(1000),
+          TEST_CONFIG,
+          emptyRegistryOutbox,
+        ),
       ),
       TEST_CONFIG,
     );

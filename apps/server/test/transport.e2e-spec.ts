@@ -135,6 +135,13 @@ describe('Transport HTTP (e2e)', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        new EventLogService(
+          new AppRegistryService([]),
+          new EventEmitLimiter(1000),
+          TEST_CONFIG,
+          outbox,
+        ),
       ),
       TEST_CONFIG,
     );

@@ -96,7 +96,15 @@ describe('X-Forwarded-For (e2e, REQ-ID-006 per-IP семантика)', () => {
       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
       outbox,
       new AppRegistryService([]),
-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
+      new MembershipService(
+        db.prisma,
+        new IdentityService(db.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+        fakeLogger,
+        outbox,
+        new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+      ),
       TEST_CONFIG,
     );
     tokens = new TokenService(db.prisma, TEST_CONFIG);

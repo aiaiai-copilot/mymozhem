@@ -87,6 +87,8 @@ describe('EventLogService.commitAppEvent', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        eventLog,
       ),
       TEST_CONFIG,
     );
@@ -322,6 +324,8 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        limitedLog,
       ),
       TEST_CONFIG,
     );
@@ -409,6 +413,8 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        eventLog,
       ),
       TEST_CONFIG,
     );

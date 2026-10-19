@@ -1,5 +1,6 @@
 import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
 import { seedIdentity } from '../testing/seed-identity';
+import { readRoomLog } from '../testing/read-room-log';
 import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
 import { EventLogService } from '../realtime/event-log.service';
 import { EventEmitLimiter } from '../realtime/event-emit-limiter';
@@ -31,14 +32,18 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
   let db: TestDb;
   let roomService: RoomService;
 
-  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
-    new MembershipService(
+  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) => {
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+    return new MembershipService(
       db.prisma,
       new IdentityService(db.prisma),
       new JoinRateLimiter(overrides.rateLimit ?? 1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
       fakeLogger,
+      outbox,
+      new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
     );
+  };
 
   beforeAll(async () => {
     db = await startTestDb();
@@ -63,6 +68,13 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        new EventLogService(
+          new AppRegistryService([]),
+          new EventEmitLimiter(1000),
+          TEST_CONFIG,
+          outbox,
+        ),
       ),
       TEST_CONFIG,
     );
@@ -288,6 +300,50 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
     expect(other.membership.role).toBe('PARTICIPANT');
   });
 
+  describe('core.member.joined — публичное событие ядра при join (UI-срез, Task 2)', () => {
+    it('guest-join коммитит core.member.joined в той же tx: payload.identityId, actorId, visibility public', async () => {
+      const room = await roomService.create(ORG);
+      const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
+      const log = await readRoomLog(db.prisma, room.id);
+      // create комнаты в лог не пишет — единственное событие комнаты: join гостя.
+      expect(log).toHaveLength(1);
+      expect(log[0].type).toBe('core.member.joined');
+      expect(log[0].payload).toEqual({ identityId: result.identity.id });
+      expect(log[0].actorId).toBe(result.identity.id);
+      expect(log[0].visibility).toBe('public');
+    });
+
+    it('spectator-join тоже эмитит core.member.joined', async () => {
+      const room = await roomService.create(ORG);
+      const result = await makeMembership().join({
+        code: room.code,
+        displayName: 'Зритель',
+        ip: IP,
+        role: 'spectator',
+      });
+      const log = await readRoomLog(db.prisma, room.id);
+      expect(log).toHaveLength(1);
+      expect(log[0].type).toBe('core.member.joined');
+      expect(log[0].payload).toEqual({ identityId: result.identity.id });
+      expect(log[0].actorId).toBe(result.identity.id);
+    });
+
+    it('отказанный join (rejoin-блок exclusion по IP, REQ-ID-006) события НЕ даёт', async () => {
+      const room = await roomService.create(ORG);
+      const first = await makeMembership().join({ code: room.code, displayName: 'Первый', ip: IP });
+      // Exclusion по IP первого гостя — строка, которую пишет exclude (rejoin-блок).
+      await db.prisma.exclusion.create({
+        data: { roomId: room.id, identityId: first.identity.id, ip: IP, excludedBy: ORG },
+      });
+      await expect(
+        makeMembership().join({ code: room.code, displayName: 'Второй', ip: IP }),
+      ).rejects.toBeInstanceOf(RoomJoinDeniedError);
+      const log = await readRoomLog(db.prisma, room.id);
+      // Отказ — до tx: в логе осталось только событие первого, успешного join.
+      expect(log.filter((e) => e.type === 'core.member.joined')).toHaveLength(1);
+    });
+  });
+
   describe('findActiveMembership', () => {
     it('returns the membership of a live member in a live room', async () => {
       const room = await roomService.create(ORG);
@@ -397,14 +453,18 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
   let db2: TestDb;
   let roomService2: RoomService;
 
-  const makeMembership2 = (overrides: { participantLimit?: number } = {}) =>
-    new MembershipService(
+  const makeMembership2 = (overrides: { participantLimit?: number } = {}) => {
+    const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
+    return new MembershipService(
       db2.prisma,
       new IdentityService(db2.prisma),
       new JoinRateLimiter(1000),
       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
       fakeLogger,
+      outbox,
+      new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
     );
+  };
 
   beforeAll(async () => {
     db2 = await startTestDb();
@@ -415,7 +475,15 @@ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
       outbox,
       new AppRegistryService([]),
-      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
+      new MembershipService(
+        db2.prisma,
+        new IdentityService(db2.prisma),
+        new JoinRateLimiter(1000),
+        TEST_CONFIG,
+        fakeLogger,
+        outbox,
+        new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+      ),
       TEST_CONFIG,
     );
   }, 120000);

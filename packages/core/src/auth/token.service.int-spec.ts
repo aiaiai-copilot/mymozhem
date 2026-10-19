@@ -34,14 +34,21 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
   beforeAll(async () => {
     db = await startTestDb();
     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     membership = new MembershipService(
       db.prisma,
       new IdentityService(db.prisma),
       new JoinRateLimiter(1000),
       TEST_CONFIG,
       fakeLogger,
+      outbox,
+      new EventLogService(
+        new AppRegistryService([]),
+        new EventEmitLimiter(1000),
+        TEST_CONFIG,
+        outbox,
+      ),
     );
-    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
     roomService = new RoomService(
       db.prisma,
       new EventLogService(

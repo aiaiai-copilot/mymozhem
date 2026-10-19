@@ -84,6 +84,8 @@ describe('Fail-closed при недоступной БД (REQ-DEV-008)', () => {
       new JoinRateLimiter(1000),
       TEST_CONFIG,
       fakeLogger,
+      outbox,
+      eventLog,
     );
     const rooms = new RoomService(p, eventLog, outbox, registry, membership, TEST_CONFIG);
     return { registry, outbox, eventLog, membership, rooms };

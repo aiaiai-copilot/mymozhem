@@ -189,7 +189,7 @@ describe('Realtime (e2e)', () => {
       eventLog,
       outbox,
       registry,
-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
+      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger, outbox, eventLog),
       TEST_CONFIG,
     );
     tokens = new TokenService(db.prisma, TEST_CONFIG);
@@ -241,7 +241,9 @@ describe('Realtime (e2e)', () => {
       socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id },
     );
     expect(ack.ok).toBe(true);
-    expect(ack.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
+    // Baseline ф.2 пересобран под member.joined (Task 2): join гостя по HTTP —
+    // коммит публичного core-события, оно легально в логе и видимо участнику.
+    expect(ack.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined']);
     for (const e of ack.snapshot.events) {
       expect(Object.keys(e).sort()).toEqual(['actorId', 'payload', 'type']);
     }
@@ -272,13 +274,37 @@ describe('Realtime (e2e)', () => {
     sub.close();
   });
 
+  it('guest join по HTTP → подписчику приходит live core.member.joined: public, id-only payload, actorId второго гостя', async () => {
+    const { room, accessToken } = await activeRoomWithGuest();
+    const sub = await connect(port, accessToken);
+    await emitAck(sub, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+
+    // Waiter навешивается ДО HTTP-join: live-кадр может прийти раньше ack join-ответа
+    // (опыт Quiz-среза). Других событий между subscribe и join не коммитится —
+    // первый EVENT-кадр и есть member.joined второго гостя.
+    const received = waitEvent<{ type: string; payload: unknown; actorId: string | null }>(sub, REALTIME_MESSAGES.EVENT);
+    const joinRes = await app.inject({
+      method: 'POST',
+      url: '/rooms/join',
+      payload: { code: room.code, displayName: 'Второй' },
+    });
+    expect(joinRes.statusCode).toBe(201);
+    const { accessToken: secondToken } = joinResponseSchema.parse(joinRes.json());
+    const secondClaims = tokens.verifyAccessToken(secondToken);
+
+    const event = await received;
+    expect(event.type).toBe('core.member.joined');
+    expect(event.payload).toEqual({ identityId: secondClaims.sub }); // id-only: PII-цикл не затронут
+    expect(event.actorId).toBe(secondClaims.sub);
+    sub.close();
+  });
+
   it('/metrics отражает realtime-жизнь комнаты: gauge, replay, publish→deliver (REQ-OPS-004)', async () => {
     // Гистограммы накопительные и app один на файл (другие тесты тоже публикуют) —
     // ассертим приращение рядов, а не абсолютные значения. Gauge — per-room,
     // комната свежая, поэтому там абсолютная серия ` 1`.
     const body0 = (await app.inject({ method: 'GET', url: '/metrics' })).body;
     const replayBefore = metricSeriesCount(body0, 'mymozhem_replay_duration_seconds_count', 'level', 'public');
-    const deliverBefore = metricSeriesCount(body0, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public');
 
     const { room, accessToken } = await activeRoomWithGuest();
     const socket = await connect(port, accessToken);
@@ -299,8 +325,11 @@ describe('Realtime (e2e)', () => {
     expect(pubAck.ok).toBe(true);
     await received;
     const afterPublish = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+    // Baseline — `during` (после join, до publish): join по HTTP сам коммитит public
+    // core.member.joined через gateway fanOut → observe происходит и без подписчиков
+    // (Task 2); приращение publish→deliver ассертится ровно за publish.
     expect(metricSeriesCount(afterPublish, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public')).toBe(
-      deliverBefore + 1,
+      metricSeriesCount(during, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public') + 1,
     );
 
     socket.close();
@@ -380,8 +409,10 @@ describe('Realtime (e2e)', () => {
     const pAck = await emitAck<Snap>(participant, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
     const oAck = await emitAck<Snap>(organizer, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
 
-    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
-    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'test-app.round.hinted']);
+    // Baseline ф.2 пересобран под member.joined (Task 2): публичное core-событие
+    // join'а гостя видимо обоим уровням и стоит в логе между activated и hinted.
+    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined']);
+    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined', 'test-app.round.hinted']);
     // appSettings: label — public (обоим), orgNote — organizer (только организатору),
     // answers — module-private (никому; fail-safe на неаннотированное свойство).
     expect(pAck.snapshot.appSettings).toEqual({ label: 'live' });
