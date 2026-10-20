@@ -14,7 +14,7 @@ import { deriveRoomStatus, projectLottery, projectQuiz } from '../../state/proje
 import { isCompactQuestion } from '../../state/question-density';
 import { formatTimer, useQuestionTimer } from '../../state/question-timer';
 import { lastRoundGains } from '../../state/race-tracks';
-import { shouldRefetchRoster } from '../../state/roster-refetch';
+import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
 
@@ -112,7 +112,8 @@ export function ScreenPage() {
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
 
-  // Ростер (ruling 4): join не эмитит событий — первая загрузка на subscribe…
+  // Ростер (ruling 4): первая загрузка на subscribe (гонка snapshot/replay,
+  // I-8)…
   useEffect(() => {
     if (!roomId) return;
     let stale = false;
@@ -128,14 +129,25 @@ export function ScreenPage() {
     };
   }, [roomId, client]);
 
-  // …и событийный рефетч там, где имена появляются на экране (табло/победители).
-  useEffect(() => {
-    const last = events[events.length - 1];
-    if (!roomId || !last || !shouldRefetchRoster(last.type)) return;
+  // …и событийный рефетч там, где имена появляются на экране (табло/победители),
+  // плюс live-ростер по core.member.joined: join теперь эмитит public-событие
+  // (дизайн §9). Дедуп min 2 с (Review Focus 3): join-шторм на старте события
+  // не дёргает REST пачкой; стабильные инстансы — useCallback/useMemo по
+  // дисциплине файла.
+  const refetchRoster = useCallback(() => {
+    if (!roomId) return;
     listMembers(client, roomId)
       .then((r) => setMembers(r.members))
+      // Best effort: имена дорисуются при следующем рефетче, состояние
+      // соединения и так показывает баннер.
       .catch(() => {});
-  }, [events, roomId, client]);
+  }, [roomId, client]);
+  const rosterEventRefetch = useMemo(() => createRosterEventRefetcher(refetchRoster), [refetchRoster]);
+  useEffect(() => {
+    const last = events[events.length - 1];
+    if (!last) return;
+    rosterEventRefetch(last.type);
+  }, [events, rosterEventRefetch]);
 
   const names = useMemo(() => rosterNames(members), [members]);
 

@@ -7,7 +7,7 @@ import { listMembers } from '../api/endpoints';
 import { rosterNames } from '../components/roster-names';
 import { deriveRoomStatus, projectLottery, projectQuiz } from './projections';
 import { createFocusRefetcher } from './focus-refetch';
-import { shouldRefetchRoster } from './roster-refetch';
+import { createRosterEventRefetcher } from './roster-refetch';
 
 // Общий клей «лог → ростер + проекции» (ruling Task 14): до этого блок копировался
 // в play-page и screen-page; консоль — третий потребитель, поэтому клей поднят
@@ -39,7 +39,8 @@ export function useRoomFeed(
       .catch(() => {});
   }, [roomId, client]);
 
-  // Ростер: join не эмитит событий — первая загрузка на subscribe (Review Focus 2).
+  // Ростер: первая загрузка на subscribe (гонка snapshot/replay, I-8); join
+  // теперь эмитит core.member.joined — событийный рефетч ниже (дизайн §9).
   useEffect(() => {
     if (!roomId) return;
     let stale = false;
@@ -55,16 +56,24 @@ export function useRoomFeed(
     };
   }, [roomId, client]);
 
-  // …и событийный рефетч там, где имена появляются на экране (табло/победители).
+  // …и событийный рефетч там, где имена появляются на экране (табло/победители),
+  // плюс live-ростер по core.member.joined (дизайн §9). Дедуп min 2 с
+  // (Review Focus 3): join-шторм на старте события не дёргает REST пачкой.
+  // Стабильный инстанс фабрики — useMemo над стабильным refetchMembers.
+  const rosterEventRefetch = useMemo(
+    () => createRosterEventRefetcher(refetchMembers),
+    [refetchMembers],
+  );
   useEffect(() => {
     const last = events[events.length - 1];
-    if (!last || !shouldRefetchRoster(last.type)) return;
-    refetchMembers();
-  }, [events, refetchMembers]);
+    if (!last) return;
+    rosterEventRefetch(last.type);
+  }, [events, rosterEventRefetch]);
 
-  // Рефетч по возврату во вкладку (находка №6): join не эмитит событий — ростер
-  // стейл, пока ведущий был в другой вкладке. Без поллинга (решение владельца);
-  // дедуп парных visibilitychange/focus — в createFocusRefetcher.
+  // Рефетч по возврату во вкладку (находка №6) — НЕЗАВИСИМЫЙ триггер
+  // (дизайн §9): member.joined не покрывает окно, пока вкладка была неактивна.
+  // Без поллинга (решение владельца); дедуп парных visibilitychange/focus —
+  // в createFocusRefetcher.
   useEffect(() => {
     if (!roomId) return;
     const onFocus = createFocusRefetcher(() => {
