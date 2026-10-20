@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectedEvent } from '@mymozhem/sdk';
 import { initialQuizState } from '@mymozhem/app-quiz';
+import { openQuestionLabel } from './open-question-label';
 import { answersCount, nextQuestionIndex } from './quiz-controls';
 
 const HOST = '11111111-1111-4111-8111-111111111111';
@@ -47,6 +48,19 @@ describe('answersCount', () => {
 
   it('нет accepted — 0', () => {
     expect(answersCount([], 0)).toBe(0);
+  });
+});
+
+// Подпись главной кнопки reveal (бриф T9, Review Focus 4): номер 1-based для
+// ведущего; длительность «(N с)» — только при числовом durationSec, «без
+// лимита» (null) кнопку не утяжеляет.
+describe('openQuestionLabel', () => {
+  it('числовая длительность → «(30 с)» в скобках', () => {
+    expect(openQuestionLabel(2, 30)).toBe('Открыть вопрос 3 (30 с)');
+  });
+
+  it('null («без лимита») → без суффикса', () => {
+    expect(openQuestionLabel(2, null)).toBe('Открыть вопрос 3');
   });
 });
 

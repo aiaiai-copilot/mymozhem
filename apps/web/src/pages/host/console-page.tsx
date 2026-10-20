@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
+import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
 import { QUIZ_APP_ID } from '@mymozhem/app-quiz';
 import { ApiError } from '../../api/api-error';
-import { completeRoom } from '../../api/endpoints';
-import { ConnectionBanner } from '../../components/connection-banner';
+import { completeRoom, listRewards } from '../../api/endpoints';
+import { Logo } from '../../components/logo';
 import { Winners } from '../../components/winners';
 import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
@@ -29,9 +30,21 @@ const commandErrorText = (e: unknown): string => {
 export const isStaleRoomJoinError = (code: string | null): boolean =>
   code === 'ACTOR_NOT_MEMBER' || code === 'NOT_FOUND';
 
-// Консоль ведущего (бриф Task 14): код комнаты крупно + копируемые ссылки,
-// баннер соединения, пульт квиза по проекции лога. Переиспользует hostSession/
-// hostClient Task 13 — второй SessionStore на host-флоу не заводим.
+// Знаменатель разбора «не успели» и «N из M ответили» (бриф T9): играют
+// только participant — организатор и наблюдатели в счётчик не входят.
+export const participantsCount = (members: RosterEntry[]): number =>
+  members.filter((m) => m.role === 'participant').length;
+
+// Невручённые награды — статус AWARDED (FULFILLED/REVOKED терминальны,
+// REQ-RWD-007). Подсказка экрана «Квиз окончен» — только при них (п. 18).
+export const pendingAwardsCount = (awards: AwardResponse[]): number =>
+  awards.filter((a) => a.status === 'AWARDED').length;
+
+// Консоль ведущего (бриф T9, дизайн §5.3): каркас «пульт ведущего» —
+// полоса комнаты (логотип, связь, код) → hero текущего момента с главной
+// кнопкой (QuizControls) → секции (приглашения, панели) → тихая
+// «Завершить событие» внизу. Переиспользует hostSession/hostClient
+// Task 13 — второй SessionStore на host-флоу не заводим.
 export function ConsolePage() {
   const navigate = useNavigate();
   // roomId/code — из localStorage, меняться за жизнь страницы не могут.
@@ -40,6 +53,8 @@ export function ConsolePage() {
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
+  // null — не загружены/ошибка: подсказки нет (п. 18 — только факт невручённых).
+  const [pendingAwards, setPendingAwards] = useState<number | null>(null);
 
   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
   // refresh и сам разведёт на console или setup.
@@ -80,6 +95,35 @@ export function ConsolePage() {
   // лога; панели в терминале глушим (сервер и так отказал бы, но зря не даём).
   const terminal = feed.status === 'COMPLETED' || feed.status === 'CANCELLED';
 
+  // Экран «Квиз окончен» живёт при quiz.finished && ACTIVE (бриф T9 Step 5).
+  const quizFinishedLive = feed.quiz.finished && feed.status === 'ACTIVE';
+
+  // Рефетч-триггер наград: публичные rewards.* (awarded/fulfilled/revoked —
+  // REQ-SEC-009, payload только id). Счётчик событий, а не последнее событие:
+  // переход quizFinishedLive с quiz.game.finished последним тоже должен
+  // загрузить список.
+  const rewardsEventCount = useMemo(
+    () => binding.events.filter((e) => e.type.startsWith('rewards.')).length,
+    [binding.events],
+  );
+
+  // Невручённые награды для подсказки «Квиз окончен» — тем же путём, что
+  // AwardsPanel (listRewards); грузим только пока экран показан. Best effort:
+  // ошибка → null → подсказки нет, кнопка «Завершить событие» не блокируется
+  // невручёнными наградами (REQ-RWD-009).
+  useEffect(() => {
+    if (!roomId || !quizFinishedLive) return;
+    let stale = false;
+    listRewards(hostClient, roomId)
+      .then((r) => {
+        if (!stale) setPendingAwards(pendingAwardsCount(r.awards));
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [roomId, quizFinishedLive, rewardsEventCount]);
+
   const runCommand = (type: string, payload: Record<string, unknown>) => {
     setCommandError(null);
     void binding
@@ -113,61 +157,60 @@ export function ConsolePage() {
   // Все хуки выше; дальше — только рендер-ветки.
   if (!roomId) {
     return (
-      <main>
-        <p>Переход…</p>
+      <main className="console-page">
+        <p className="console-note">Переход…</p>
       </main>
     );
   }
 
+  // «Комната не найдена» — карточка по мокапу console-empty-long-errors-v2.
   if (roomGone) {
     return (
-      <main>
-        <h1>Комната не найдена</h1>
-        <p>Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.</p>
-        <p>
-          <a href={HOST_NEW_PATH}>К настройке комнаты</a>
-        </p>
+      <main className="console-page">
+        <div className="console-lost">
+          <div className="console-lost-title">Комната не найдена</div>
+          <p className="console-lost-sub">
+            Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.
+          </p>
+          <a className="btn btn-primary console-lost-btn" href={HOST_NEW_PATH}>
+            К настройке комнаты
+          </a>
+        </div>
       </main>
     );
   }
 
   return (
-    <main>
-      <ConnectionBanner state={binding.connectionState} />
-      <h1>Консоль ведущего</h1>
-      {roomCode ? (
-        <section>
-          {/* Не router-Link: one-shot join в play/screen не перезапускается на
-              смену :code внутри SPA — ссылки именно для копирования наружу. */}
-          <p className="room-code">
-            Код комнаты: <strong>{roomCode}</strong>
-          </p>
-          <ul>
-            <li>
-              Игроки: <code>{`${window.location.origin}/play/${roomCode}`}</code>{' '}
-              <button type="button" onClick={() => copyLink('play', `/play/${roomCode}`)}>
-                Копировать
-              </button>
-            </li>
-            <li>
-              Экран: <code>{`${window.location.origin}/screen/${roomCode}`}</code>{' '}
-              <button type="button" onClick={() => copyLink('screen', `/screen/${roomCode}`)}>
-                Копировать
-              </button>
-            </li>
-          </ul>
-          {copied ? <p role="status">Скопировано.</p> : null}
-        </section>
-      ) : null}
-      {feed.status === 'CANCELLED' ? <p>Комната отменена.</p> : null}
-      {feed.status === 'COMPLETED' ? <p>Событие завершено.</p> : null}
-      {feed.status === 'ACTIVE' ? (
-        <p>
-          <button type="button" disabled={completing} onClick={completeEvent}>
-            Завершить событие
-          </button>
+    <main className="console-page">
+      {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
+          код. Sticky — статус виден при прокрутке секций. */}
+      <header className="console-strip">
+        <Logo contour="console" size="participant" />
+        <span
+          className={`console-conn${binding.connectionState === 'live' ? '' : ' off'}`}
+          role="status"
+        >
+          <span className="console-conn-dot" />
+          {binding.connectionState === 'live'
+            ? 'на связи'
+            : binding.connectionState === 'connecting'
+              ? 'подключение…'
+              : 'нет связи'}
+        </span>
+        {roomCode ? <span className="console-room-code">{roomCode}</span> : null}
+      </header>
+      {/* Баннер обрыва — по мокапу console-empty-long-errors-v2; reconnect
+          самолечится перефолдом, но ведущий обязан видеть обрыв явно. */}
+      {binding.connectionState === 'disconnected' ? (
+        <p role="status" className="console-error-banner">
+          Нет соединения — переподключаемся…
+          <span className="console-error-sub">
+            Таймер и счётчики могут отставать. Ничего нажимать не нужно.
+          </span>
         </p>
       ) : null}
+      {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
+      {feed.status === 'COMPLETED' ? <p className="console-note">Событие завершено.</p> : null}
       {/* Пульт квиза — только в quiz-комнате: в lottery-комнате его команды
           гарантированно отклонит модуль (pin из room.activated, та же
           дисциплина, что у кнопки «Разыграть» в PrizesPanel). */}
@@ -178,28 +221,79 @@ export function ConsolePage() {
           names={feed.names}
           appSettings={binding.appSettings}
           disabled={terminal}
+          participants={participantsCount(feed.members)}
+          pendingAwards={pendingAwards}
+          completing={completing}
+          onCompleteEvent={completeEvent}
           onCommand={runCommand}
           commandError={commandError}
         />
       ) : null}
-      <MembersPanel
-        roomId={roomId}
-        members={feed.members}
-        names={feed.names}
-        disabled={terminal}
-        onChanged={feed.refetchMembers}
-      />
-      <PrizesPanel
-        roomId={roomId}
-        pinnedAppId={pinnedAppId}
-        disabled={terminal}
-        events={binding.events}
-        publish={binding.publish}
-      />
-      {/* Результат розыгрыша приезжает публичным draw.completed — та же
-          проекция, что на /screen; консоль только триггерит draw.run. */}
-      <Winners draws={feed.lottery.draws} names={feed.names} />
-      <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
+      <div className="console-sections">
+        {roomCode ? (
+          <section className="console-card">
+            <h3 className="console-card-title">Приглашения</h3>
+            {/* Не router-Link: one-shot join в play/screen не перезапускается на
+                смену :code внутри SPA — ссылки именно для копирования наружу. */}
+            <div className="console-link-row">
+              Игроки: <code>{`${window.location.origin}/play/${roomCode}`}</code>{' '}
+              <button
+                type="button"
+                className="btn btn-secondary console-copy"
+                onClick={() => copyLink('play', `/play/${roomCode}`)}
+              >
+                Копировать
+              </button>
+            </div>
+            <div className="console-link-row">
+              Экран: <code>{`${window.location.origin}/screen/${roomCode}`}</code>{' '}
+              <button
+                type="button"
+                className="btn btn-secondary console-copy"
+                onClick={() => copyLink('screen', `/screen/${roomCode}`)}
+              >
+                Копировать
+              </button>
+            </div>
+            {copied ? (
+              <p role="status" className="console-muted">
+                Скопировано.
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+        <MembersPanel
+          roomId={roomId}
+          members={feed.members}
+          names={feed.names}
+          disabled={terminal}
+          onChanged={feed.refetchMembers}
+        />
+        <PrizesPanel
+          roomId={roomId}
+          pinnedAppId={pinnedAppId}
+          disabled={terminal}
+          events={binding.events}
+          publish={binding.publish}
+        />
+        {/* Результат розыгрыша приезжает публичным draw.completed — та же
+            проекция, что на /screen; консоль только триггерит draw.run. */}
+        <Winners draws={feed.lottery.draws} names={feed.names} />
+        <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
+      </div>
+      {/* Тихая «Завершить событие» внизу (бриф T9, дизайн п. 10). На экране
+          «Квиз окончен» её роль играет главная кнопка hero — дубль не нужен.
+          Не блокируется невручёнными наградами (REQ-RWD-009). */}
+      {feed.status === 'ACTIVE' && !feed.quiz.finished ? (
+        <button
+          type="button"
+          className="btn btn-quiet console-finish"
+          disabled={completing}
+          onClick={completeEvent}
+        >
+          Завершить событие
+        </button>
+      ) : null}
     </main>
   );
 }

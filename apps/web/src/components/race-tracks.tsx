@@ -27,8 +27,8 @@ interface RaceTracksProps {
 }
 
 export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksProps) {
-  // Сортировка desc — обязанность отображения (как в Standings); равные очки
-  // сохраняют порядок входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
+  // Сортировка desc — обязанность отображения; равные очки сохраняют порядок
+  // входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
   // списка, а не видимого топа: обрезанные дорожки не меняют масштаб.
   const sorted = [...entries].sort((a, b) => b.total - a.total);
   const widths = trackWidths(

@@ -9,6 +9,7 @@ import './styles/base.css';
 import './styles/transitions.css';
 import './styles/scene.css';
 import './styles/screen.css';
+import './styles/console.css';
 
 // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
 // под MemoryRouter без привязки к DOM.
