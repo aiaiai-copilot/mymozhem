@@ -48,7 +48,12 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
                 {e.name}
                 {e.actorId === highlightId && <span className="me">это ты</span>}
               </span>
-              <span className="tr-score">{e.total}</span>
+              <span className="tr-score">
+                {e.total}
+                {/* Дельта дублируется числом рядом со счётом (дизайн §7:
+                    без цвета всё читается). Только при gain > 0. */}
+                {e.gain > 0 && <span className="delta">+{e.gain}</span>}
+              </span>
             </div>
             <div className="tr-lane">
               {/* Без прироста fill получает solo — закруглённый правый конец

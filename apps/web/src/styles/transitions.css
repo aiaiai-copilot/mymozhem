@@ -103,6 +103,15 @@
   margin-left: 6px;
 }
 .race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
+/* Числовая дельта прироста рядом со счётом (дизайн §7; мокап
+   console-reveal-tracks). Цвет — var(--gold) в тон золотому сегменту .gain. */
+.race-tracks .tr-score .delta {
+  color: var(--gold);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
 .race-tracks .tr-lane {
   height: 10px;
   border-radius: 5px;
