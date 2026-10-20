@@ -1,0 +1,83 @@
+/* Кнопочная система состояний — перенос из принятого мокапа
+   component-states-live: hover 140мс только на устройствах с настоящей мышью,
+   active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
+   смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
+   Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
+   обёртки .panel.dark), литералы hover/active danger заменены токенами
+   --danger-hover/--danger-active, шрифт — var(--font-body). */
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 16px;
+  padding: 13px 22px;
+  cursor: pointer;
+  transition: background-color var(--t-hover) ease-out, color var(--t-hover) ease-out;
+}
+.btn-primary {
+  background: var(--console-primary);
+  color: var(--gold);
+}
+.btn-secondary {
+  background: var(--console-secondary);
+  color: var(--ink);
+}
+.btn-quiet {
+  background: none;
+  color: var(--ink);
+  padding: 13px 10px;
+  border-radius: 8px;
+}
+.btn-danger {
+  background: none;
+  color: var(--error-light);
+  padding: 13px 10px;
+  border-radius: 8px;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* hover — только устройства с настоящей мышью; на таче hover не появится вообще */
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:hover:not(:disabled) { background: var(--console-primary-hover); }
+  .btn-secondary:hover:not(:disabled) { background: var(--console-secondary-hover); }
+  .btn-quiet:hover:not(:disabled) { background: var(--console-strip); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+  .btn-scene:hover:not(:disabled) { background: var(--scene-surface-hover); }
+}
+
+/* active — мгновенно (≤60мс), работает везде, включая тач */
+.btn-primary:active:not(:disabled) { background: var(--console-primary-active); transition-duration: var(--t-press); }
+.btn-secondary:active:not(:disabled) { background: var(--console-secondary-active); transition-duration: var(--t-press); }
+.btn-quiet:active:not(:disabled) { background: var(--console-secondary); transition-duration: var(--t-press); }
+.btn-danger:active:not(:disabled) { background: var(--danger-active); transition-duration: var(--t-press); }
+.btn-scene:active:not(:disabled) { background: var(--scene-surface-active); transition-duration: var(--t-press); }
+
+/* focus-visible — контур только для клавиатуры; на сцене золотой */
+.btn:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+.btn-scene:focus-visible { outline-color: var(--gold); }
+.btn:focus:not(:focus-visible) { outline: none; }
+
+/* Вариант ответа на сцене */
+.btn-scene {
+  background: var(--scene-surface);
+  color: var(--scene-text);
+  min-width: 260px;
+  text-align: left;
+  font-weight: 400;
+  font-size: 18px;
+  padding: 16px 20px;
+}
+.btn-scene b { color: var(--gold); margin-right: 10px; }
+
+/* «Уменьшить движение» в системе гасит переходы состояний */
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition-duration: 0ms !important; }
+}
