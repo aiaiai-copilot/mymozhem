@@ -297,3 +297,169 @@
   .console-sections .console-card { margin-bottom: 0; }
   .console-finish { width: calc(100% - 24px); margin: 12px; }
 }
+
+/* --- Setup и редактор квиза (Task 10, дизайн §5.3 «Редактор», п. 9/14;
+   мокапы-эталоны: console-editor, forms-and-system-states-v2,
+   editor-secondary-button-darker). Цвета — только токены T4; единственный
+   литерал — белый фон полей ввода (--input-bg мокапа #FFFFFF, прецедент
+   литерала — .console-conn выше). Кнопки — общая система .btn
+   (transitions.css): secondary #C4D8CC, primary #10514F с золотым текстом,
+   тихие без рамок (п. 15). --- */
+.setup-title {
+  margin: 18px 14px 14px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 400;
+}
+
+/* Выбор приложения — карточкой панели; радио-строки с отступом */
+.setup-appkind {
+  border: none;
+  margin: 0 14px 12px;
+  padding: 14px 16px;
+}
+.setup-appkind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 15px;
+}
+.setup-appkind-option input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--console-primary);
+}
+
+.editor-form { margin: 0 14px; }
+.editor-form fieldset { border: none; margin: 0; padding: 0; }
+/* Legend секций редактора — стиль подписей мокапа (f-label): малая,
+   плотная, uppercase, приглушённая */
+.editor-legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+/* Карточка вопроса: панель + шапка «номер · длительность» (полоса номеров
+   мокапа: темп виден до открытия вопроса) */
+.editor-q-card {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  background: var(--console-panel);
+  border-radius: 12px;
+}
+.editor-q-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.editor-q-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+}
+.editor-q-time {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.editor-input {
+  width: 100%;
+  margin-top: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: 15px var(--font-body);
+}
+.editor-input:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+
+/* Radio-группа «Правильный ответ» (п. 9): один legend, строки radio+вариант */
+.editor-options { margin-bottom: 12px; }
+.editor-options legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.editor-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.editor-opt-row input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--console-primary);
+}
+.editor-opt-row .editor-input { flex: 1; margin-top: 0; margin-bottom: 8px; }
+.editor-remove { flex-shrink: 0; padding: 6px 0; font-size: 13px; }
+
+.editor-add-option { margin-bottom: 16px; font-size: 14px; }
+
+/* «Время на ответ» (§6): число + «без лимита» в одной строке (мокап
+   .duration-row); disabled-поле при unlimited не стилизуем отдельно —
+   браузерное disabled читается, значение сохраняется в состоянии формы */
+.editor-duration-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.editor-duration-input { display: flex; align-items: center; gap: 8px; }
+.editor-duration-input input {
+  width: 76px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: 15px var(--font-body);
+  font-variant-numeric: tabular-nums;
+}
+.editor-duration-input input:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+.editor-duration-unit { color: var(--muted); font-size: 14px; }
+.editor-nolimit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  font-size: 14px;
+}
+.editor-nolimit input[type='checkbox'] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--console-primary);
+}
+
+.editor-scoring { margin-bottom: 12px; }
+.editor-submit { width: 100%; }
