@@ -463,3 +463,125 @@
 
 .editor-scoring { margin-bottom: 12px; }
 .editor-submit { width: 100%; }
+
+/* --- Розыгрыш, награды, завершение, пустые/длинные/ошибки (Task 11, дизайн
+   §5.3 «Розыгрыш»/«Завершение»/«Пустые/длинные/ошибки», п. 10/11/14/15/18;
+   мокапы-эталоны: console-draw-winner-larger, console-landscape-editor-draw-finish,
+   console-empty-long-errors-v2). Цвета/тайминги — только токены tokens.css;
+   литералов мокапа в этой секции нет. Кнопки — общая система .btn
+   (transitions.css): «Вручить» — primary, «Разыграть»/«+ Добавить приз» —
+   secondary, «Отозвать» — тихая без рамки (п. 15). --- */
+
+/* Баннер победителя внутри карточки призов (мокап .winner-banner): имя
+   36px Oranienbaum — крупнейший элемент экрана (§5.3 «Розыгрыш»). */
+.console-winner-banner {
+  margin: 4px 0 12px;
+  padding: 14px 16px 16px;
+  background: var(--console-strip);
+  border-radius: 8px;
+  text-align: center;
+}
+.console-wb-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-wb-name {
+  margin: 2px 0;
+  font-family: var(--font-display);
+  font-size: 36px;
+  line-height: 1.15;
+  /* Длинные имена переносятся, не обрезаются (дизайн §5.3 «Пустые/длинные») */
+  overflow-wrap: anywhere;
+}
+.console-wb-prize { font-size: 15px; overflow-wrap: anywhere; }
+
+/* Строки призов/наград (мокап .row): название слева, действие справа;
+   длинные названия переносятся, кнопка не сжимается */
+.console-prize-list,
+.console-award-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.console-prize-row,
+.console-award-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+.console-prize-name,
+.console-award-name { overflow-wrap: anywhere; }
+.console-prize-left,
+.console-award-status { color: var(--muted); }
+
+/* Малая кнопка строки (мокап .mini-btn): палитра общей системы .btn,
+   уменьшенный размер */
+.console-mini {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+.console-award-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+/* Разыгранный приз (quantity 0): вместо disabled-кнопки — тихий статус
+   (мокап «Разыграна», бриф T11) */
+.console-prize-drawn { flex-shrink: 0; color: var(--muted); font-size: 13px; }
+
+/* Форма добавления приза: поля — переиспользование editor-стилей (белое поле,
+   заголовок-лейбл); submit — secondary во всю ширину (мокап «+ Добавить приз») */
+.console-prize-form { margin-bottom: 10px; }
+.console-prize-qty { width: 96px; }
+.console-prize-add,
+.console-draw-participant { width: 100%; }
+.console-draw-participant { margin-bottom: 10px; }
+
+/* Пустые состояния и служебные заметки панелей (мокап .empty-note) */
+.console-empty-note {
+  margin: 0 0 12px;
+  padding: 6px 0 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Ошибки панелей (role="alert") — единый стиль с баннером обрыва связи
+   (.console-error-banner выше); модификатор убирает страничные отступы
+   внутри карточки */
+.console-panel-alert { margin: 10px 0 0; }
+
+/* Победители розыгрыша на консоли — карточка (className-проп Winners;
+   сцены стилизованы своими обёртками .play-winners/.screen-winners и не
+   затронуты). На ACTIVE — полный список всех победителей (бриф T11). */
+.console-winners h2 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 13px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-winners ul { list-style: none; margin: 0; padding: 0; }
+.console-winners li { padding: 5px 0; overflow-wrap: anywhere; }
+
+/* Длинные имена в дорожках консоли переносятся (мокап «Длинное»);
+   scoped под консоль — сцена имеет свои правила в transitions.css */
+.console-page .race-tracks .tr-name { overflow-wrap: anywhere; }
+
+/* Hero завершения (мокап .finish-hero): центрированная плашка */
+.console-completed-hero { text-align: center; }
+.console-completed-hero .console-fh-title { margin-bottom: 4px; }
+.console-completed-hero .console-fh-sub { margin-bottom: 0; }
+
+/* Ландшафт-правило (п. 11) для новых состояний: hero завершения — одна плашка
+   без колонки действий (мокап .fin-hero); имя победителя 32px остаётся
+   крупнейшим элементом своего экрана (мокап console-landscape-editor-draw-finish) */
+@media (orientation: landscape) and (max-height: 400px) {
+  .console-completed-hero {
+    display: block;
+    padding: 12px 16px;
+    text-align: left;
+  }
+  .console-completed-hero .console-fh-title { font-size: 22px; }
+  .console-wb-name { font-size: 32px; }
+}

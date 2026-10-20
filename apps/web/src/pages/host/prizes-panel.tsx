@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
-import { LOTTERY_APP_ID } from '@mymozhem/app-lottery';
+import { drawCompletedPayload, LOTTERY_APP_ID } from '@mymozhem/app-lottery';
 import { ApiError } from '../../api/api-error';
 import { createPrize, listPrizes } from '../../api/endpoints';
+import { displayNameOf } from '../../components/roster-names';
 import { hostClient } from './host-session';
 
 // Попытка розыгрыша: drawId — клиентский uuid, ключ идемпотентности команды
@@ -88,6 +89,23 @@ const panelErrorText = (e: unknown): string => {
 // (rewards.service). Оба public (REWARDS_EVENTS) — visibility-дисциплина.
 const PRIZE_REFETCH_EVENTS = new Set(['rewards.reward.awarded', 'rewards.reward.revoked']);
 
+// Баннер победителя (бриф T11, дизайн §5.3 «Розыгрыш»): последний
+// lottery.draw.completed из лога. Payload парсим схемой app-lottery на
+// границе (прецедент lastRoundGains в state/race-tracks.ts), не raw JSON.
+// Розыгрышей не было → null, баннер не рисуется.
+export interface CompletedDraw {
+  drawId: string;
+  prizeId: string | null;
+  winnerId: string;
+}
+export const lastCompletedDraw = (events: ProjectedEvent[]): CompletedDraw | null => {
+  let last: CompletedDraw | null = null;
+  for (const e of events) {
+    if (e.type === 'lottery.draw.completed') last = drawCompletedPayload.parse(e.payload);
+  }
+  return last;
+};
+
 interface PrizesPanelProps {
   roomId: string;
   // Пин приложения из payload core.room.activated (REQ-RT-004): кнопка
@@ -96,17 +114,25 @@ interface PrizesPanelProps {
   // Терминальный статус комнаты: сервер не примет ни createPrize
   // (ROOM_NOT_ACTIVE), ни draw.run в не-ACTIVE комнате — отсекаем заранее.
   disabled: boolean;
-  // Лог — триггер событийного рефетча остатков (см. PRIZE_REFETCH_EVENTS).
+  // Лог — триггер событийного рефетча остатков (см. PRIZE_REFETCH_EVENTS) и
+  // источник баннера победителя (lastCompletedDraw).
   events: ProjectedEvent[];
+  // Имена — из общего useRoomFeed: draw.completed несёт только winnerId
+  // (REQ-SEC-009), имя победителя берём из membership-проекции.
+  names: Map<string, string>;
   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
 }
 
-// Панель призов и розыгрыша (бриф Task 15): форма name+quantity → createPrize →
-// рефетч; в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
-// lottery.draw.run; результат приезжает draw.completed и виден в <Winners>.
-// draw.completed сам модуль коммитит — клиент его не публикует никогда.
-// ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw (без prizeId).
-export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: PrizesPanelProps) {
+// Панель призов и розыгрыша (бриф Task 15, стилизация — бриф T11, дизайн
+// §5.3 «Розыгрыш», мокап console-draw-winner-larger): карточка консоли;
+// баннер последнего победителя внутри карточки (имя 36px Oranienbaum —
+// крупнейший элемент экрана); форма name+quantity → createPrize → рефетч;
+// в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
+// lottery.draw.run; результат приезжает draw.completed и виден в баннере
+// и <Winners>. draw.completed сам модуль коммитит — клиент его не публикует
+// никогда. ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw
+// (без prizeId).
+export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publish }: PrizesPanelProps) {
   const [prizes, setPrizes] = useState<PrizeResponse[] | null>(null);
   const [name, setName] = useState('');
   const [quantity, setQuantity] = useState('1');
@@ -212,21 +238,81 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: 
 
   const isLottery = pinnedAppId === LOTTERY_APP_ID;
 
+  // Баннер последнего победителя (мокап console-draw-winner-larger): внутри
+  // карточки призов, над списком. Название приза — из локального списка панели
+  // по prizeId; приз мог быть удалён из выдачи — тогда строка без названия
+  // (fallback брифа T11), безпризовой draw — тоже без названия.
+  const lastDraw = lastCompletedDraw(events);
+  const drawPrizeName =
+    lastDraw?.prizeId != null
+      ? (prizes?.find((p) => p.id === lastDraw.prizeId)?.name ?? null)
+      : null;
+
   return (
-    <section>
-      <h2>Призы</h2>
-      <form onSubmit={submitPrize}>
-        <label>
-          Название{' '}
+    <section className="console-card">
+      <h3 className="console-card-title">Призы</h3>
+      {lastDraw ? (
+        <div className="console-winner-banner">
+          <div className="console-wb-label">Розыгрыш завершён</div>
+          <div className="console-wb-name">{displayNameOf(names, lastDraw.winnerId)}</div>
+          {drawPrizeName !== null ? (
+            <div className="console-wb-prize">выигрывает «{drawPrizeName}»</div>
+          ) : null}
+        </div>
+      ) : null}
+      {prizes === null ? <p className="console-empty-note">Загружаем призы…</p> : null}
+      {prizes !== null && prizes.length === 0 ? (
+        <p className="console-empty-note">Призов пока нет.</p>
+      ) : null}
+      {prizes !== null && prizes.length > 0 ? (
+        <ul className="console-prize-list">
+          {prizes.map((p) => (
+            <li className="console-prize-row" key={p.id}>
+              <span className="console-prize-name">
+                {p.name}
+                <span className="console-prize-left">
+                  {' '}
+                  — осталось {p.quantity} из {p.quantityTotal}
+                </span>
+              </span>
+              {isLottery ? (
+                isDrawable(p) ? (
+                  <button
+                    type="button"
+                    className="btn btn-secondary console-mini"
+                    disabled={disabled || pendingDraw !== null}
+                    onClick={() => runDraw(p)}
+                  >
+                    Разыграть
+                  </button>
+                ) : (
+                  /* Разыгранный приз (quantity 0): вместо disabled-кнопки —
+                     тихий статус (мокап «Разыграна»; при фонде >1 — мн. ч.). */
+                  <span className="console-prize-drawn">
+                    {p.quantityTotal > 1 ? 'Разыграны' : 'Разыграна'}
+                  </span>
+                )
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {/* Поля формы переиспользуют editor-стили карточки вопроса (та же
+          консольная палитра: белое поле, заголовок-лейбл). */}
+      <form className="console-prize-form" onSubmit={submitPrize}>
+        <label className="editor-label">
+          Название
           <input
+            className="editor-input"
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={disabled || creating}
           />
-        </label>{' '}
-        <label>
-          Количество{' '}
+        </label>
+        <label className="editor-label">
+          Количество
           <input
+            className="editor-input console-prize-qty"
             type="number"
             min={1}
             step={1}
@@ -234,47 +320,38 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: 
             onChange={(e) => setQuantity(e.target.value)}
             disabled={disabled || creating}
           />
-        </label>{' '}
-        <button type="submit" disabled={disabled || creating}>
-          Добавить приз
+        </label>
+        <button
+          type="submit"
+          className="btn btn-secondary console-prize-add"
+          disabled={disabled || creating}
+        >
+          + Добавить приз
         </button>
       </form>
       {/* ADR-012 §4: создание приза — юридическая ответственность организатора
           (лотереи, налоги). Текст виден всегда: клиент режим не знает, серверный
           гейт отвечает PRIZES_DISABLED при prize_mode=off. */}
-      <p>Призовой режим — юридическая ответственность организатора (лотереи, налоги).</p>
+      <p className="console-empty-note">
+        Призовой режим — юридическая ответственность организатора (лотереи, налоги).
+      </p>
       {isLottery ? (
-        <p>
-          <button
-            type="button"
-            disabled={disabled || pendingDraw !== null}
-            onClick={runParticipantDraw}
-          >
-            Разыграть участника
-          </button>
+        <button
+          type="button"
+          className="btn btn-secondary console-draw-participant"
+          disabled={disabled || pendingDraw !== null}
+          onClick={runParticipantDraw}
+        >
+          Разыграть участника
+        </button>
+      ) : null}
+      {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11,
+          мокап console-empty-long-errors-v2). */}
+      {error ? (
+        <p role="alert" className="console-error-banner console-panel-alert">
+          {error}
         </p>
       ) : null}
-      {prizes === null ? <p>Загружаем призы…</p> : null}
-      {prizes !== null && prizes.length === 0 ? <p>Призов пока нет.</p> : null}
-      {prizes !== null && prizes.length > 0 ? (
-        <ul>
-          {prizes.map((p) => (
-            <li key={p.id}>
-              {p.name} — осталось {p.quantity} из {p.quantityTotal}{' '}
-              {isLottery ? (
-                <button
-                  type="button"
-                  disabled={disabled || !isDrawable(p) || pendingDraw !== null}
-                  onClick={() => runDraw(p)}
-                >
-                  Разыграть
-                </button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {error ? <p role="alert">{error}</p> : null}
     </section>
   );
 }

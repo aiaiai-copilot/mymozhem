@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
 import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
-import { QUIZ_APP_ID } from '@mymozhem/app-quiz';
+import { gameFinishedPayload, QUIZ_APP_ID } from '@mymozhem/app-quiz';
 import { ApiError } from '../../api/api-error';
 import { completeRoom, listRewards } from '../../api/endpoints';
 import { Logo } from '../../components/logo';
+import { RaceTracks } from '../../components/race-tracks';
+import { displayNameOf } from '../../components/roster-names';
 import { Winners } from '../../components/winners';
 import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
@@ -53,8 +55,13 @@ export function ConsolePage() {
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
-  // null — не загружены/ошибка: подсказки нет (п. 18 — только факт невручённых).
-  const [pendingAwards, setPendingAwards] = useState<number | null>(null);
+  // Награды целиком (null — не загружены/ошибка): из них derive подсказка
+  // «Квиз окончен» (только факт невручённых, п. 18) и гейт секции наград на
+  // COMPLETED (без наград — без блока вообще, п. 18).
+  const [awards, setAwards] = useState<AwardResponse[] | null>(null);
+  // «ещё N — развернуть» итогового табло COMPLETED (I-5, образец — toggle
+  // промежуточного табло в quiz-controls).
+  const [completedExpanded, setCompletedExpanded] = useState(false);
 
   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
   // refresh и сам разведёт на console или setup.
@@ -107,22 +114,49 @@ export function ConsolePage() {
     [binding.events],
   );
 
-  // Невручённые награды для подсказки «Квиз окончен» — тем же путём, что
-  // AwardsPanel (listRewards); грузим только пока экран показан. Best effort:
-  // ошибка → null → подсказки нет, кнопка «Завершить событие» не блокируется
-  // невручёнными наградами (REQ-RWD-009).
+  // Награды грузим на экране «Квиз окончен» (подсказка) и на COMPLETED
+  // (подзаголовок hero + гейт секции наград) — тем же путём, что AwardsPanel
+  // (listRewards). Best effort: ошибка → null → подсказки/секции нет, кнопка
+  // «Завершить событие» не блокируется невручёнными наградами (REQ-RWD-009).
+  const awardsNeeded = quizFinishedLive || feed.status === 'COMPLETED';
   useEffect(() => {
-    if (!roomId || !quizFinishedLive) return;
+    if (!roomId || !awardsNeeded) return;
     let stale = false;
     listRewards(hostClient, roomId)
       .then((r) => {
-        if (!stale) setPendingAwards(pendingAwardsCount(r.awards));
+        if (!stale) setAwards(r.awards);
       })
       .catch(() => {});
     return () => {
       stale = true;
     };
-  }, [roomId, quizFinishedLive, rewardsEventCount]);
+  }, [roomId, awardsNeeded, rewardsEventCount]);
+
+  // Невручённые награды — статус AWARDED (подсказка п. 18); null, пока список
+  // не загружен, — подсказки нет.
+  const pendingAwards = awards === null ? null : pendingAwardsCount(awards);
+
+  // Итоговое табло COMPLETED — та же сборка, что финал QuizControls: места из
+  // payload game.finished (их посчитал модуль), fallback — totals проекции.
+  // Прирост — атрибут reveal-момента, на финале дорожки без золотой дельты
+  // (та же норма, что у экрана «Квиз окончен»).
+  const completedStandings = useMemo(() => {
+    const finishedEvent = [...binding.events]
+      .reverse()
+      .find((e) => e.type === 'quiz.game.finished');
+    return finishedEvent ? gameFinishedPayload.parse(finishedEvent.payload).standings : undefined;
+  }, [binding.events]);
+  const completedEntries = useMemo(() => {
+    const rows =
+      completedStandings ??
+      Object.entries(feed.quiz.totals).map(([actorId, total]) => ({ actorId, total }));
+    return rows.map((r) => ({
+      actorId: r.actorId,
+      name: displayNameOf(feed.names, r.actorId),
+      total: r.total,
+      gain: 0,
+    }));
+  }, [completedStandings, feed.quiz.totals, feed.names]);
 
   const runCommand = (type: string, payload: Record<string, unknown>) => {
     setCommandError(null);
@@ -152,6 +186,14 @@ export function ConsolePage() {
       ?.writeText(`${window.location.origin}${path}`)
       .then(() => setCopied(key))
       .catch(() => {});
+  };
+
+  // «Вернуться к началу — новое событие» (мокап console-draw-winner-larger,
+  // finish-состояние): ключи завершённой комнаты снимаем атомарно, иначе
+  // следующий заход на /host воскресит её из localStorage.
+  const backToStart = () => {
+    SessionStore.clearHostRoom();
+    navigate(HOST_NEW_PATH);
   };
 
   // Все хуки выше; дальше — только рендер-ветки.
@@ -210,7 +252,62 @@ export function ConsolePage() {
         </p>
       ) : null}
       {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
-      {feed.status === 'COMPLETED' ? <p className="console-note">Событие завершено.</p> : null}
+      {feed.status === 'COMPLETED' ? (
+        /* Экран завершения (бриф T11, дизайн §5.3 «Завершение», п. 18; мокап
+           console-draw-winner-larger finish-состояние): hero → невручённые
+           награды первой секцией → итоговый забег → тихая «новое событие».
+           Пульта квиза и панелей приглашений/участников/призов здесь нет. */
+        <>
+          <section className="console-hero console-completed-hero">
+            <div className="console-moment">
+              <div className="console-fh-title">Событие завершено</div>
+              <p className="console-fh-sub">
+                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}участников:{' '}
+                {participantsCount(feed.members)}
+                {pendingAwards !== null && pendingAwards > 0 ? ' · вручите награды' : ''}
+              </p>
+            </div>
+          </section>
+          <div className="console-sections">
+            {/* Награды первыми — это то, что осталось сделать в зале; без
+                наград — без блока вообще (п. 18). fulfill/revoke легальны при
+                COMPLETED (REQ-RWD-009) — панель сознательно не гейтится
+                статусом комнаты. */}
+            {awards !== null && awards.length > 0 ? (
+              <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
+            ) : null}
+            <section className="console-card">
+              <h3 className="console-card-title">Итоговое табло</h3>
+              {completedEntries.length > 0 ? (
+                <div className="console-tracks">
+                  <RaceTracks
+                    entries={completedEntries}
+                    contour="console"
+                    topN={completedExpanded ? undefined : 4}
+                  />
+                  {completedEntries.length > 4 ? (
+                    <button
+                      type="button"
+                      className="console-tracks-toggle"
+                      onClick={() => setCompletedExpanded((v) => !v)}
+                    >
+                      {completedExpanded
+                        ? 'Свернуть'
+                        : `ещё ${completedEntries.length - 4} — развернуть`}
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="console-muted">Очков пока нет.</p>
+              )}
+            </section>
+          </div>
+          <button type="button" className="btn btn-quiet console-finish" onClick={backToStart}>
+            Вернуться к началу — новое событие
+          </button>
+        </>
+      ) : (
+        <>
       {/* Пульт квиза — только в quiz-комнате: в lottery-комнате его команды
           гарантированно отклонит модуль (pin из room.activated, та же
           дисциплина, что у кнопки «Разыграть» в PrizesPanel). */}
@@ -274,11 +371,18 @@ export function ConsolePage() {
           pinnedAppId={pinnedAppId}
           disabled={terminal}
           events={binding.events}
+          names={feed.names}
           publish={binding.publish}
         />
         {/* Результат розыгрыша приезжает публичным draw.completed — та же
-            проекция, что на /screen; консоль только триггерит draw.run. */}
-        <Winners draws={feed.lottery.draws} names={feed.names} />
+            проекция, что на /screen; консоль только триггерит draw.run.
+            Баннер в карточке призов показывает последнего победителя, Winners —
+            полный список (бриф T11). */}
+        <Winners
+          draws={feed.lottery.draws}
+          names={feed.names}
+          className="console-card console-winners"
+        />
         <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
       </div>
       {/* Тихая «Завершить событие» внизу (бриф T9, дизайн п. 10). На экране
@@ -294,6 +398,8 @@ export function ConsolePage() {
           Завершить событие
         </button>
       ) : null}
+        </>
+      )}
     </main>
   );
 }
