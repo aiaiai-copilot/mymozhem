@@ -217,8 +217,16 @@ export function ScreenPage() {
         <h1 className="screen-final-title">Игра завершена</h1>
         <div className={hasDraws ? 'screen-final-grid' : 'screen-final-grid screen-final-solo'}>
           <div>
-            <div className="screen-board-title">Итоговое табло</div>
-            <RaceTracks entries={trackEntries} contour="scene" topN={5} />
+            {trackEntries.length > 0 ? (
+              <>
+                <div className="screen-board-title">Итоговое табло</div>
+                <RaceTracks entries={trackEntries} contour="scene" topN={5} />
+              </>
+            ) : (
+              // Пустое табло (лотерея-only, ни одного верного ответа, досрочный
+              // finish) — fallback по образцу консоли, без висячего заголовка.
+              <p>Очков пока нет.</p>
+            )}
           </div>
           {hasDraws ? (
             <div className="screen-winners">
@@ -292,8 +300,15 @@ export function ScreenPage() {
           ) : null}
         </div>
         <div>
-          <div className="screen-board-title">Табло</div>
-          <RaceTracks entries={trackEntries} contour="scene" topN={4} />
+          {trackEntries.length > 0 ? (
+            <>
+              <div className="screen-board-title">Табло</div>
+              <RaceTracks entries={trackEntries} contour="scene" topN={4} />
+            </>
+          ) : (
+            // Пустое табло — fallback по образцу консоли, без висячего заголовка.
+            <p>Очков пока нет.</p>
+          )}
         </div>
       </section>
     );

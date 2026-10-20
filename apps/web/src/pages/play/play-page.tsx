@@ -287,11 +287,21 @@ export function PlayPage() {
         {myId && quiz.totals[myId] !== undefined ? (
           <p className="play-points">Ваши очки: {quiz.totals[myId]}</p>
         ) : null}
-        <div className="play-standings-head">
-          <span className="play-standings-title">Итоговое табло</span>
-          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
-        </div>
-        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+        {trackEntries.length > 0 ? (
+          <>
+            <div className="play-standings-head">
+              <span className="play-standings-title">Итоговое табло</span>
+              {place !== null ? (
+                <span className="play-standings-place">{place}-е место</span>
+              ) : null}
+            </div>
+            <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+          </>
+        ) : (
+          // Пустое табло (лотерея-only, ни одного верного ответа, досрочный
+          // finish) — fallback по образцу консоли, без висячего заголовка.
+          <p>Очков пока нет.</p>
+        )}
         {hasDraws ? (
           <div className="play-winners">
             <Winners draws={lottery.draws} names={names} />
@@ -399,11 +409,20 @@ export function PlayPage() {
             <div className="play-correct-answer">{correctOption}</div>
           </div>
         ) : null}
-        <div className="play-standings-head">
-          <span className="play-standings-title">Табло</span>
-          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
-        </div>
-        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+        {trackEntries.length > 0 ? (
+          <>
+            <div className="play-standings-head">
+              <span className="play-standings-title">Табло</span>
+              {place !== null ? (
+                <span className="play-standings-place">{place}-е место</span>
+              ) : null}
+            </div>
+            <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+          </>
+        ) : (
+          // Пустое табло — fallback по образцу консоли, без висячего заголовка.
+          <p>Очков пока нет.</p>
+        )}
       </section>
     );
   } else if (currentQuestion !== null) {
