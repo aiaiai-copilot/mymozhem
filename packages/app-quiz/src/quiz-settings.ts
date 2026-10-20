@@ -4,7 +4,16 @@ import { z } from 'zod';
 // correctAnswers без аннотации → fail-safe module-private, REQ-CORE-008).
 export const quizSettingsSchema = z.strictObject({
   questions: z
-    .array(z.strictObject({ text: z.string().min(1), options: z.array(z.string().min(1)).min(2) }))
+    .array(
+      z.strictObject({
+        text: z.string().min(1),
+        options: z.array(z.string().min(1)).min(2),
+        // v3: лимит времени на вопрос в секундах (5–600), null = «без лимита».
+        // Input-режим регистрации (C-9.1): defaulted ключ необязателен на гейте,
+        // дефолт 30. Таймер клиента читает значение из публичной проекции.
+        durationSec: z.number().int().min(5).max(600).nullable().default(30),
+      }),
+    )
     .min(1)
     .meta({ 'x-visibility': 'public' }),
   correctAnswers: z.array(z.number().int().min(0)),

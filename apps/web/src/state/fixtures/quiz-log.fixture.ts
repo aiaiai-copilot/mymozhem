@@ -13,13 +13,14 @@ export const PLAYER_2 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 export const quizMiniGameLog: ProjectedEvent[] = [
   {
     type: 'core.room.activated',
-    payload: { appId: 'quiz', manifestVersion: 2 },
+    payload: { appId: 'quiz', manifestVersion: 3 },
     actorId: null,
   },
   // Вопрос 0: PLAYER_1 отвечает верно (1), PLAYER_2 — неверно (0).
+  // openedAt — серверный штамп коммита (манифест v3).
   {
     type: 'quiz.question.opened',
-    payload: { questionIndex: 0 },
+    payload: { questionIndex: 0, openedAt: '2026-09-23T12:00:01.000Z' },
     actorId: HOST,
   },
   {
@@ -53,7 +54,7 @@ export const quizMiniGameLog: ProjectedEvent[] = [
   // Вопрос 1: верно отвечает PLAYER_2 (2); PLAYER_1 мимо (0).
   {
     type: 'quiz.question.opened',
-    payload: { questionIndex: 1 },
+    payload: { questionIndex: 1, openedAt: '2026-09-23T12:05:00.000Z' },
     actorId: HOST,
   },
   {

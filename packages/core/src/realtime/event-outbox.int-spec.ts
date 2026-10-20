@@ -68,7 +68,7 @@ describe('EventOutbox', () => {
       eventLog,
       outbox,
       registry,
-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
+      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger, outbox, eventLog),
       TEST_CONFIG,
     );
   }, 120000);

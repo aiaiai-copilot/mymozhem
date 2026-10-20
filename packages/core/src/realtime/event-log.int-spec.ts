@@ -43,6 +43,13 @@ describe('EventLogService.commitCoreEvent', () => {
         new JoinRateLimiter(1000),
         TEST_CONFIG,
         fakeLogger,
+        outbox,
+        new EventLogService(
+          new AppRegistryService([validManifests[0]]),
+          new EventEmitLimiter(1000),
+          TEST_CONFIG,
+          outbox,
+        ),
       ),
       TEST_CONFIG,
     );

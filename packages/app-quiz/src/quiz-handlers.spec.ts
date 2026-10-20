@@ -24,8 +24,8 @@ const T0 = '2026-09-09T12:00:00.000Z';
 
 const SETTINGS: QuizSettings = {
   questions: [
-    { text: 'Q1', options: ['a', 'b', 'c'] },
-    { text: 'Q2', options: ['x', 'y'] },
+    { text: 'Q1', options: ['a', 'b', 'c'], durationSec: 30 },
+    { text: 'Q2', options: ['x', 'y'], durationSec: 30 },
   ],
   correctAnswers: [1, 0],
   minAnswerIntervalMs: 1000,
@@ -101,14 +101,34 @@ describe('handleQuizPublish / question.opened', () => {
     );
   });
 
-  it('commits question.opened as public/publisher on happy path', async () => {
+  it('commits question.opened as public/publisher on happy path, stamped with openedAt = ctx.now', async () => {
     const result = await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 });
     expect(result).toEqual({
       commits: [
-        { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
+        {
+          shortName: 'question.opened',
+          payload: { questionIndex: 1, openedAt: T0 },
+          visibility: 'public',
+          actor: 'publisher',
+        },
       ],
       effects: [],
     });
+  });
+
+  it('overwrites a client-supplied openedAt with ctx.now (server-stamped, REQ-RT-009)', async () => {
+    const result = await handleQuizPublish(ctx({ now: T0 }), 'question.opened', {
+      questionIndex: 0,
+      openedAt: '1999-01-01T00:00:00.000Z',
+    });
+    expect(result.commits).toEqual([
+      {
+        shortName: 'question.opened',
+        payload: { questionIndex: 0, openedAt: T0 },
+        visibility: 'public',
+        actor: 'publisher',
+      },
+    ]);
   });
 });
 
@@ -417,7 +437,12 @@ describe('createQuizRuntime / createQuizApp', () => {
     const result = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
     expect(result).toEqual({
       commits: [
-        { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
+        {
+          shortName: 'question.opened',
+          payload: { questionIndex: 0, openedAt: T0 },
+          visibility: 'public',
+          actor: 'publisher',
+        },
       ],
       effects: [],
     });

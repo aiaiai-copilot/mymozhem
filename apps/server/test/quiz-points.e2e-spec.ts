@@ -26,12 +26,11 @@ jest.setTimeout(180_000);
 // версию 0 — иначе проекция core.room.activated (actorId = ORG) падает на parse.
 const ORG = '00000000-0000-4000-8000-000000000001';
 
-// Хелперы/бутстрап — копия quiz.e2e (спек standalone; quiz.e2e не правим — он
-// остаётся приёмкой ф.2 на manifestVersion 2).
+// Хелперы/бутстрап — копия quiz.e2e (спек standalone).
 const QUIZ_SETTINGS: QuizSettings = {
   questions: [
-    { text: '2+2?', options: ['3', '4'] },
-    { text: 'Столица Франции?', options: ['Лион', 'Париж'] },
+    { text: '2+2?', options: ['3', '4'], durationSec: 30 },
+    { text: 'Столица Франции?', options: ['Лион', 'Париж'], durationSec: 30 },
   ],
   correctAnswers: [1, 1],
   minAnswerIntervalMs: 0,

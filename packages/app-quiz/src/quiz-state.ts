@@ -14,7 +14,7 @@ import type {
 export interface QuizState {
   readonly currentQuestion: number | null;
   readonly accepting: boolean;
-  readonly openedAt: string | null; // ISO из recordedAt question.opened — серверное время
+  readonly openedAt: string | null; // ISO: payload.openedAt (серверный штамп коммита, v3), fallback — recordedAt
   readonly answers: Readonly<Record<string, { optionIndex: number; seq: number }>>; // текущий вопрос, key=actorId
   readonly totals: Readonly<Record<string, number>>;
   readonly finished: boolean;
@@ -39,7 +39,8 @@ export function reduceQuiz(state: QuizState, event: AppLogEvent): QuizState {
         ...state,
         currentQuestion: p.questionIndex,
         accepting: true,
-        openedAt: event.recordedAt,
+        // v3: коммит несёт серверный openedAt; для логов до v3 — recordedAt.
+        openedAt: p.openedAt ?? event.recordedAt,
         answers: {},
       };
     }

@@ -7,6 +7,8 @@ import { APP_CONFIG } from '../config/config.tokens';
 import type { AppConfig } from '../config/config.schema';
 import { PinoLogger } from '../observability/pino-logger.module';
 import { JoinRateLimiter } from './join-rate-limiter';
+import { EventOutbox } from '../realtime/event-outbox';
+import { EventLogService } from '../realtime/event-log.service';
 import { generatePseudonym } from './pseudonym';
 import {
   ActorNotMemberError,
@@ -38,6 +40,8 @@ export class MembershipService {
     private readonly joinRateLimiter: JoinRateLimiter,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly logger: PinoLogger,
+    private readonly outbox: EventOutbox,
+    private readonly eventLog: EventLogService,
   ) {
     this.logger.setContext(MembershipService.name);
   }
@@ -248,7 +252,7 @@ export class MembershipService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.outbox.run(async (tx) => {
       // Псевдоним генерируется ВНУТРИ tx: чтение ростера и createGuest в одной
       // транзакции — retry видит свежие join этого же запроса.
       const name = providedName ?? generatePseudonym(await this.takenDisplayNames(tx, room.id));
@@ -263,6 +267,11 @@ export class MembershipService {
           role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
         },
       });
+      // core.member.joined (UI-срез): публичное событие ядра, id-only payload (PII-
+      // цикл не затронут). Коммит — последним шагом tx: advisory lock лога всегда
+      // leaf-most (конвенция порядка блокировок, HANDOFF). Атомарность «join + лог»
+      // — та же tx (REQ-DEV-008); доставка — пост-коммит через outbox (design §5).
+      await this.eventLog.commitCoreEvent(tx, room.id, 'member.joined', { identityId: identity.id }, identity.id);
       return { membership, identity, displayName: name };
     });
   }

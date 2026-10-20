@@ -247,6 +247,8 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
       new JoinRateLimiter(1000),
       TEST_CONFIG,
       fakeLogger,
+      outbox,
+      eventLog,
     );
     rooms = new RoomService(db.prisma, eventLog, outbox, registry, membership, TEST_CONFIG);
   }, 120000);

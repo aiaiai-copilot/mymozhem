@@ -41,6 +41,19 @@ describe('reduceQuiz', () => {
     expect(next.answers).toEqual({});
   });
 
+  it('question.opened prefers payload.openedAt (server-stamped at commit) over event.recordedAt', () => {
+    const next = reduceQuiz(
+      initialQuizState(),
+      event(
+        'question.opened',
+        { questionIndex: 1, openedAt: '2026-09-09T12:00:01.000Z' },
+        { recordedAt: '2026-09-09T12:00:02.000Z' },
+      ),
+    );
+
+    expect(next.openedAt).toBe('2026-09-09T12:00:01.000Z');
+  });
+
   it('answer.submitted records answers of two players with their seq', () => {
     const opened = reduceQuiz(initialQuizState(), event('question.opened', { questionIndex: 0 }));
     const withFirst = reduceQuiz(opened, event('answer.submitted', { questionIndex: 0, optionIndex: 1 }, { actorId: ACTOR, seq: 5 }));

@@ -41,7 +41,16 @@ function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string, 
     throw new AppRejection('QUESTION_UNKNOWN', `вопроса с индексом ${p.questionIndex} нет в настройках`);
   }
   return {
-    commits: [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }],
+    // openedAt штампуется сервером (ctx.now) и перезаписывает клиентское
+    // значение из publish — как actorId, времени клиента не доверяем (REQ-RT-009).
+    commits: [
+      {
+        shortName: 'question.opened',
+        payload: { questionIndex: p.questionIndex, openedAt: ctx.now },
+        visibility: 'public',
+        actor: 'publisher',
+      },
+    ],
     effects: [],
   };
 }
