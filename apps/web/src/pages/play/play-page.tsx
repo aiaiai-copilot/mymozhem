@@ -1,24 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
-import {
-  gameFinishedPayload,
-  questionRevealedPayload,
-  quizSettingsSchema,
-} from '@mymozhem/app-quiz';
+import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
 import { ApiClient } from '../../api/api-client';
 import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
 import { rejoinAsGuest } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
-import { rosterNames } from '../../components/roster-names';
-import { Standings } from '../../components/standings';
+import { Logo } from '../../components/logo';
+import { RaceTracks } from '../../components/race-tracks';
+import { displayNameOf, rosterNames } from '../../components/roster-names';
 import { Winners } from '../../components/winners';
 import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
+import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+import { lastRoundGains, myPlace } from '../../state/race-tracks';
 import { shouldRefetchRoster } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { JoinForm } from './join-form';
+
+// Буквенные метки вариантов (золотые <b> в .btn-scene, мокапы component-states-live
+// и timer-projector-participant). Вариантов больше, чем букв, — рендер без метки.
+const OPTION_LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
 
 // anonClient (ruling): join/refresh — auth:false, access-токена им не нужен,
 // поэтому провайдер всегда отдаёт null. Module-level const — это не мутабельное
@@ -177,6 +180,32 @@ export function PlayPage() {
     return parsed.success ? parsed.data : [];
   }, [binding.appSettings]);
 
+  // Таймер вопроса (п. 12): durationSec — только из распарсенных настроек
+  // (дефолт 30 материализуется на parse; без raw appSettings и без «?? 30»),
+  // openedAt — серверный штамп из проекции. «Без лимита»/вопроса нет → null →
+  // таймер не рендерится вообще. Хук вызван до ранних return (rules of hooks).
+  const question = currentQuestion !== null ? questions[currentQuestion] : undefined;
+  const durationSec = question?.durationSec ?? null;
+  const timerSec = useQuestionTimer(durationSec, quiz.openedAt);
+
+  // Табло дорожками (дизайн §7): итоги из проекции, прирост — из последнего
+  // reveal в логе (lastRoundGains), имена — через displayNameOf (fallback
+  // «Гость» внутри). Место — плотный ранг в отсортированном списке (myPlace).
+  const gains = lastRoundGains(events);
+  const trackEntries = Object.entries(quiz.totals).map(([actorId, total]) => ({
+    actorId,
+    name: displayNameOf(names, actorId),
+    total,
+    gain: gains[actorId] ?? 0,
+  }));
+  const place =
+    myId !== null
+      ? myPlace(
+          [...trackEntries].sort((a, b) => b.total - a.total),
+          myId,
+        )
+      : null;
+
   // Reveal текущего вопроса: revealed-событие позже close для того же индекса.
   const reveal = useMemo(() => {
     let revealIndex = -1;
@@ -222,9 +251,15 @@ export function PlayPage() {
   };
 
   if (!roomId) {
-    if (autoJoinPending) return <p>Входим…</p>;
+    if (autoJoinPending)
+      return (
+        <main className="play-page">
+          <Logo contour="scene" size="participant" />
+          <p className="play-waiting">Входим…</p>
+        </main>
+      );
     return (
-      <main>
+      <main className="play-page">
         <JoinForm
           codeFromUrl={code}
           initialDisplayName={saved?.displayName}
@@ -242,70 +277,133 @@ export function PlayPage() {
 
   let view;
   if (quiz.finished || status === 'COMPLETED') {
-    // Финал: итоговое табло (места из payload game.finished, если событие было)
-    // + победители розыгрыша (дизайн §4).
-    const finishedEvent = [...events].reverse().find((e) => e.type === 'quiz.game.finished');
-    const finalStandings = finishedEvent
-      ? gameFinishedPayload.parse(finishedEvent.payload).standings
-      : undefined;
+    // Финал (§5.1, п. 18): итоговое полное табло дорожками + победители
+    // розыгрыша — только если розыгрыш был (явный гард; Winners и сам вернёт
+    // null на пустых draws, но условие читается здесь).
+    const hasDraws = Object.keys(lottery.draws).length > 0;
     view = (
       <section>
-        <h1>Игра завершена</h1>
-        {myId && quiz.totals[myId] !== undefined ? <p>Ваши очки: {quiz.totals[myId]}</p> : null}
-        <Standings standings={finalStandings} totals={quiz.totals} names={names} />
-        <Winners draws={lottery.draws} names={names} />
+        <h1 className="play-title">Игра завершена</h1>
+        {myId && quiz.totals[myId] !== undefined ? (
+          <p className="play-points">Ваши очки: {quiz.totals[myId]}</p>
+        ) : null}
+        <div className="play-standings-head">
+          <span className="play-standings-title">Итоговое табло</span>
+          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
+        </div>
+        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+        {hasDraws ? (
+          <div className="play-winners">
+            <Winners draws={lottery.draws} names={names} />
+          </div>
+        ) : null}
       </section>
     );
   } else if (status === 'CANCELLED') {
     view = <p>Комната отменена организатором.</p>;
   } else if (status !== 'ACTIVE') {
-    view = <p>Вы в игре. Ожидаем начала — организатор ещё готовит комнату…</p>;
-  } else if (currentQuestion !== null && quiz.accepting) {
-    const question = questions[currentQuestion];
+    // Ожидание (п. 7): текст центрирован относительно всей высоты
+    // (top: 50% + translateY(-50%) в .play-waiting), логотип и заголовок
+    // на центрирование не влияют.
     view = (
       <section>
-        <h1>{question ? question.text : `Вопрос ${currentQuestion + 1}`}</h1>
+        <h1 className="play-title">Вы в игре</h1>
+        <p className="play-waiting">Ожидаем начала — организатор ещё готовит комнату…</p>
+      </section>
+    );
+  } else if (currentQuestion !== null && quiz.accepting) {
+    // Вопрос (§5.1, п. 12): верхняя строка — «Вопросъ N из M» + таймер 40px
+    // (только при включённом лимите), отступ перед вариантами 30px, варианты
+    // .btn-scene растут по высоте, скролл — страничный.
+    view = (
+      <section>
+        <div className="play-strip">
+          <span className="play-kicker">
+            {question
+              ? `Вопросъ ${currentQuestion + 1} из ${questions.length}`
+              : `Вопросъ ${currentQuestion + 1}`}
+          </span>
+          {timerSec !== null ? <span className="play-timer">{formatTimer(timerSec)}</span> : null}
+        </div>
+        <h1 className="play-question">
+          {question ? question.text : `Вопросъ ${currentQuestion + 1}`}
+        </h1>
         {answered ? (
           <p>Ответ принят.</p>
         ) : (
-          <ul>
-            {(question?.options ?? []).map((option, optionIndex) => (
-              <li key={optionIndex}>
-                <button type="button" onClick={() => submitAnswer(optionIndex)}>
-                  {option}
-                </button>
-              </li>
-            ))}
+          <ul className="play-options">
+            {(question?.options ?? []).map((option, optionIndex) => {
+              const letter = OPTION_LETTERS[optionIndex];
+              return (
+                <li key={optionIndex}>
+                  <button
+                    type="button"
+                    className="btn btn-scene"
+                    onClick={() => submitAnswer(optionIndex)}
+                  >
+                    {letter ? <b>{letter}</b> : null}
+                    {option}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
-        {answerError ? <p role="alert">{answerError}</p> : null}
+        {answerError ? (
+          <p role="alert" className="play-error">
+            {answerError}
+          </p>
+        ) : null}
       </section>
     );
   } else if (currentQuestion !== null && reveal) {
-    // Reveal: верно/неверно + очки из payload (единственный публичный источник
-    // баллов); correctAnswers клиенту структурно недоступны и не запрашиваются.
+    // Reveal (§5.1, мокап game-states): вердикт значком+текстом+цветом, очки
+    // из payload (единственный публичный источник баллов), «Правильный отвѣтъ»
+    // (Приложение A) плашкой, табло — полные дорожки с «это ты» и местом
+    // в шапке. correctAnswers клиенту структурно недоступны и не запрашиваются.
     const myPoints = myId
       ? (reveal.awarded.find((a) => a.actorId === myId)?.points ?? 0)
       : 0;
-    const verdict = !answered
-      ? 'Вы не успели ответить.'
-      : reveal.correctIndex === undefined
-        ? 'Ответ принят.'
-        : // Верно ⇔ актор в awarded (баллы начисляются только за правильный
-          // ответ); optionIndex на клиенте недоступен — сравнивать нечего.
-          myId !== null && reveal.awarded.some((a) => a.actorId === myId)
-          ? 'Верно!'
-          : 'Неверно.';
+    let verdictText: string;
+    let verdictClass = '';
+    let verdictIcon = '';
+    if (!answered) {
+      verdictText = 'Вы не успели ответить.';
+    } else if (reveal.correctIndex === undefined) {
+      verdictText = 'Ответ принят.';
+    } else if (myId !== null && reveal.awarded.some((a) => a.actorId === myId)) {
+      // Верно ⇔ актор в awarded (баллы начисляются только за правильный
+      // ответ); optionIndex на клиенте недоступен — сравнивать нечего.
+      verdictText = 'Верно!';
+      verdictClass = ' play-verdict-success';
+      verdictIcon = '✓ ';
+    } else {
+      verdictText = 'Неверно.';
+      verdictClass = ' play-verdict-danger';
+      verdictIcon = '× ';
+    }
     const correctOption =
       reveal.correctIndex !== undefined
         ? questions[currentQuestion]?.options[reveal.correctIndex]
         : undefined;
     view = (
       <section>
-        <h1>{verdict}</h1>
-        {myPoints > 0 ? <p>+{myPoints} очков</p> : null}
-        {correctOption ? <p>Правильный ответ: {correctOption}</p> : null}
-        <Standings totals={quiz.totals} names={names} />
+        <h1 className={`play-verdict${verdictClass}`}>
+          {verdictIcon}
+          {verdictText}
+        </h1>
+        {myPoints > 0 ? <p className="play-points">+{myPoints} очков</p> : null}
+        {correctOption ? (
+          <div className="play-correct">
+            <div className="play-correct-label">Правильный отвѣтъ</div>
+            <div className="play-correct-answer">{correctOption}</div>
+          </div>
+        ) : null}
+        <div className="play-standings-head">
+          <span className="play-standings-title">Табло</span>
+          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
+        </div>
+        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
       </section>
     );
   } else if (currentQuestion !== null) {
@@ -316,22 +414,27 @@ export function PlayPage() {
     view = (
       <section>
         <p>Игра идёт. Ждём вопрос…</p>
-        <Winners draws={lottery.draws} names={names} />
+        {Object.keys(lottery.draws).length > 0 ? (
+          <div className="play-winners">
+            <Winners draws={lottery.draws} names={names} />
+          </div>
+        ) : null}
       </section>
     );
   }
 
   return (
-    <main>
+    <main className="play-page">
       <ConnectionBanner state={binding.connectionState} />
       {rejoined ? (
         <p role="status">
           Сессия истекла — вы вошли заново, прежние очки не переносятся.{' '}
-          <button type="button" onClick={() => setRejoined(false)}>
+          <button type="button" className="btn btn-scene" onClick={() => setRejoined(false)}>
             Понятно
           </button>
         </p>
       ) : null}
+      <Logo contour="scene" size="participant" />
       {view}
     </main>
   );
