@@ -1,0 +1,676 @@
+# Review package: 260a164..HEAD
+
+## Commits
+cd88edd feat(app-quiz): манифест v3 — durationSec вопроса (5–600|null, дефолт 30) + серверный openedAt в question.opened
+
+## Files changed
+ apps/server/test/quiz-points.e2e-spec.ts           |  7 ++---
+ apps/server/test/quiz.e2e-spec.ts                  |  7 +++--
+ apps/web/src/pages/host/quiz-editor.spec.ts        |  6 ++--
+ apps/web/src/state/fixtures/quiz-log.fixture.ts    |  7 +++--
+ apps/web/src/state/projections.spec.ts             |  5 +--
+ packages/app-quiz/src/quiz-events.ts               |  8 ++++-
+ packages/app-quiz/src/quiz-handlers.spec.ts        | 35 ++++++++++++++++++---
+ packages/app-quiz/src/quiz-handlers.ts             | 11 ++++++-
+ .../app-quiz/src/quiz-manifest.contract.spec.ts    | 36 +++++++++++++++++++---
+ packages/app-quiz/src/quiz-manifest.ts             |  5 ++-
+ packages/app-quiz/src/quiz-settings.ts             | 11 ++++++-
+ packages/app-quiz/src/quiz-state.spec.ts           | 13 ++++++++
+ packages/app-quiz/src/quiz-state.ts                |  5 +--
+ 13 files changed, 127 insertions(+), 29 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/quiz-points.e2e-spec.ts b/apps/server/test/quiz-points.e2e-spec.ts
+index e551ace..7ecb3db 100644
+--- a/apps/server/test/quiz-points.e2e-spec.ts
++++ b/apps/server/test/quiz-points.e2e-spec.ts
+@@ -19,26 +19,25 @@ import {
+ } from '@mymozhem/core';
+ import { AppModule } from '../src/app.module';
+ import { HELMET_OPTIONS } from '../src/security-headers';
+ 
+ jest.setTimeout(180_000);
+ 
+ // RFC 9562-валидный v4 UUID (прецедент realtime.e2e): z.uuid() (zod v4) отклоняет
+ // версию 0 — иначе проекция core.room.activated (actorId = ORG) падает на parse.
+ const ORG = '00000000-0000-4000-8000-000000000001';
+ 
+-// Хелперы/бутстрап — копия quiz.e2e (спек standalone; quiz.e2e не правим — он
+-// остаётся приёмкой ф.2 на manifestVersion 2).
++// Хелперы/бутстрап — копия quiz.e2e (спек standalone).
+ const QUIZ_SETTINGS: QuizSettings = {
+   questions: [
+-    { text: '2+2?', options: ['3', '4'] },
+-    { text: 'Столица Франции?', options: ['Лион', 'Париж'] },
++    { text: '2+2?', options: ['3', '4'], durationSec: 30 },
++    { text: 'Столица Франции?', options: ['Лион', 'Париж'], durationSec: 30 },
+   ],
+   correctAnswers: [1, 1],
+   minAnswerIntervalMs: 0,
+   scoring: { base: 1000, step: 100 },
+ };
+ 
+ function restoreEnv(key: string, value: string | undefined): void {
+   if (value === undefined) delete process.env[key];
+   else process.env[key] = value;
+ }
+diff --git a/apps/server/test/quiz.e2e-spec.ts b/apps/server/test/quiz.e2e-spec.ts
+index 0b7c242..f300edf 100644
+--- a/apps/server/test/quiz.e2e-spec.ts
++++ b/apps/server/test/quiz.e2e-spec.ts
+@@ -22,22 +22,22 @@ import { AppModule } from '../src/app.module';
+ import { HELMET_OPTIONS } from '../src/security-headers';
+ 
+ jest.setTimeout(180_000);
+ 
+ // RFC 9562-валидный v4 UUID (прецедент realtime.e2e): z.uuid() (zod v4) отклоняет
+ // версию 0 — иначе проекция core.room.activated (actorId = ORG) падает на parse.
+ const ORG = '00000000-0000-4000-8000-000000000001';
+ 
+ const QUIZ_SETTINGS: QuizSettings = {
+   questions: [
+-    { text: '2+2?', options: ['3', '4'] },
+-    { text: 'Столица Франции?', options: ['Лион', 'Париж'] },
++    { text: '2+2?', options: ['3', '4'], durationSec: 30 },
++    { text: 'Столица Франции?', options: ['Лион', 'Париж'], durationSec: 30 },
+   ],
+   correctAnswers: [1, 1],
+   minAnswerIntervalMs: 0,
+   scoring: { base: 1000, step: 100 },
+ };
+ 
+ function restoreEnv(key: string, value: string | undefined): void {
+   if (value === undefined) delete process.env[key];
+   else process.env[key] = value;
+ }
+@@ -389,21 +389,22 @@ describe('Quiz (e2e, приёмка фазы 2)', () => {
+ 
+   it('3. late-join участника в ACTIVE в середине раунда: snapshot с открытым вопросом, ответ принят', async () => {
+     const room = await activeQuizRoom(QUIZ_SETTINGS);
+     const org = await organizerSocket();
+     await subscribe(org, room.id);
+     expect(await publish(org, 'quiz.question.opened', { questionIndex: 0 })).toEqual({ ok: true });
+ 
+     const late = await joinGuest(room.code, 'Late');
+     const ack = await subscribe(late.socket, room.id);
+     const opened = ack.snapshot.events.find((e) => e.type === 'quiz.question.opened');
+-    expect(opened?.payload).toEqual({ questionIndex: 0 });
++    // openedAt — серверный штамп коммита (манифест v3), значение недетерминировано.
++    expect(opened?.payload).toEqual({ questionIndex: 0, openedAt: expect.any(String) });
+     // correctAnswers в snapshot нет даже на late-join (public-проекция appSettings).
+     expect(ack.snapshot.appSettings).not.toHaveProperty('correctAnswers');
+ 
+     expect(await publish(late.socket, 'quiz.answer.submitted', { questionIndex: 0, optionIndex: 1 })).toEqual({
+       ok: true,
+     });
+     late.socket.close();
+     org.close();
+   });
+ 
+diff --git a/apps/web/src/pages/host/quiz-editor.spec.ts b/apps/web/src/pages/host/quiz-editor.spec.ts
+index d6e9ea9..72f873b 100644
+--- a/apps/web/src/pages/host/quiz-editor.spec.ts
++++ b/apps/web/src/pages/host/quiz-editor.spec.ts
+@@ -17,40 +17,42 @@ const validForm: QuizFormState = {
+   scoringBase: '100',
+   scoringStep: '10',
+ };
+ 
+ describe('buildQuizSettings', () => {
+   it('maps form rows to quiz settings (correctAnswers из отмеченных радио)', () => {
+     const settings = buildQuizSettings(validForm);
+ 
+     // correctAnswers собираются из радио «правильный» каждого вопроса — индекс
+     // в массиве совпадает с индексом вопроса, значение — с выбранным вариантом.
++    // durationSec форма пока не редактирует (Task 10) — схема подставляет дефолт 30.
+     expect(quizSettingsSchema.parse(settings)).toEqual({
+       questions: [
+-        { text: 'Столица Франции?', options: ['Париж', 'Лион'] },
+-        { text: '2+2?', options: ['3', '4', '5'] },
++        { text: 'Столица Франции?', options: ['Париж', 'Лион'], durationSec: 30 },
++        { text: '2+2?', options: ['3', '4', '5'], durationSec: 30 },
+       ],
+       correctAnswers: [0, 1],
+       minAnswerIntervalMs: 0,
+       scoring: { base: 100, step: 10 },
+     });
+   });
+ 
+   it('trim текстов и вариантов перед сборкой', () => {
+     const settings = buildQuizSettings({
+       ...validForm,
+       questions: [{ text: '  Вопрос?  ', options: [' а ', '  б'], correctIndex: 1 }],
+     });
+ 
+     expect(quizSettingsSchema.parse(settings).questions[0]).toEqual({
+       text: 'Вопрос?',
+       options: ['а', 'б'],
++      durationSec: 30,
+     });
+   });
+ 
+   it('reject пустого текста/варианта (quizSettingsSchema.safeParse fail)', () => {
+     // Пробельный текст после trim — пустая строка: схема (min(1)) не пускает.
+     const noText = buildQuizSettings({
+       ...validForm,
+       questions: [{ text: '   ', options: ['а', 'б'], correctIndex: 0 }],
+     });
+     expect(quizSettingsSchema.safeParse(noText).success).toBe(false);
+diff --git a/apps/web/src/state/fixtures/quiz-log.fixture.ts b/apps/web/src/state/fixtures/quiz-log.fixture.ts
+index fba3b4a..7014c47 100644
+--- a/apps/web/src/state/fixtures/quiz-log.fixture.ts
++++ b/apps/web/src/state/fixtures/quiz-log.fixture.ts
+@@ -6,27 +6,28 @@ import type { ProjectedEvent } from '@mymozhem/sdk';
+ // (REQ-RT-011a). Формы payload'ов — по zod-схемам app-quiz (quiz-events.ts).
+ // Пинит фолд: порядок приёма, адаптер wire → AppLogEvent, фильтр по appId —
+ // а не редьюсер (он запинан спеками пакета app-quiz).
+ export const HOST = '11111111-1111-4111-8111-111111111111';
+ export const PLAYER_1 = '0f8fad5b-d9cb-469f-a165-70867728950e';
+ export const PLAYER_2 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+ 
+ export const quizMiniGameLog: ProjectedEvent[] = [
+   {
+     type: 'core.room.activated',
+-    payload: { appId: 'quiz', manifestVersion: 2 },
++    payload: { appId: 'quiz', manifestVersion: 3 },
+     actorId: null,
+   },
+   // Вопрос 0: PLAYER_1 отвечает верно (1), PLAYER_2 — неверно (0).
++  // openedAt — серверный штамп коммита (манифест v3).
+   {
+     type: 'quiz.question.opened',
+-    payload: { questionIndex: 0 },
++    payload: { questionIndex: 0, openedAt: '2026-09-23T12:00:01.000Z' },
+     actorId: HOST,
+   },
+   {
+     type: 'quiz.answer.submitted',
+     payload: { questionIndex: 0, optionIndex: 1 },
+     actorId: PLAYER_1,
+   },
+   {
+     type: 'quiz.answer.submitted',
+     payload: { questionIndex: 0, optionIndex: 0 },
+@@ -46,21 +47,21 @@ export const quizMiniGameLog: ProjectedEvent[] = [
+       totals: [
+         { actorId: PLAYER_1, total: 110 },
+         { actorId: PLAYER_2, total: 0 },
+       ],
+     },
+     actorId: null,
+   },
+   // Вопрос 1: верно отвечает PLAYER_2 (2); PLAYER_1 мимо (0).
+   {
+     type: 'quiz.question.opened',
+-    payload: { questionIndex: 1 },
++    payload: { questionIndex: 1, openedAt: '2026-09-23T12:05:00.000Z' },
+     actorId: HOST,
+   },
+   {
+     type: 'quiz.answer.submitted',
+     payload: { questionIndex: 1, optionIndex: 0 },
+     actorId: PLAYER_1,
+   },
+   {
+     type: 'quiz.answer.submitted',
+     payload: { questionIndex: 1, optionIndex: 2 },
+diff --git a/apps/web/src/state/projections.spec.ts b/apps/web/src/state/projections.spec.ts
+index 2780807..4d62b97 100644
+--- a/apps/web/src/state/projections.spec.ts
++++ b/apps/web/src/state/projections.spec.ts
+@@ -27,22 +27,23 @@ const lotteryEvent: ProjectedEvent = {
+ };
+ 
+ describe('projectQuiz — golden', () => {
+   it('фолд записанного лога ≡ ожидаемая проекция (порядок/адаптер, не редьюсер)', () => {
+     const state = projectQuiz(quizMiniGameLog, RECORDED_AT);
+ 
+     expect(state.currentQuestion).toBe(1);
+     expect(state.accepting).toBe(false);
+     expect(state.totals).toEqual({ [PLAYER_1]: 110, [PLAYER_2]: 100 });
+     expect(state.finished).toBe(true);
+-    // recordedAt проекции — ровно переданная строка (openedAt текущего вопроса).
+-    expect(state.openedAt).toBe(RECORDED_AT);
++    // openedAt текущего вопроса — серверный штамп из payload question.opened
++    // (манифест v3), а не клиентский recordedAt приёма.
++    expect(state.openedAt).toBe('2026-09-23T12:05:00.000Z');
+     // Локальный seq нумерует quiz-события в порядке приёма (core отфильтрован):
+     // ответы второго вопроса — 7-е и 8-е quiz-события лога.
+     expect(state.answers).toEqual({
+       [PLAYER_1]: { optionIndex: 0, seq: 7 },
+       [PLAYER_2]: { optionIndex: 2, seq: 8 },
+     });
+   });
+ 
+   it('фильтр по appId: события lottery/core не попадают в quiz-проекцию', () => {
+     const mixed = [...quizMiniGameLog, lotteryEvent];
+diff --git a/packages/app-quiz/src/quiz-events.ts b/packages/app-quiz/src/quiz-events.ts
+index be307e4..ab5e4ba 100644
+--- a/packages/app-quiz/src/quiz-events.ts
++++ b/packages/app-quiz/src/quiz-events.ts
+@@ -1,14 +1,20 @@
+ import { z } from 'zod';
+ 
+ // Payload-схемы (источник типов для handler'ов и манифеста).
+-export const questionOpenedPayload = z.strictObject({ questionIndex: z.number().int().min(0) });
++export const questionOpenedPayload = z.strictObject({
++  questionIndex: z.number().int().min(0),
++  // v3: момент открытия вопроса. Опционален на проводе; на коммите всегда
++  // перезаписывается серверным ctx.now (REQ-RT-009) — клиентское значение
++  // значения не имеет. Отсутствует только в логах, записанных до v3.
++  openedAt: z.iso.datetime().optional(),
++});
+ export const answerSubmittedPayload = z.strictObject({
+   questionIndex: z.number().int().min(0),
+   optionIndex: z.number().int().min(0),
+ });
+ export const questionClosedPayload = z.strictObject({ questionIndex: z.number().int().min(0) });
+ export const finishGamePayload = z.strictObject({});
+ export const answerAcceptedPayload = z.strictObject({
+   questionIndex: z.number().int().min(0),
+   actorId: z.uuid(),
+ });
+diff --git a/packages/app-quiz/src/quiz-handlers.spec.ts b/packages/app-quiz/src/quiz-handlers.spec.ts
+index 0a35ea4..449eee1 100644
+--- a/packages/app-quiz/src/quiz-handlers.spec.ts
++++ b/packages/app-quiz/src/quiz-handlers.spec.ts
+@@ -17,22 +17,22 @@ import type { QuizSettings } from './quiz-settings';
+ const ORG = '0f8fad5b-d9cb-469f-a165-70867728950e';
+ const P1 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+ const P2 = 'a3a8d3e1-9e5b-4f1c-8a2b-3c4d5e6f7081';
+ const P3 = 'b4b9e4f2-af6c-402d-9b3c-4d5e6f708192';
+ const P4 = 'c5caf503-b07d-413e-ac4d-5e6f708192a3';
+ 
+ const T0 = '2026-09-09T12:00:00.000Z';
+ 
+ const SETTINGS: QuizSettings = {
+   questions: [
+-    { text: 'Q1', options: ['a', 'b', 'c'] },
+-    { text: 'Q2', options: ['x', 'y'] },
++    { text: 'Q1', options: ['a', 'b', 'c'], durationSec: 30 },
++    { text: 'Q2', options: ['x', 'y'], durationSec: 30 },
+   ],
+   correctAnswers: [1, 0],
+   minAnswerIntervalMs: 1000,
+   scoring: { base: 1000, step: 100 },
+ };
+ 
+ const ctx = (over: Partial<AppHostContext<QuizState>>): AppHostContext<QuizState> => ({
+   roomId: 'r',
+   actorId: ORG,
+   actorRole: 'ORGANIZER',
+@@ -94,29 +94,49 @@ describe('handleQuizPublish / question.opened', () => {
+     );
+   });
+ 
+   it('rejects out-of-range questionIndex with QUESTION_UNKNOWN', () => {
+     expectRejection(
+       () => handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 2 }),
+       'QUESTION_UNKNOWN',
+     );
+   });
+ 
+-  it('commits question.opened as public/publisher on happy path', async () => {
++  it('commits question.opened as public/publisher on happy path, stamped with openedAt = ctx.now', async () => {
+     const result = await handleQuizPublish(ctx({}), 'question.opened', { questionIndex: 1 });
+     expect(result).toEqual({
+       commits: [
+-        { shortName: 'question.opened', payload: { questionIndex: 1 }, visibility: 'public', actor: 'publisher' },
++        {
++          shortName: 'question.opened',
++          payload: { questionIndex: 1, openedAt: T0 },
++          visibility: 'public',
++          actor: 'publisher',
++        },
+       ],
+       effects: [],
+     });
+   });
++
++  it('overwrites a client-supplied openedAt with ctx.now (server-stamped, REQ-RT-009)', async () => {
++    const result = await handleQuizPublish(ctx({ now: T0 }), 'question.opened', {
++      questionIndex: 0,
++      openedAt: '1999-01-01T00:00:00.000Z',
++    });
++    expect(result.commits).toEqual([
++      {
++        shortName: 'question.opened',
++        payload: { questionIndex: 0, openedAt: T0 },
++        visibility: 'public',
++        actor: 'publisher',
++      },
++    ]);
++  });
+ });
+ 
+ describe('handleQuizPublish / answer.submitted', () => {
+   const submit = (over: Partial<AppHostContext<QuizState>>, payload: Record<string, unknown>) =>
+     handleQuizPublish(ctx(over), 'answer.submitted', payload);
+ 
+   it.each(['ORGANIZER', 'SPECTATOR', 'MODERATOR'] as const)('rejects role %s with PUBLISH_FORBIDDEN', (role) => {
+     expectRejection(
+       () => submit({ actorRole: role, state: openState(0) }, { questionIndex: 0, optionIndex: 0 }),
+       'PUBLISH_FORBIDDEN',
+@@ -410,21 +430,26 @@ describe('createQuizRuntime / createQuizApp', () => {
+     });
+     expect(opened.accepting).toBe(true);
+     expect(opened.currentQuestion).toBe(0);
+   });
+ 
+   it('dispatches handlePublish through the runtime module', async () => {
+     const runtime = createQuizRuntime();
+     const result = await runtime.handlePublish(ctx({}), 'question.opened', { questionIndex: 0 });
+     expect(result).toEqual({
+       commits: [
+-        { shortName: 'question.opened', payload: { questionIndex: 0 }, visibility: 'public', actor: 'publisher' },
++        {
++          shortName: 'question.opened',
++          payload: { questionIndex: 0, openedAt: T0 },
++          visibility: 'public',
++          actor: 'publisher',
++        },
+       ],
+       effects: [],
+     });
+   });
+ 
+   it('createQuizApp returns the manifest and the runtime', () => {
+     const app = createQuizApp();
+     expect(app.manifest).toEqual(buildQuizManifest());
+     expect(app.runtime.appId).toBe(QUIZ_APP_ID);
+   });
+diff --git a/packages/app-quiz/src/quiz-handlers.ts b/packages/app-quiz/src/quiz-handlers.ts
+index 4746cd2..bf5f927 100644
+--- a/packages/app-quiz/src/quiz-handlers.ts
++++ b/packages/app-quiz/src/quiz-handlers.ts
+@@ -34,21 +34,30 @@ function openQuestion(ctx: Ctx, settings: QuizSettings, payload: Record<string,
+     throw new AppRejection('ROUND_NOT_OPEN', 'игра завершена');
+   }
+   if (ctx.state.accepting) {
+     throw new AppRejection('ROUND_NOT_OPEN', 'прежний вопрос не закрыт');
+   }
+   const p = payload as z.infer<typeof questionOpenedPayload>;
+   if (p.questionIndex >= settings.questions.length) {
+     throw new AppRejection('QUESTION_UNKNOWN', `вопроса с индексом ${p.questionIndex} нет в настройках`);
+   }
+   return {
+-    commits: [{ shortName: 'question.opened', payload, visibility: 'public', actor: 'publisher' }],
++    // openedAt штампуется сервером (ctx.now) и перезаписывает клиентское
++    // значение из publish — как actorId, времени клиента не доверяем (REQ-RT-009).
++    commits: [
++      {
++        shortName: 'question.opened',
++        payload: { questionIndex: p.questionIndex, openedAt: ctx.now },
++        visibility: 'public',
++        actor: 'publisher',
++      },
++    ],
+     effects: [],
+   };
+ }
+ 
+ function submitAnswer(ctx: Ctx, settings: QuizSettings, payload: Record<string, unknown>): AppPublishResult {
+   // Организатор не играет; SPECTATOR отсекается ядром раньше — ветка защитная.
+   if (ctx.actorRole !== 'PARTICIPANT') {
+     throw new AppRejection('PUBLISH_FORBIDDEN', 'отвечать могут только участники');
+   }
+   const { state } = ctx;
+diff --git a/packages/app-quiz/src/quiz-manifest.contract.spec.ts b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+index 26b0399..256e5fd 100644
+--- a/packages/app-quiz/src/quiz-manifest.contract.spec.ts
++++ b/packages/app-quiz/src/quiz-manifest.contract.spec.ts
+@@ -30,24 +30,24 @@ const EXPECTED_EVENTS: ReadonlyArray<readonly [string, Visibility, boolean]> = [
+ describe('quiz manifest', () => {
+   it('satisfies the manifest contract (appManifestSchema)', () => {
+     expect(appManifestSchema.safeParse(manifest).success).toBe(true);
+   });
+ 
+   it('carries the quiz identity', () => {
+     expect(manifest.appId).toBe(QUIZ_APP_ID);
+     expect(manifest.manifestVersion).toBe(QUIZ_MANIFEST_VERSION);
+   });
+ 
+-  // Фаза 3 (REQ-RWD-001, REQ-RT-004): пин версии 2 и capability rewards —
+-  // начисления баллов уходят эффектами, исполняемыми рантаймом.
+-  it('pins manifestVersion 2 with the rewards capability', () => {
+-    expect(QUIZ_MANIFEST_VERSION).toBe(2);
++  // v3 (дизайн/UI-срез, Task 3): durationSec вопроса + серверный openedAt в
++  // question.opened. Capability rewards — с фазы 3 (REQ-RWD-001, REQ-RT-004).
++  it('pins manifestVersion 3 with the rewards capability', () => {
++    expect(QUIZ_MANIFEST_VERSION).toBe(3);
+     expect(manifest.capabilities).toEqual(['rewards']);
+   });
+ 
+   it('registers exactly the 7 quiz event types', () => {
+     expect(Object.keys(manifest.events).sort()).toEqual(
+       EXPECTED_EVENTS.map(([name]) => name).sort(),
+     );
+   });
+ 
+   it.each(EXPECTED_EVENTS)(
+@@ -74,47 +74,75 @@ describe('registered appSettings JSON Schema', () => {
+   };
+ 
+   it('accepts a valid settings snapshot', () => {
+     expect(validate(validSettings)).toBe(true);
+   });
+ 
+   it('accepts correctAnswers shorter than questions (a question without a configured correct answer)', () => {
+     expect(validate({ ...validSettings, correctAnswers: [0] })).toBe(true);
+   });
+ 
++  // durationSec вопроса (v3): input-режим регистрации (C-9.1) — у defaulted
++  // ключа допустимо отсутствие на гейте; null = «без лимита», диапазон 5–600.
++  const durationSecValid: ReadonlyArray<readonly [string, unknown]> = [
++    ['durationSec omitted (defaulted at registration)', validSettings],
++    ['durationSec at the upper bound (600)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 600 }] }],
++    ['durationSec null (no time limit)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: null }] }],
++    ['durationSec at the lower bound (5)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 5 }] }],
++  ];
++
++  it.each(durationSecValid)('accepts %s', (_description, settings) => {
++    expect(validate(settings)).toBe(true);
++  });
++
+   const invalidSettings: ReadonlyArray<readonly [string, unknown]> = [
+     ['empty questions', { ...validSettings, questions: [] }],
+     ['minAnswerIntervalMs below zero', { ...validSettings, minAnswerIntervalMs: -1 }],
+     ['an unknown extra key', { ...validSettings, bogus: 1 }],
+     [
+       'a question with a single option',
+       { ...validSettings, questions: [{ text: 'Q?', options: ['only'] }] },
+     ],
+     ['a question with an empty text', { ...validSettings, questions: [{ text: '', options: ['a', 'b'] }] }],
++    ['durationSec below the minimum (3)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 3 }] }],
++    ['durationSec above the maximum (601)', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 601 }] }],
++    ['a non-integer durationSec', { ...validSettings, questions: [{ text: 'Q?', options: ['a', 'b'], durationSec: 30.5 }] }],
+   ];
+ 
+   it.each(invalidSettings)('rejects %s', (_description, settings) => {
+     expect(validate(settings)).toBe(false);
+   });
+ });
+ 
+ describe('registered event JSON Schemas', () => {
+   const validatorFor = (name: string) => {
+     const entry = manifest.events[name];
+     if (!entry) {
+       throw new Error(`no such event in the quiz manifest: ${name}`);
+     }
+     return ajv.compile(entry.schema);
+   };
+ 
+   const PAYLOAD_CASES: ReadonlyArray<readonly [string, string, unknown, boolean]> = [
+     ['question.opened accepts a valid payload', 'question.opened', { questionIndex: 0 }, true],
++    [
++      'question.opened accepts an ISO openedAt (server-stamped on commit)',
++      'question.opened',
++      { questionIndex: 0, openedAt: '2026-10-19T12:00:00.000Z' },
++      true,
++    ],
++    [
++      'question.opened rejects a non-ISO openedAt',
++      'question.opened',
++      { questionIndex: 0, openedAt: 'in a minute' },
++      false,
++    ],
+     ['question.opened rejects a string questionIndex', 'question.opened', { questionIndex: '0' }, false],
+     ['question.opened rejects an extra key', 'question.opened', { questionIndex: 0, extra: 1 }, false],
+     ['answer.submitted accepts a valid payload', 'answer.submitted', { questionIndex: 0, optionIndex: 1 }, true],
+     ['answer.submitted rejects a missing optionIndex', 'answer.submitted', { questionIndex: 0 }, false],
+     ['answer.submitted rejects a string questionIndex', 'answer.submitted', { questionIndex: '0', optionIndex: 1 }, false],
+     ['question.closed accepts a valid payload', 'question.closed', { questionIndex: 2 }, true],
+     ['question.closed rejects a missing questionIndex', 'question.closed', {}, false],
+     ['game.finish accepts an empty payload', 'game.finish', {}, true],
+     ['game.finish rejects an extra key', 'game.finish', { force: true }, false],
+     ['answer.accepted accepts a valid payload', 'answer.accepted', { questionIndex: 0, actorId: ACTOR }, true],
+diff --git a/packages/app-quiz/src/quiz-manifest.ts b/packages/app-quiz/src/quiz-manifest.ts
+index 9a6b8c8..aaec880 100644
+--- a/packages/app-quiz/src/quiz-manifest.ts
++++ b/packages/app-quiz/src/quiz-manifest.ts
+@@ -4,21 +4,24 @@ import {
+   answerAcceptedPayload,
+   answerSubmittedPayload,
+   finishGamePayload,
+   gameFinishedPayload,
+   questionClosedPayload,
+   questionOpenedPayload,
+   questionRevealedPayload,
+ } from './quiz-events';
+ 
+ export const QUIZ_APP_ID = 'quiz';
+-export const QUIZ_MANIFEST_VERSION = 2;
++// v3: durationSec вопроса + серверный openedAt в question.opened (дизайн/UI-срез,
++// Task 3). Совместимости с v2 нет: реестр знает только v3, комнаты quiz@2 после
++// редеплоя получают APP_MANIFEST_UNKNOWN (принято дизайном §13, прецедент lottery@1).
++export const QUIZ_MANIFEST_VERSION = 3;
+ export function buildQuizManifest(): AppManifest {
+   return defineApp({
+     appId: QUIZ_APP_ID,
+     manifestVersion: QUIZ_MANIFEST_VERSION,
+     capabilities: ['rewards'], // фаза 3: начисления баллов эффектами (design 2026-09-10 §5)
+     appSettings: quizSettingsSchema,
+     events: {
+       'question.opened': { schema: questionOpenedPayload, visibility: 'public', clientInitiated: true },
+       'answer.submitted': { schema: answerSubmittedPayload, visibility: 'module-private', clientInitiated: true },
+       'question.closed': { schema: questionClosedPayload, visibility: 'public', clientInitiated: true },
+diff --git a/packages/app-quiz/src/quiz-settings.ts b/packages/app-quiz/src/quiz-settings.ts
+index c92fc84..7d58cae 100644
+--- a/packages/app-quiz/src/quiz-settings.ts
++++ b/packages/app-quiz/src/quiz-settings.ts
+@@ -1,16 +1,25 @@
+ import { z } from 'zod';
+ 
+ // appSettings (design §3 с правкой плана: видимость top-level,
+ // correctAnswers без аннотации → fail-safe module-private, REQ-CORE-008).
+ export const quizSettingsSchema = z.strictObject({
+   questions: z
+-    .array(z.strictObject({ text: z.string().min(1), options: z.array(z.string().min(1)).min(2) }))
++    .array(
++      z.strictObject({
++        text: z.string().min(1),
++        options: z.array(z.string().min(1)).min(2),
++        // v3: лимит времени на вопрос в секундах (5–600), null = «без лимита».
++        // Input-режим регистрации (C-9.1): defaulted ключ необязателен на гейте,
++        // дефолт 30. Таймер клиента читает значение из публичной проекции.
++        durationSec: z.number().int().min(5).max(600).nullable().default(30),
++      }),
++    )
+     .min(1)
+     .meta({ 'x-visibility': 'public' }),
+   correctAnswers: z.array(z.number().int().min(0)),
+   minAnswerIntervalMs: z.number().int().min(0).meta({ 'x-visibility': 'public' }),
+   scoring: z
+     .strictObject({ base: z.number().int().positive(), step: z.number().int().min(0) })
+     .meta({ 'x-visibility': 'public' }),
+ });
+ export type QuizSettings = z.infer<typeof quizSettingsSchema>;
+diff --git a/packages/app-quiz/src/quiz-state.spec.ts b/packages/app-quiz/src/quiz-state.spec.ts
+index 92a0040..dac8eb7 100644
+--- a/packages/app-quiz/src/quiz-state.spec.ts
++++ b/packages/app-quiz/src/quiz-state.spec.ts
+@@ -34,20 +34,33 @@ describe('initialQuizState', () => {
+ describe('reduceQuiz', () => {
+   it('question.opened opens the question and stamps openedAt from event.recordedAt', () => {
+     const next = reduceQuiz(initialQuizState(), event('question.opened', { questionIndex: 2 }, { recordedAt: '2026-09-09T12:34:56.000Z' }));
+ 
+     expect(next.currentQuestion).toBe(2);
+     expect(next.accepting).toBe(true);
+     expect(next.openedAt).toBe('2026-09-09T12:34:56.000Z');
+     expect(next.answers).toEqual({});
+   });
+ 
++  it('question.opened prefers payload.openedAt (server-stamped at commit) over event.recordedAt', () => {
++    const next = reduceQuiz(
++      initialQuizState(),
++      event(
++        'question.opened',
++        { questionIndex: 1, openedAt: '2026-09-09T12:00:01.000Z' },
++        { recordedAt: '2026-09-09T12:00:02.000Z' },
++      ),
++    );
++
++    expect(next.openedAt).toBe('2026-09-09T12:00:01.000Z');
++  });
++
+   it('answer.submitted records answers of two players with their seq', () => {
+     const opened = reduceQuiz(initialQuizState(), event('question.opened', { questionIndex: 0 }));
+     const withFirst = reduceQuiz(opened, event('answer.submitted', { questionIndex: 0, optionIndex: 1 }, { actorId: ACTOR, seq: 5 }));
+     const withBoth = reduceQuiz(withFirst, event('answer.submitted', { questionIndex: 0, optionIndex: 0 }, { actorId: ACTOR_2, seq: 7 }));
+ 
+     expect(withBoth.answers).toEqual({
+       [ACTOR]: { optionIndex: 1, seq: 5 },
+       [ACTOR_2]: { optionIndex: 0, seq: 7 },
+     });
+     expect(withBoth.currentQuestion).toBe(0);
+diff --git a/packages/app-quiz/src/quiz-state.ts b/packages/app-quiz/src/quiz-state.ts
+index e4f4bcd..7976279 100644
+--- a/packages/app-quiz/src/quiz-state.ts
++++ b/packages/app-quiz/src/quiz-state.ts
+@@ -7,21 +7,21 @@ import type {
+ } from './quiz-events';
+ 
+ // ADR-005: QuizState — проекция из лога событий, чистый редьюсер без побочных
+ // эффектов и глобального состояния процесса (REQ-CORE-004). Payload'ы здесь не
+ // валидируются: реестр провалидировал их до коммита в лог; локальные `as`-касты
+ // лишь сужают Record<string, unknown> к типу соответствующей zod-схемы.
+ 
+ export interface QuizState {
+   readonly currentQuestion: number | null;
+   readonly accepting: boolean;
+-  readonly openedAt: string | null; // ISO из recordedAt question.opened — серверное время
++  readonly openedAt: string | null; // ISO: payload.openedAt (серверный штамп коммита, v3), fallback — recordedAt
+   readonly answers: Readonly<Record<string, { optionIndex: number; seq: number }>>; // текущий вопрос, key=actorId
+   readonly totals: Readonly<Record<string, number>>;
+   readonly finished: boolean;
+ }
+ 
+ export function initialQuizState(): QuizState {
+   return {
+     currentQuestion: null,
+     accepting: false,
+     openedAt: null,
+@@ -32,21 +32,22 @@ export function initialQuizState(): QuizState {
+ }
+ 
+ export function reduceQuiz(state: QuizState, event: AppLogEvent): QuizState {
+   switch (event.shortName) {
+     case 'question.opened': {
+       const p = event.payload as z.infer<typeof questionOpenedPayload>;
+       return {
+         ...state,
+         currentQuestion: p.questionIndex,
+         accepting: true,
+-        openedAt: event.recordedAt,
++        // v3: коммит несёт серверный openedAt; для логов до v3 — recordedAt.
++        openedAt: p.openedAt ?? event.recordedAt,
+         answers: {},
+       };
+     }
+     case 'answer.submitted': {
+       // actorId не-null по контракту команды; защитная ветка — no-op, редьюсер не падает.
+       if (event.actorId === null) {
+         return state;
+       }
+       const p = event.payload as z.infer<typeof answerSubmittedPayload>;
+       return {

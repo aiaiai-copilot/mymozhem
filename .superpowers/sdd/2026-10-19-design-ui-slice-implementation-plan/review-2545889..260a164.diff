@@ -1,0 +1,962 @@
+# Review package: 2545889..HEAD
+
+## Commits
+260a164 feat(core): member.joined — публичное событие ядра при join (EventLogModule выносит EventOutbox/EventLogService из RealtimeModule)
+
+## Files changed
+ apps/server/test/realtime.e2e-spec.ts              | 43 ++++++++++--
+ apps/server/test/transport.e2e-spec.ts             |  7 ++
+ apps/server/test/xff-forwarded-for.e2e-spec.ts     | 10 ++-
+ .../core/src/app-runtime/app-runtime.int-spec.ts   |  2 +
+ packages/core/src/auth/token.service.int-spec.ts   |  9 ++-
+ packages/core/src/membership/membership.module.ts  |  7 +-
+ .../src/membership/membership.service.int-spec.ts  | 78 ++++++++++++++++++++--
+ packages/core/src/membership/membership.service.ts | 11 ++-
+ packages/core/src/realtime/db-down.int-spec.ts     |  2 +
+ .../core/src/realtime/event-commit.int-spec.ts     |  6 ++
+ packages/core/src/realtime/event-log.int-spec.ts   |  7 ++
+ packages/core/src/realtime/event-log.module.ts     | 35 ++++++++++
+ .../core/src/realtime/event-outbox.int-spec.ts     |  2 +-
+ packages/core/src/realtime/realtime.module.ts      | 25 ++-----
+ packages/core/src/room/room.service.int-spec.ts    | 14 ++++
+ 15 files changed, 224 insertions(+), 34 deletions(-)
+
+## Diff
+diff --git a/apps/server/test/realtime.e2e-spec.ts b/apps/server/test/realtime.e2e-spec.ts
+index 134f411..55e3779 100644
+--- a/apps/server/test/realtime.e2e-spec.ts
++++ b/apps/server/test/realtime.e2e-spec.ts
+@@ -182,21 +182,21 @@ describe('Realtime (e2e)', () => {
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     const bus = new RealtimeBus();
+     const outbox = new EventOutbox(db.prisma, bus, new MetricsService());
+     const registry = new AppRegistryService([TEST_APP]);
+     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     roomService = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
++      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger, outbox, eventLog),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+     app = await createApp();
+     port = portOf(app);
+   });
+ 
+   afterAll(async () => {
+     await app.close();
+     await db.stop();
+@@ -234,21 +234,23 @@ describe('Realtime (e2e)', () => {
+     return issued.accessToken;
+   }
+ 
+   it('late-join replay: snapshot несёт видимую проекцию без seq/visibility/cursor (критерий ф.1, REQ-RT-003/011a)', async () => {
+     const { room, accessToken } = await activeRoomWithGuest();
+     const socket = await connect(port, accessToken);
+     const ack = await emitAck<{ ok: true; snapshot: { events: Record<string, unknown>[]; appSettings: Record<string, unknown> } }>(
+       socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id },
+     );
+     expect(ack.ok).toBe(true);
+-    expect(ack.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
++    // Baseline ф.2 пересобран под member.joined (Task 2): join гостя по HTTP —
++    // коммит публичного core-события, оно легально в логе и видимо участнику.
++    expect(ack.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined']);
+     for (const e of ack.snapshot.events) {
+       expect(Object.keys(e).sort()).toEqual(['actorId', 'payload', 'type']);
+     }
+     // appSettings: label — public (виден), answers — module-private (fail-safe, скрыт).
+     expect(ack.snapshot.appSettings).toEqual({ label: 'live' });
+     socket.close();
+   });
+ 
+   it('publish → commit → live-доставка второму подписчику; actorId из токена (REQ-RT-009)', async () => {
+     const { room, accessToken } = await activeRoomWithGuest();
+@@ -265,49 +267,76 @@ describe('Realtime (e2e)', () => {
+     expect(ack.ok).toBe(true);
+     const event = await received;
+     expect(event.type).toBe('test-app.note.posted');
+     expect(event.payload).toEqual({ n: 1, actorId: 'spoofed' }); // payload — данные приложения как есть
+     const claims = tokens.verifyAccessToken(accessToken);
+     expect(event.actorId).toBe(claims.sub); // actorId конверта — только из токена
+     pub.close();
+     sub.close();
+   });
+ 
++  it('guest join по HTTP → подписчику приходит live core.member.joined: public, id-only payload, actorId второго гостя', async () => {
++    const { room, accessToken } = await activeRoomWithGuest();
++    const sub = await connect(port, accessToken);
++    await emitAck(sub, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
++
++    // Waiter навешивается ДО HTTP-join: live-кадр может прийти раньше ack join-ответа
++    // (опыт Quiz-среза). Других событий между subscribe и join не коммитится —
++    // первый EVENT-кадр и есть member.joined второго гостя.
++    const received = waitEvent<{ type: string; payload: unknown; actorId: string | null }>(sub, REALTIME_MESSAGES.EVENT);
++    const joinRes = await app.inject({
++      method: 'POST',
++      url: '/rooms/join',
++      payload: { code: room.code, displayName: 'Второй' },
++    });
++    expect(joinRes.statusCode).toBe(201);
++    const { accessToken: secondToken } = joinResponseSchema.parse(joinRes.json());
++    const secondClaims = tokens.verifyAccessToken(secondToken);
++
++    const event = await received;
++    expect(event.type).toBe('core.member.joined');
++    expect(event.payload).toEqual({ identityId: secondClaims.sub }); // id-only: PII-цикл не затронут
++    expect(event.actorId).toBe(secondClaims.sub);
++    sub.close();
++  });
++
+   it('/metrics отражает realtime-жизнь комнаты: gauge, replay, publish→deliver (REQ-OPS-004)', async () => {
+     // Гистограммы накопительные и app один на файл (другие тесты тоже публикуют) —
+     // ассертим приращение рядов, а не абсолютные значения. Gauge — per-room,
+     // комната свежая, поэтому там абсолютная серия ` 1`.
+     const body0 = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+     const replayBefore = metricSeriesCount(body0, 'mymozhem_replay_duration_seconds_count', 'level', 'public');
+-    const deliverBefore = metricSeriesCount(body0, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public');
+ 
+     const { room, accessToken } = await activeRoomWithGuest();
+     const socket = await connect(port, accessToken);
+     const ack = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+     expect(ack.ok).toBe(true);
+ 
+     const during = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+     expect(during).toContain(`mymozhem_active_connections{roomId="${room.id}"} 1`);
+     expect(metricSeriesCount(during, 'mymozhem_replay_duration_seconds_count', 'level', 'public')).toBe(replayBefore + 1);
+ 
+     // publish client-initiated public-события → fan-out → замер publish→deliver.
+     // Приём события на сокете — маркер: observe в fanOut идёт синхронно следом за emit.
+     const received = waitEvent<{ type: string }>(socket, REALTIME_MESSAGES.EVENT);
+     const pubAck = await emitAck<{ ok: true }>(socket, REALTIME_MESSAGES.PUBLISH, {
+       type: 'test-app.note.posted',
+       payload: { n: 42 },
+     });
+     expect(pubAck.ok).toBe(true);
+     await received;
+     const afterPublish = (await app.inject({ method: 'GET', url: '/metrics' })).body;
++    // Baseline — `during` (после join, до publish): join по HTTP сам коммитит public
++    // core.member.joined через gateway fanOut → observe происходит и без подписчиков
++    // (Task 2); приращение publish→deliver ассертится ровно за publish.
+     expect(metricSeriesCount(afterPublish, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public')).toBe(
+-      deliverBefore + 1,
++      metricSeriesCount(during, 'mymozhem_publish_to_deliver_seconds_count', 'visibility', 'public') + 1,
+     );
+ 
+     socket.close();
+     // disconnect обрабатывается асинхронно: poll /metrics до исчезновения gauge-серии
+     // комнаты (≤ 2 с; серия убирается на нуле — кардинальность = живым комнатам).
+     const deadline = Date.now() + 2000;
+     let body = '';
+     for (;;) {
+       body = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+       if (!body.includes(`mymozhem_active_connections{roomId="${room.id}"}`)) break;
+@@ -373,22 +402,24 @@ describe('Realtime (e2e)', () => {
+     await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.round.hinted', payload: { hint: 'h' } });
+     await emitAck(pub, REALTIME_MESSAGES.PUBLISH, { type: 'test-app.secret.recorded', payload: { n: 9 } });
+     pub.close();
+ 
+     const participant = await connect(port, accessToken);
+     const organizer = await connect(port, await organizerToken(room.id));
+     type Snap = { ok: true; snapshot: { events: { type: string }[]; appSettings: Record<string, unknown> } };
+     const pAck = await emitAck<Snap>(participant, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+     const oAck = await emitAck<Snap>(organizer, REALTIME_MESSAGES.SUBSCRIBE, { roomId: room.id });
+ 
+-    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated']);
+-    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'test-app.round.hinted']);
++    // Baseline ф.2 пересобран под member.joined (Task 2): публичное core-событие
++    // join'а гостя видимо обоим уровням и стоит в логе между activated и hinted.
++    expect(pAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined']);
++    expect(oAck.snapshot.events.map((e) => e.type)).toEqual(['core.room.activated', 'core.member.joined', 'test-app.round.hinted']);
+     // appSettings: label — public (обоим), orgNote — organizer (только организатору),
+     // answers — module-private (никому; fail-safe на неаннотированное свойство).
+     expect(pAck.snapshot.appSettings).toEqual({ label: 'live' });
+     expect(oAck.snapshot.appSettings).toEqual({ label: 'live', orgNote: 'o' });
+     participant.close();
+     organizer.close();
+   });
+ 
+   it('гость не подписывается на чужую комнату (scope REQ-ID-016)', async () => {
+     const { accessToken } = await activeRoomWithGuest();
+diff --git a/apps/server/test/transport.e2e-spec.ts b/apps/server/test/transport.e2e-spec.ts
+index e72254a..f10ab82 100644
+--- a/apps/server/test/transport.e2e-spec.ts
++++ b/apps/server/test/transport.e2e-spec.ts
+@@ -128,20 +128,27 @@ describe('Transport HTTP (e2e)', () => {
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        new EventLogService(
++          new AppRegistryService([]),
++          new EventEmitLimiter(1000),
++          TEST_CONFIG,
++          outbox,
++        ),
+       ),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+   });
+ 
+   afterAll(async () => {
+     await db.stop();
+     restoreEnv('DATABASE_URL', savedDatabaseUrl);
+     restoreEnv('JWT_SECRET', savedJwtSecret);
+diff --git a/apps/server/test/xff-forwarded-for.e2e-spec.ts b/apps/server/test/xff-forwarded-for.e2e-spec.ts
+index 625e540..7b38691 100644
+--- a/apps/server/test/xff-forwarded-for.e2e-spec.ts
++++ b/apps/server/test/xff-forwarded-for.e2e-spec.ts
+@@ -89,21 +89,29 @@ describe('X-Forwarded-For (e2e, REQ-ID-006 per-IP семантика)', () => {
+     db = await startTestDb();
+     process.env.JWT_SECRET = TEST_CONFIG.JWT_SECRET;
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     // Комнаты — через core-сервисы вручную (тот же приём, что transport.e2e).
+     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+       outbox,
+       new AppRegistryService([]),
+-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
++      new MembershipService(
++        db.prisma,
++        new IdentityService(db.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++        fakeLogger,
++        outbox,
++        new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
++      ),
+       TEST_CONFIG,
+     );
+     tokens = new TokenService(db.prisma, TEST_CONFIG);
+   });
+ 
+   afterAll(async () => {
+     await db.stop();
+     restoreEnv('DATABASE_URL', savedDatabaseUrl);
+     restoreEnv('JWT_SECRET', savedJwtSecret);
+   });
+diff --git a/packages/core/src/app-runtime/app-runtime.int-spec.ts b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+index 13ea556..f1fd32c 100644
+--- a/packages/core/src/app-runtime/app-runtime.int-spec.ts
++++ b/packages/core/src/app-runtime/app-runtime.int-spec.ts
+@@ -240,20 +240,22 @@ describe('AppRuntimeService (командный хост, design 2026-09-09 §2)
+     registry = new AppRegistryService([TEST_APP, TEST_APP_V2, TEST_APP_CAPABLE]);
+     bus = new RealtimeBus();
+     outbox = new EventOutbox(db.prisma, bus, new MetricsService());
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     membership = new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+       fakeLogger,
++      outbox,
++      eventLog,
+     );
+     rooms = new RoomService(db.prisma, eventLog, outbox, registry, membership, TEST_CONFIG);
+   }, 120000);
+ 
+   beforeEach(() => {
+     // Свежий модуль и кэш на тест: observedSums — шпион, кэш не должен перетекать
+     // между тестами (комнаты пересоздаются, roomId свежие — но дешевле гарантировать).
+     testModule = new TestAppRuntime();
+     runtime = new AppRuntimeService(
+       db.prisma,
+diff --git a/packages/core/src/auth/token.service.int-spec.ts b/packages/core/src/auth/token.service.int-spec.ts
+index 718d087..82834e1 100644
+--- a/packages/core/src/auth/token.service.int-spec.ts
++++ b/packages/core/src/auth/token.service.int-spec.ts
+@@ -27,28 +27,35 @@ describe('TokenService.rotate (REQ-ID-007/016)', () => {
+   // session-issuing flow in this slice (design §4).
+   const seedGuestWithRoom = async () => {
+     const room = await roomService.create(ORG);
+     const joined = await membership.join({ code: room.code, displayName: 'Гость', ip: IP });
+     return { room, identity: joined.identity };
+   };
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
++    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     membership = new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+       fakeLogger,
++      outbox,
++      new EventLogService(
++        new AppRegistryService([]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++        outbox,
++      ),
+     );
+-    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+       new EventLogService(
+         new AppRegistryService([]),
+         new EventEmitLimiter(1000),
+         TEST_CONFIG,
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+diff --git a/packages/core/src/membership/membership.module.ts b/packages/core/src/membership/membership.module.ts
+index 0c5958b..dd3f6ad 100644
+--- a/packages/core/src/membership/membership.module.ts
++++ b/packages/core/src/membership/membership.module.ts
+@@ -1,22 +1,27 @@
+ import { Module } from '@nestjs/common';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { ConfigModule } from '../config/config.module';
+ import { IdentityModule } from '../identity/identity.module';
+ import { PinoLoggerModule } from '../observability/pino-logger.module';
++import { EventLogModule } from '../realtime/event-log.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { MembershipService } from './membership.service';
+ import { JoinRateLimiter } from './join-rate-limiter';
+ 
++// EventLogModule — напрямую, не через RealtimeModule: RealtimeModule импортирует
++// MembershipModule (gateway), обратная дуга была бы DI-циклом (дизайн UI-среза,
++// Task 2). MembershipService коммитит core.member.joined в join-tx через
++// EventLogService/EventOutbox.
+ @Module({
+-  imports: [PrismaModule, ConfigModule, IdentityModule, PinoLoggerModule],
++  imports: [PrismaModule, ConfigModule, IdentityModule, PinoLoggerModule, EventLogModule],
+   providers: [
+     {
+       provide: JoinRateLimiter,
+       useFactory: (config: AppConfig) => new JoinRateLimiter(config.JOIN_RATE_LIMIT_IP),
+       inject: [APP_CONFIG],
+     },
+     MembershipService,
+   ],
+   exports: [MembershipService],
+ })
+diff --git a/packages/core/src/membership/membership.service.int-spec.ts b/packages/core/src/membership/membership.service.int-spec.ts
+index 357bd65..449ba0e 100644
+--- a/packages/core/src/membership/membership.service.int-spec.ts
++++ b/packages/core/src/membership/membership.service.int-spec.ts
+@@ -1,12 +1,13 @@
+ import { startTestDb, type TestDb } from '../testing/postgres.testcontainer';
+ import { seedIdentity } from '../testing/seed-identity';
++import { readRoomLog } from '../testing/read-room-log';
+ import { TEST_CONFIG, fakeLogger } from '../testing/test-config';
+ import { EventLogService } from '../realtime/event-log.service';
+ import { EventEmitLimiter } from '../realtime/event-emit-limiter';
+ import { RealtimeBus } from '../realtime/realtime-bus';
+ import { EventOutbox } from '../realtime/event-outbox';
+ import { MetricsService } from '../observability/metrics.service';
+ import { AppRegistryService } from '../app-registry/app-registry.service';
+ import { RoomService } from '../room/room.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { MembershipService } from './membership.service';
+@@ -24,28 +25,32 @@ import { TokenService } from '../auth/token.service';
+ 
+ const ORG = '00000000-0000-0000-0000-000000000001';
+ const P1 = '00000000-0000-0000-0000-000000000002';
+ const IP = '203.0.113.7';
+ const IP2 = '198.51.100.9';
+ 
+ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   let db: TestDb;
+   let roomService: RoomService;
+ 
+-  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) =>
+-    new MembershipService(
++  const makeMembership = (overrides: { participantLimit?: number; rateLimit?: number } = {}) => {
++    const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
++    return new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(overrides.rateLimit ?? 1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+       fakeLogger,
++      outbox,
++      new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+     );
++  };
+ 
+   beforeAll(async () => {
+     db = await startTestDb();
+     await seedIdentity(db.prisma, { id: ORG, email: 'org@example.test' });
+     // ADR-012: второй живой REGISTERED в одной БД запрещён ("Identity_single_registered_key")
+     // — участник P1 посеян гостем; тесты ниже kind-агностичны (raw membership + lookup).
+     await seedIdentity(db.prisma, { id: P1, kind: 'GUEST', email: 'p1@example.test' });
+     const outbox = new EventOutbox(db.prisma, new RealtimeBus(), new MetricsService());
+     roomService = new RoomService(
+       db.prisma,
+@@ -56,20 +61,27 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        new EventLogService(
++          new AppRegistryService([]),
++          new EventEmitLimiter(1000),
++          TEST_CONFIG,
++          outbox,
++        ),
+       ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+@@ -281,20 +293,64 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+   });
+ 
+   it('does not throttle other IPs', async () => {
+     const room = await roomService.create(ORG);
+     const service = makeMembership({ rateLimit: 1 });
+     await service.join({ code: room.code, displayName: 'A', ip: IP });
+     const other = await service.join({ code: room.code, displayName: 'B', ip: IP2 });
+     expect(other.membership.role).toBe('PARTICIPANT');
+   });
+ 
++  describe('core.member.joined — публичное событие ядра при join (UI-срез, Task 2)', () => {
++    it('guest-join коммитит core.member.joined в той же tx: payload.identityId, actorId, visibility public', async () => {
++      const room = await roomService.create(ORG);
++      const result = await makeMembership().join({ code: room.code, displayName: 'Саша', ip: IP });
++      const log = await readRoomLog(db.prisma, room.id);
++      // create комнаты в лог не пишет — единственное событие комнаты: join гостя.
++      expect(log).toHaveLength(1);
++      expect(log[0].type).toBe('core.member.joined');
++      expect(log[0].payload).toEqual({ identityId: result.identity.id });
++      expect(log[0].actorId).toBe(result.identity.id);
++      expect(log[0].visibility).toBe('public');
++    });
++
++    it('spectator-join тоже эмитит core.member.joined', async () => {
++      const room = await roomService.create(ORG);
++      const result = await makeMembership().join({
++        code: room.code,
++        displayName: 'Зритель',
++        ip: IP,
++        role: 'spectator',
++      });
++      const log = await readRoomLog(db.prisma, room.id);
++      expect(log).toHaveLength(1);
++      expect(log[0].type).toBe('core.member.joined');
++      expect(log[0].payload).toEqual({ identityId: result.identity.id });
++      expect(log[0].actorId).toBe(result.identity.id);
++    });
++
++    it('отказанный join (rejoin-блок exclusion по IP, REQ-ID-006) события НЕ даёт', async () => {
++      const room = await roomService.create(ORG);
++      const first = await makeMembership().join({ code: room.code, displayName: 'Первый', ip: IP });
++      // Exclusion по IP первого гостя — строка, которую пишет exclude (rejoin-блок).
++      await db.prisma.exclusion.create({
++        data: { roomId: room.id, identityId: first.identity.id, ip: IP, excludedBy: ORG },
++      });
++      await expect(
++        makeMembership().join({ code: room.code, displayName: 'Второй', ip: IP }),
++      ).rejects.toBeInstanceOf(RoomJoinDeniedError);
++      const log = await readRoomLog(db.prisma, room.id);
++      // Отказ — до tx: в логе осталось только событие первого, успешного join.
++      expect(log.filter((e) => e.type === 'core.member.joined')).toHaveLength(1);
++    });
++  });
++
+   describe('findActiveMembership', () => {
+     it('returns the membership of a live member in a live room', async () => {
+       const room = await roomService.create(ORG);
+       await db.prisma.membership.create({
+         data: { roomId: room.id, identityId: P1, role: 'PARTICIPANT' },
+       });
+       const found = await makeMembership().findActiveMembership(room.id, P1);
+       expect(found?.role).toBe('PARTICIPANT');
+     });
+ 
+@@ -390,39 +446,51 @@ describe('MembershipService.join (REQ-ID-002/003/006/013)', () => {
+       expect(byIdentity.get(swept.identity.id)).toMatchObject({ role: 'PARTICIPANT', displayName: null });
+       expect(byIdentity.has(excluded.identity.id)).toBe(false);
+     });
+   });
+ });
+ 
+ describe('MembershipService.exclude (REQ-ID-006, REQ-SEC-003)', () => {
+   let db2: TestDb;
+   let roomService2: RoomService;
+ 
+-  const makeMembership2 = (overrides: { participantLimit?: number } = {}) =>
+-    new MembershipService(
++  const makeMembership2 = (overrides: { participantLimit?: number } = {}) => {
++    const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
++    return new MembershipService(
+       db2.prisma,
+       new IdentityService(db2.prisma),
+       new JoinRateLimiter(1000),
+       { ...TEST_CONFIG, ROOM_PARTICIPANT_LIMIT: overrides.participantLimit ?? TEST_CONFIG.ROOM_PARTICIPANT_LIMIT },
+       fakeLogger,
++      outbox,
++      new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+     );
++  };
+ 
+   beforeAll(async () => {
+     db2 = await startTestDb();
+     await seedIdentity(db2.prisma, { id: ORG, email: 'org2@example.test' });
+     const outbox = new EventOutbox(db2.prisma, new RealtimeBus(), new MetricsService());
+     roomService2 = new RoomService(
+       db2.prisma,
+       new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
+       outbox,
+       new AppRegistryService([]),
+-      new MembershipService(db2.prisma, new IdentityService(db2.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
++      new MembershipService(
++        db2.prisma,
++        new IdentityService(db2.prisma),
++        new JoinRateLimiter(1000),
++        TEST_CONFIG,
++        fakeLogger,
++        outbox,
++        new EventLogService(new AppRegistryService([]), new EventEmitLimiter(1000), TEST_CONFIG, outbox),
++      ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db2.stop();
+   });
+ 
+   afterEach(async () => {
+     await db2.prisma.$executeRawUnsafe(
+diff --git a/packages/core/src/membership/membership.service.ts b/packages/core/src/membership/membership.service.ts
+index 2435f34..7281f44 100644
+--- a/packages/core/src/membership/membership.service.ts
++++ b/packages/core/src/membership/membership.service.ts
+@@ -1,19 +1,21 @@
+ import { Inject, Injectable } from '@nestjs/common';
+ import type { Identity, MemberRole, Membership, Prisma } from '@prisma/client';
+ import { displayNameSchema, type DrawPoolEntry } from '@mymozhem/sdk';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { IdentityService } from '../identity/identity.service';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { PinoLogger } from '../observability/pino-logger.module';
+ import { JoinRateLimiter } from './join-rate-limiter';
++import { EventOutbox } from '../realtime/event-outbox';
++import { EventLogService } from '../realtime/event-log.service';
+ import { generatePseudonym } from './pseudonym';
+ import {
+   ActorNotMemberError,
+   ActorNotOrganizerError,
+   JoinRateLimitedError,
+   RoomJoinDeniedError,
+   RoomParticipantLimitReachedError,
+   TargetNotExcludableError,
+   TargetNotMemberError,
+ } from './membership.errors';
+@@ -31,20 +33,22 @@ export interface JoinResult {
+ export type AccessRevokedHandler = (identityId: string, roomId: string) => void | Promise<void>;
+ 
+ @Injectable()
+ export class MembershipService {
+   constructor(
+     private readonly prisma: PrismaService,
+     private readonly identity: IdentityService,
+     private readonly joinRateLimiter: JoinRateLimiter,
+     @Inject(APP_CONFIG) private readonly config: AppConfig,
+     private readonly logger: PinoLogger,
++    private readonly outbox: EventOutbox,
++    private readonly eventLog: EventLogService,
+   ) {
+     this.logger.setContext(MembershipService.name);
+   }
+ 
+   // Реестр обработчиков отзыва доступа (REQ-SEC-003): realtime-модуль подписывает
+   // RealtimeGateway.revokeRoomAccess при инициализации (паттерн RealtimeBus.subscribe).
+   // In-memory легален при одной реплике (REQ-OPS-005); состояние — поле экземпляра
+   // (REQ-CORE-004). Любой вызывающий exclude получает разрыв подписок структурно.
+   private readonly accessRevokedHandlers: AccessRevokedHandler[] = [];
+ 
+@@ -241,35 +245,40 @@ export class MembershipService {
+     // в заполненную участниками комнату ему не закрыт (зритель не нагружает арбитраж).
+     if (params.role !== 'spectator') {
+       const participantCount = await this.prisma.membership.count({
+         where: { roomId: room.id, role: 'PARTICIPANT', deletedAt: null },
+       });
+       if (participantCount >= this.config.ROOM_PARTICIPANT_LIMIT) {
+         throw new RoomParticipantLimitReachedError(`room ${room.id} is full`);
+       }
+     }
+ 
+-    return this.prisma.$transaction(async (tx) => {
++    return this.outbox.run(async (tx) => {
+       // Псевдоним генерируется ВНУТРИ tx: чтение ростера и createGuest в одной
+       // транзакции — retry видит свежие join этого же запроса.
+       const name = providedName ?? generatePseudonym(await this.takenDisplayNames(tx, room.id));
+       const identity = await this.identity.createGuest(name, tx);
+       const membership = await tx.membership.create({
+         data: {
+           roomId: room.id,
+           identityId: identity.id,
+           joinIp: params.ip,
+           // REQ-ID-011: самоназначение зрителем (фаза 2). Только два wire-значения
+           // (SDK-схема), маппинг здесь — единственная точка.
+           role: params.role === 'spectator' ? 'SPECTATOR' : 'PARTICIPANT',
+         },
+       });
++      // core.member.joined (UI-срез): публичное событие ядра, id-only payload (PII-
++      // цикл не затронут). Коммит — последним шагом tx: advisory lock лога всегда
++      // leaf-most (конвенция порядка блокировок, HANDOFF). Атомарность «join + лог»
++      // — та же tx (REQ-DEV-008); доставка — пост-коммит через outbox (design §5).
++      await this.eventLog.commitCoreEvent(tx, room.id, 'member.joined', { identityId: identity.id }, identity.id);
+       return { membership, identity, displayName: name };
+     });
+   }
+ 
+   // Имена активного ростера комнаты — для retry псевдонима (решение §0.1).
+   // Чтение в той же tx, что и создание гостя: видим свежие join этого запроса.
+   private async takenDisplayNames(tx: Prisma.TransactionClient, roomId: string): Promise<Set<string>> {
+     const rows = await tx.membership.findMany({
+       where: { roomId, deletedAt: null },
+       select: { identity: { select: { displayName: true } } },
+diff --git a/packages/core/src/realtime/db-down.int-spec.ts b/packages/core/src/realtime/db-down.int-spec.ts
+index c861408..02a632f 100644
+--- a/packages/core/src/realtime/db-down.int-spec.ts
++++ b/packages/core/src/realtime/db-down.int-spec.ts
+@@ -77,20 +77,22 @@ describe('Fail-closed при недоступной БД (REQ-DEV-008)', () => {
+   function wire(p: PrismaService) {
+     const registry = new AppRegistryService([TEST_APP]);
+     const outbox = new EventOutbox(p, new RealtimeBus(), new MetricsService());
+     const eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     const membership = new MembershipService(
+       p,
+       new IdentityService(p),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+       fakeLogger,
++      outbox,
++      eventLog,
+     );
+     const rooms = new RoomService(p, eventLog, outbox, registry, membership, TEST_CONFIG);
+     return { registry, outbox, eventLog, membership, rooms };
+   }
+ 
+   async function activeRoom(rooms: RoomService) {
+     const room = await rooms.create(ORG);
+     await rooms.configure(room.id, {
+       appId: 'test-app',
+       manifestVersion: 1,
+diff --git a/packages/core/src/realtime/event-commit.int-spec.ts b/packages/core/src/realtime/event-commit.int-spec.ts
+index f976f79..43724e0 100644
+--- a/packages/core/src/realtime/event-commit.int-spec.ts
++++ b/packages/core/src/realtime/event-commit.int-spec.ts
+@@ -80,20 +80,22 @@ describe('EventLogService.commitAppEvent', () => {
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        eventLog,
+       ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+@@ -315,20 +317,22 @@ describe('EventLogService.commitAppEvent — rate limit (REQ-RT-014)', () => {
+       db.prisma,
+       limitedLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        limitedLog,
+       ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+@@ -402,20 +406,22 @@ describe('EventLogService.commitAppEvent — concurrency (REQ-RT-007)', () => {
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        eventLog,
+       ),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+diff --git a/packages/core/src/realtime/event-log.int-spec.ts b/packages/core/src/realtime/event-log.int-spec.ts
+index eed6f49..c740ff2 100644
+--- a/packages/core/src/realtime/event-log.int-spec.ts
++++ b/packages/core/src/realtime/event-log.int-spec.ts
+@@ -36,20 +36,27 @@ describe('EventLogService.commitCoreEvent', () => {
+         outbox,
+       ),
+       outbox,
+       new AppRegistryService([validManifests[0]]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        outbox,
++        new EventLogService(
++          new AppRegistryService([validManifests[0]]),
++          new EventEmitLimiter(1000),
++          TEST_CONFIG,
++          outbox,
++        ),
+       ),
+       TEST_CONFIG,
+     );
+     eventLog = new EventLogService(
+       new AppRegistryService([validManifests[0]]),
+       new EventEmitLimiter(1000),
+       TEST_CONFIG,
+       outbox,
+     );
+   }, 120000);
+diff --git a/packages/core/src/realtime/event-log.module.ts b/packages/core/src/realtime/event-log.module.ts
+new file mode 100644
+index 0000000..d4cab23
+--- /dev/null
++++ b/packages/core/src/realtime/event-log.module.ts
+@@ -0,0 +1,35 @@
++import { Module } from '@nestjs/common';
++import { MetricsModule } from '../observability/metrics.module';
++import { ConfigModule } from '../config/config.module';
++import { PrismaModule } from '../prisma/prisma.module';
++import { APP_CONFIG } from '../config/config.tokens';
++import type { AppConfig } from '../config/config.schema';
++import { EventLogService } from './event-log.service';
++import { EventEmitLimiter } from './event-emit-limiter';
++import { RealtimeBus } from './realtime-bus';
++import { EventOutbox } from './event-outbox';
++
++// Event-log примитивы, вынесенные из RealtimeModule (дизайн UI-среза, Task 2):
++// MembershipService коммитит core.member.joined в join-tx, а RealtimeModule
++// импортирует MembershipModule (gateway) — прямая зависимость MembershipModule →
++// RealtimeModule была бы циклом. socket.io здесь НЕ импортируется (REQ-RT-006:
++// server-библиотека — только в gateway-коде RealtimeModule).
++// AppRegistryService (зависимость EventLogService) — global из AppRegistryModule.register,
++// поэтому в imports его нет. PrismaModule нужен EventOutbox'у (runner владеет
++// транзакцией); сам примитив записи по-прежнему работает на транзакционном клиенте
++// вызывающего — атомарность «действие + лог» (REQ-DEV-008) не меняется.
++@Module({
++  imports: [PrismaModule, ConfigModule, MetricsModule],
++  providers: [
++    {
++      provide: EventEmitLimiter,
++      useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
++      inject: [APP_CONFIG],
++    },
++    RealtimeBus,
++    EventOutbox,
++    EventLogService,
++  ],
++  exports: [RealtimeBus, EventOutbox, EventLogService, EventEmitLimiter],
++})
++export class EventLogModule {}
+diff --git a/packages/core/src/realtime/event-outbox.int-spec.ts b/packages/core/src/realtime/event-outbox.int-spec.ts
+index 5866e15..7df51d4 100644
+--- a/packages/core/src/realtime/event-outbox.int-spec.ts
++++ b/packages/core/src/realtime/event-outbox.int-spec.ts
+@@ -61,21 +61,21 @@ describe('EventOutbox', () => {
+     const registry = new AppRegistryService([TEST_APP]);
+     bus = new RealtimeBus();
+     metrics = new MetricsService();
+     outbox = new EventOutbox(db.prisma, bus, metrics);
+     eventLog = new EventLogService(registry, new EventEmitLimiter(1000), TEST_CONFIG, outbox);
+     rooms = new RoomService(
+       db.prisma,
+       eventLog,
+       outbox,
+       registry,
+-      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger),
++      new MembershipService(db.prisma, new IdentityService(db.prisma), new JoinRateLimiter(1000), TEST_CONFIG, fakeLogger, outbox, eventLog),
+       TEST_CONFIG,
+     );
+   }, 120000);
+ 
+   afterAll(async () => {
+     await db.stop();
+   });
+ 
+   afterEach(async () => {
+     await db.prisma.$executeRawUnsafe('TRUNCATE TABLE room."Room" CASCADE');
+diff --git a/packages/core/src/realtime/realtime.module.ts b/packages/core/src/realtime/realtime.module.ts
+index 23343ff..0ca1f78 100644
+--- a/packages/core/src/realtime/realtime.module.ts
++++ b/packages/core/src/realtime/realtime.module.ts
+@@ -1,48 +1,37 @@
+ import { Module } from '@nestjs/common';
+ import { MetricsModule } from '../observability/metrics.module';
+ import { PinoLoggerModule } from '../observability/pino-logger.module';
+ import { ConfigModule } from '../config/config.module';
+ import { PrismaModule } from '../prisma/prisma.module';
+ import { AuthModule } from '../auth/auth.module';
+ import { MembershipModule } from '../membership/membership.module';
+ import { APP_CONFIG } from '../config/config.tokens';
+ import type { AppConfig } from '../config/config.schema';
+ import { JoinRateLimiter } from '../membership/join-rate-limiter';
+-import { EventLogService } from './event-log.service';
+-import { EventEmitLimiter } from './event-emit-limiter';
+-import { RealtimeBus } from './realtime-bus';
+-import { EventOutbox } from './event-outbox';
++import { EventLogModule } from './event-log.module';
+ import { ProjectionService } from './projection.service';
+ import { SubscriptionRegistry } from './subscription-registry';
+ import { RealtimeGateway } from './realtime.gateway';
+ import { RECONNECT_RATE_LIMITER } from './realtime.tokens';
+ 
+-// PrismaModule нужен EventOutbox'у (runner владеет транзакцией); сам примитив
+-// записи по-прежнему работает на транзакционном клиенте вызывающего — атомарность
+-// «действие + лог» (REQ-DEV-008) не меняется. Единственный модуль ядра, импортирующий
+-// socket.io (REQ-RT-006 + boundary-правило).
++// Единственный модуль ядра, импортирующий socket.io (REQ-RT-006 + boundary-правило).
++// Event-log примитивы (RealtimeBus/EventOutbox/EventLogService/EventEmitLimiter) живут
++// в EventLogModule и реэкспортируются отсюда — потребители (Room/Rewards/AppRuntime)
++// не меняются; MembershipModule тянет их напрямую из EventLogModule без DI-цикла.
+ @Module({
+-  imports: [MetricsModule, ConfigModule, PrismaModule, AuthModule, MembershipModule, PinoLoggerModule],
++  imports: [MetricsModule, ConfigModule, PrismaModule, AuthModule, MembershipModule, PinoLoggerModule, EventLogModule],
+   providers: [
+-    {
+-      provide: EventEmitLimiter,
+-      useFactory: (config: AppConfig) => new EventEmitLimiter(config.EVENT_EMIT_RATE_LIMIT_PER_MIN),
+-      inject: [APP_CONFIG],
+-    },
+     {
+       // REQ-RT-015 (объём v1.3): отдельный инстанс — состояние не делится с
+       // join/refresh лимитерами; бэкофф/режимы — ф.4.
+       provide: RECONNECT_RATE_LIMITER,
+       useFactory: (config: AppConfig) => new JoinRateLimiter(config.RECONNECT_RATE_LIMIT_PER_MIN),
+       inject: [APP_CONFIG],
+     },
+-    RealtimeBus,
+-    EventOutbox,
+-    EventLogService,
+     ProjectionService,
+     SubscriptionRegistry,
+     RealtimeGateway,
+   ],
+-  exports: [EventLogService, EventOutbox],
++  exports: [EventLogModule],
+ })
+ export class RealtimeModule {}
+diff --git a/packages/core/src/room/room.service.int-spec.ts b/packages/core/src/room/room.service.int-spec.ts
+index 480747b..0e4a84b 100644
+--- a/packages/core/src/room/room.service.int-spec.ts
++++ b/packages/core/src/room/room.service.int-spec.ts
+@@ -39,20 +39,27 @@ const makeService = (db: TestDb) => {
+       outbox,
+     ),
+     outbox,
+     new AppRegistryService([validManifests[0]]),
+     new MembershipService(
+       db.prisma,
+       new IdentityService(db.prisma),
+       new JoinRateLimiter(1000),
+       TEST_CONFIG,
+       fakeLogger,
++      outbox,
++      new EventLogService(
++        new AppRegistryService([validManifests[0]]),
++        new EventEmitLimiter(1000),
++        TEST_CONFIG,
++        outbox,
++      ),
+     ),
+     TEST_CONFIG,
+   );
+ };
+ 
+ const configureQuiz = (service: RoomService, roomId: string) =>
+   service.configure(roomId, { appId: 'quiz', manifestVersion: 1, settings: QUIZ_SETTINGS });
+ 
+ describe('RoomService lifecycle', () => {
+   let db: TestDb;
+@@ -571,20 +578,27 @@ describe('RoomService activation gate (REQ-RT-004, REQ-CORE-007)', () => {
+         emptyRegistryOutbox,
+       ),
+       emptyRegistryOutbox,
+       new AppRegistryService([]),
+       new MembershipService(
+         db.prisma,
+         new IdentityService(db.prisma),
+         new JoinRateLimiter(1000),
+         TEST_CONFIG,
+         fakeLogger,
++        emptyRegistryOutbox,
++        new EventLogService(
++          new AppRegistryService([]),
++          new EventEmitLimiter(1000),
++          TEST_CONFIG,
++          emptyRegistryOutbox,
++        ),
+       ),
+       TEST_CONFIG,
+     );
+     const err = await emptyRegistryService.activate(room.id).catch((e: unknown) => e);
+     expect(err).toBeInstanceOf(AppManifestUnknownError);
+     const reread = await db.prisma.room.findUniqueOrThrow({ where: { id: room.id } });
+     expect(reread.status).toBe('DRAFT');
+     expect(await readRoomLog(db.prisma, room.id)).toHaveLength(0);
+   });
+ 
