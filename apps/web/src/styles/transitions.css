@@ -1,5 +1,6 @@
-/* Кнопочная система состояний — перенос из принятого мокапа
-   component-states-live: hover 140мс только на устройствах с настоящей мышью,
+/* Система состояний и контент-анимаций — перенос из принятого мокапа
+   component-states-live: кнопки (ниже) и дорожки «забега» (в конце файла).
+   Кнопки: hover 140мс только на устройствах с настоящей мышью,
    active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
    смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
    Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
@@ -77,7 +78,62 @@
 }
 .btn-scene b { color: var(--gold); margin-right: 10px; }
 
-/* «Уменьшить движение» в системе гасит переходы состояний */
+/* Дорожки «забега» — перенос из мокапов component-states-live /
+   tracks-scene-projector-participant / console-reveal-tracks. fill — итог без
+   прироста, нормированный к лидеру; gain — золотой сегмент прироста последнего
+   раунда; оба анимируются width за var(--t-race) (контент-анимация, не hover).
+   Полотно дорожки зависит от контура: сцена — --track-canvas-dark, консоль —
+   --track-canvas-light. Заливка одна на оба контура — var(--track-fill)
+   (бриф T6; в мокапе console-reveal-tracks fill был --console-primary —
+   осознанное расхождение мокапов, берём токен темы). */
+
+.race-tracks .track-row { padding: 7px 0 9px; }
+.race-tracks .tr-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.race-tracks .tr-name { font-weight: 700; font-size: 14px; }
+.race-tracks .tr-name .me {
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+.race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
+.race-tracks .tr-lane {
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  display: flex;
+}
+.race-tracks.contour-scene { color: var(--scene-text); }
+.race-tracks.contour-scene .tr-lane { background: var(--track-canvas-dark); }
+.race-tracks.contour-scene .tr-more { color: var(--muted-scene); }
+.race-tracks.contour-console { color: var(--ink); }
+.race-tracks.contour-console .tr-lane { background: var(--track-canvas-light); }
+.race-tracks.contour-console .tr-more { color: var(--muted); }
+.race-tracks .fill {
+  background: var(--track-fill);
+  border-radius: 5px 0 0 5px;
+  height: 100%;
+  transition: width var(--t-race) ease-out;
+}
+/* Без прироста — закруглённый правый конец у fill */
+.race-tracks .fill.solo { border-radius: 5px; }
+.race-tracks .gain {
+  background: var(--gold);
+  height: 100%;
+  border-radius: 0 5px 5px 0;
+  transition: width var(--t-race) ease-out;
+}
+.race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
+
+/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации */
 @media (prefers-reduced-motion: reduce) {
   .btn { transition-duration: 0ms !important; }
+  .race-tracks .fill,
+  .race-tracks .gain { transition-duration: 0ms !important; }
 }
