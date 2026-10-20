@@ -38,7 +38,18 @@ Task 3 review: первый ревьюер умер mid-run (output stale >1ч, 
 Task 3 review: второй ревьюер умер тем же паттерном (~25 мин, stale 159 байт) — оба погибли на ad-hoc shell-экспериментах вокруг Ajv («pnpm doesn't hoist ajv to root»). Третий диспатч с жёсткими правилами среды: никаких install/npx/node -e/scratch-файлов; единственная эмпирика — `pnpm --filter @mymozhem/app-quiz test`; Ajv-вопрос решать статическим чтением (new Ajv/addFormats в sdk/app-quiz, toRegisteredSchema).
 Task 3 review: третий ревьюер умер (~25 мин) — установил факт: контракт-спека конструирует `new Ajv2020({ allErrors: true, strict: false })` БЕЗ addFormats (format "date-time" в Ajv-артефакте игнорируется при strict:false). Четвёртый (fable) умер тем же паттерном — успел закрыть вопрос raw-JSON: handler перепарсивает settings (quiz-handlers.ts:191), дефолты материализуются на parse — carry-сoncern имплементера снят; ушёл в последнюю проверку (repo-wide ripple grep), ревью шло к чистому вердикту, но вердикта НЕТ.
 
-## СТОП СЕССИИ (2026-10-20 ~05:45) — environmentная нестабильность
+## ДОРЕВЬЮ T3 (сессия 48, 2026-10-20) — ревью ЧИСТОЕ, вердикт Ready to merge: Yes
+
+Один диспатч (sonnet) по протоколу стоп-леджера: жёсткие правила среды соблюдены, смертей не было (~7 мин, 32 tool-вызова). Все три открытых вопроса разрешены в пользу реализации:
+1. **Ajv/addFormats — кейс НЕ вакуумен.** Премisa умершего ревьюера верна (спека: `new Ajv2020({allErrors:true, strict:false})` без addFormats, format "date-time" игнорируется — warning виден в выводе сьюта), но вывод неверен: zod v4 `toJSONSchema` для `z.iso.datetime()` эмитит **`pattern` рядом с `format`** (`$ZodCheckStringFormat` → `bag.patterns`, zod@4.4.3 v4/core/checks.cjs:438-441 → json-schema-processors.cjs:37-40); Ajv форсит `pattern` нативно — `'in a minute'` отвергается независимо от format-поддержки. Сьют перепрогнан ревьюером: 97/97.
+2. **Ripple grep — полон.** Собственный grep ревьюера: все `manifestVersion: 2` — легитимно не-quiz (lottery-манифест, TEST_APP_V2, generic wire shape, локальная SDK-фикстура); потребители `QUIZ_MANIFEST_VERSION` едут на константе; web-референсы, публикующие `{questionIndex}` без openedAt, легальны (wire-optional + reducer fallback). Стейла нет.
+3. **raw-JSON — documented carry, не дефект.** `quiz-handlers.ts:191` перепарсивает settings на каждом dispatch (дефолты материализуются); core-проекция (projection.service.ts:60-64) фильтрует сырой JSON по ключу без re-parse → потребители T5/T9 обязаны schema-parse или `?? 30` (carry подтверждён, потребителей ещё нет).
+
+Task 3: **complete** (cd88edd). Minor (deferred): Ajv-харнес контракт-спеки расходится с прод-гейтом (core app-registry.service.ts:27-28 использует addFormats, спека — нет): сегодня безвредно (pattern покрывает date-time), но будущий format-only констрейнт без pattern-трассы будет форситься в проде и молча не тестироваться здесь + warning-шум в выводе. Fix при следующем касании: addFormats(ajv) (зависимость уже в workspace) или комментарий об осознанной дивергенции.
+
+Рекомендации ревьюера (не гейтят): T5/T9 — читать durationSec через `quizSettingsSchema.parse` на границе проекции (дефолт single-sourced в схеме), не `?? 30` по компонентам; опционально ужесточить quiz.e2e:399 с `expect.any(String)` до ISO-regex.
+
+## СТОП СЕССИИ (2026-10-20 ~05:45) — environmentная нестабильность [РАЗРЕШЕНО доревью выше]
 
 Ruling (стоп): после 4 подряд смертей таск-ревьюеров T3 по единому паттерну (~25 мин жизни, output 159 байт, статус «running» навсегда; sonnet ×3 + fable ×1) редиспатчи прекращены — причина environmentная (класс watchdog/quota-смертей из опыта сессий 37–42), а не в задаче. T1/T2 прошли полный цикл чисто до ~00:30; деградация началась после полуночи. Cost if wrong: одна лишняя сессия на доревью T3 — приемлемо против бесконечного редиспатча.
 
