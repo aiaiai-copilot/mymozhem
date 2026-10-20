@@ -184,7 +184,7 @@ export function QuizControls({
             <div className="console-q-label">Квиз окончен</div>
             <div className="console-fh-title">
               {allPlayed
-                ? `Все ${questions.length} вопросов сыграны`
+                ? `Все вопросы сыграны (${questions.length})`
                 : `Сыграно вопросов: ${played} из ${questions.length}`}
             </div>
             {pendingAwards !== null && pendingAwards > 0 ? (

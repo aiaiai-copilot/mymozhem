@@ -71,7 +71,7 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
         );
       })}
       {rest > 0 && (
-        <div className="tr-more">
+        <div className="tr-more" role="presentation">
           ещё {rest} {pluralRu(rest, 'участник', 'участника', 'участников')}
         </div>
       )}
