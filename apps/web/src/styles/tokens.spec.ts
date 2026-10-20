@@ -72,6 +72,13 @@ describe('tokens.css — токены темы rybinsk', () => {
     ['--track-canvas-light', '#D5E2DA'],
     ['--danger-hover', '#F3DCD2'],
     ['--danger-active', '#ECCFC4'],
+    // мокапные литералы, поднятые в токены (T13): placeholder поля входа и
+    // verdict-цвета сцены, ok-зелёный и белый фон полей консоли
+    ['--placeholder-scene', '#354B41'],
+    ['--verdict-success', '#8FCAA5'],
+    ['--verdict-danger', '#E5A092'],
+    ['--ok', '#2F6B4F'],
+    ['--input-console', '#FFFFFF'],
     // тайминги
     ['--t-hover', '140ms'],
     ['--t-press', '60ms'],
@@ -101,6 +108,38 @@ describe('tokens.css — токены темы rybinsk', () => {
 
   it('точка расширения темы зафиксирована: вторая тема = переопределение под [data-theme=…]', () => {
     expect(css).toContain('[data-theme=');
+  });
+
+  it('точка темы включена: index.html несёт data-theme="rybinsk"', () => {
+    // Carry батча B: спек касается tokens.css — заодно пиним точку темы.
+    const html = readFileSync(
+      fileURLToPath(new URL('../../index.html', import.meta.url)),
+      'utf8',
+    );
+    expect(html).toContain('data-theme="rybinsk"');
+  });
+});
+
+describe('мокапные литералы подняты в токены (T13)', () => {
+  // Литералы, которые жили инлайн в scene.css/console.css («в токенах T4 нет…»):
+  // после подъёма файлы обязаны ссылаться на var(--…), а не держать hex.
+  const liftedLiterals: Array<{ file: string; hex: string }> = [
+    { file: 'scene.css', hex: '#354b41' }, // placeholder поля участника
+    { file: 'scene.css', hex: '#8fcaa5' }, // verdict success
+    { file: 'scene.css', hex: '#e5a092' }, // verdict danger
+    { file: 'console.css', hex: '#2f6b4f' }, // ok-зелёный полосы связи
+    { file: 'console.css', hex: '#fff' }, // фон полей ввода
+  ];
+
+  it('scene.css/console.css не содержат поднятые hex-литералы (регистронезависимо)', () => {
+    const files = new Map<string, string>();
+    for (const { file, hex } of liftedLiterals) {
+      const css = files.get(file) ?? readStyle(file);
+      files.set(file, css);
+      // Граница слова после короткого hex: «#fff» не должно матчить «#ffffff».
+      const re = new RegExp(`${escapeRe(hex)}(?![0-9a-f])`, 'i');
+      expect(css, `${file} не должен содержать литерал ${hex}`).not.toMatch(re);
+    }
   });
 });
 

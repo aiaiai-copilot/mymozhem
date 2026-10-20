@@ -31,9 +31,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  /* Литерал мокапа (--ok #2F6B4F): в токенах T4 ok-зелёного нет
-     (прецедент литерала — .play-input::placeholder в scene.css). */
-  color: #2f6b4f;
+  /* Ok-зелёный полосы связи — токен мокапа (--ok, T13). */
+  color: var(--ok);
   font-size: 13px;
   font-weight: 700;
 }
@@ -301,8 +300,8 @@
 /* --- Setup и редактор квиза (Task 10, дизайн §5.3 «Редактор», п. 9/14;
    мокапы-эталоны: console-editor, forms-and-system-states-v2,
    editor-secondary-button-darker). Цвета — только токены T4; единственный
-   литерал — белый фон полей ввода (--input-bg мокапа #FFFFFF, прецедент
-   литерала — .console-conn выше). Кнопки — общая система .btn
+   белый фон полей ввода — токен мокапа (--input-console, T13).
+   Кнопки — общая система .btn
    (transitions.css): secondary #C4D8CC, primary #10514F с золотым текстом,
    тихие без рамок (п. 15). --- */
 .setup-title {
@@ -386,7 +385,7 @@
   padding: 10px 12px;
   border: none;
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-console);
   color: var(--ink);
   font: 15px var(--font-body);
 }
@@ -438,7 +437,7 @@
   padding: 10px 12px;
   border: none;
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-console);
   color: var(--ink);
   font: 15px var(--font-body);
   font-variant-numeric: tabular-nums;

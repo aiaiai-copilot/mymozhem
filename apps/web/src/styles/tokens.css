@@ -15,6 +15,10 @@
   --input-scene: #A9BDB2;
   --track-fill: #0F7B57;
   --track-canvas-dark: #143138;
+  /* Литералы мокапа scene.css (T13): placeholder поля участника, verdict success/danger */
+  --placeholder-scene: #354B41;
+  --verdict-success: #8FCAA5;
+  --verdict-danger: #E5A092;
 
   /* Консоль — светлый контур (ведущий/организатор) */
   --console-bg: #E3F0E9;
@@ -32,6 +36,9 @@
   --track-canvas-light: #D5E2DA;
   --danger-hover: #F3DCD2;
   --danger-active: #ECCFC4;
+  /* Литералы мокапа console.css (T13): ok-зелёный полосы связи, фон полей ввода */
+  --ok: #2F6B4F;
+  --input-console: #FFFFFF;
 
   /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
   --t-hover: 140ms;

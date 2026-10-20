@@ -1,11 +1,14 @@
+import { pluralRu } from '../state/plural-ru';
 import { topNWithRest, trackWidths } from '../state/race-tracks';
 
 // Дорожки «забега» — ростер с нормированными к лидеру полосами (дизайн §7).
 // Разметка — перенос из мокапа component-states-live (.track-row/.tr-top/
 // .tr-lane/.fill/.gain, tabular-nums у счёта, transition width var(--t-race)
-// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N» —
-// из мокапов tracks-scene/console-reveal-tracks. DOM-тестов нет (паттерн
-// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — T13.
+// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N участников»
+// — из мокапов tracks-scene/console-reveal-tracks («+» и суффикс «· полное
+// табло…» мокапа проектора сознательно не переносим — минимум T6). A11y (T13):
+// контейнер — role="list", строка — role="listitem". DOM-тестов нет (паттерн
+// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — smoke T13.
 
 export interface RaceTrackEntry {
   actorId: string;
@@ -38,11 +41,11 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
   const { top, rest } = topNWithRest(sorted, topN ?? sorted.length);
 
   return (
-    <div className={`race-tracks contour-${contour}`}>
+    <div className={`race-tracks contour-${contour}`} role="list">
       {top.map((e) => {
         const w = widths.get(e.actorId) ?? { fillPct: 0, gainPct: 0 };
         return (
-          <div className="track-row" key={e.actorId}>
+          <div className="track-row" role="listitem" key={e.actorId}>
             <div className="tr-top">
               <span className="tr-name">
                 {e.name}
@@ -67,7 +70,11 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
           </div>
         );
       })}
-      {rest > 0 && <div className="tr-more">ещё {rest}</div>}
+      {rest > 0 && (
+        <div className="tr-more">
+          ещё {rest} {pluralRu(rest, 'участник', 'участника', 'участников')}
+        </div>
+      )}
     </div>
   );
 }

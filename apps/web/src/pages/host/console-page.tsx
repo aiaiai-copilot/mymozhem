@@ -11,6 +11,7 @@ import { displayNameOf } from '../../components/roster-names';
 import { Winners } from '../../components/winners';
 import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
+import { pluralRu } from '../../state/plural-ru';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
 import { AwardsPanel } from './awards-panel';
@@ -262,7 +263,8 @@ export function ConsolePage() {
             <div className="console-moment">
               <div className="console-fh-title">Событие завершено</div>
               <p className="console-fh-sub">
-                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}участников:{' '}
+                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}
+                {pluralRu(participantsCount(feed.members), 'участник', 'участника', 'участников')}:{' '}
                 {participantsCount(feed.members)}
                 {pendingAwards !== null && pendingAwards > 0 ? ' · вручите награды' : ''}
               </p>
@@ -293,7 +295,7 @@ export function ConsolePage() {
                     >
                       {completedExpanded
                         ? 'Свернуть'
-                        : `ещё ${completedEntries.length - 4} — развернуть`}
+                        : `ещё ${completedEntries.length - 4} ${pluralRu(completedEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
                     </button>
                   ) : null}
                 </div>

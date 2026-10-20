@@ -62,8 +62,8 @@
   border-radius: 4px;
   font: 16px var(--font-body);
 }
-/* Литерал мокапа входа (в токенах T4 нет цвета placeholder) */
-.play-input::placeholder { color: #354b41; }
+/* Placeholder — токен мокапа входа (--placeholder-scene, T13) */
+.play-input::placeholder { color: var(--placeholder-scene); }
 .play-input:focus-visible {
   outline: 3px solid var(--gold);
   outline-offset: 2px;
@@ -147,15 +147,15 @@
 }
 
 /* Reveal (мокап game-states): вердикт различается значком, текстом и цветом.
-   success/danger — литералы мокапа (в токенах T4 нет success-цвета). */
+   success/danger — токены мокапа (--verdict-success/--verdict-danger, T13). */
 .play-verdict {
   margin: 28px 0 4px;
   font-family: var(--font-display);
   font-size: 38px;
   font-weight: 400;
 }
-.play-verdict-success { color: #8fcaa5; }
-.play-verdict-danger { color: #e5a092; }
+.play-verdict-success { color: var(--verdict-success); }
+.play-verdict-danger { color: var(--verdict-danger); }
 .play-points {
   margin: 0 0 17px;
   color: var(--gold);

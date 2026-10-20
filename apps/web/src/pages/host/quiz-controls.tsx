@@ -10,6 +10,7 @@ import {
 import { RaceTracks } from '../../components/race-tracks';
 import { displayNameOf } from '../../components/roster-names';
 import { projectAnsweredActors } from '../../state/projections';
+import { pluralRu } from '../../state/plural-ru';
 import { lastRoundGains } from '../../state/race-tracks';
 import { formatTimer, useQuestionTimer } from '../../state/question-timer';
 import { openQuestionLabel } from './open-question-label';
@@ -224,7 +225,9 @@ export function QuizControls({
                   className="console-tracks-toggle"
                   onClick={() => setExpanded((v) => !v)}
                 >
-                  {expanded ? 'Свернуть' : `ещё ${finalEntries.length - 4} — развернуть`}
+                  {expanded
+                    ? 'Свернуть'
+                    : `ещё ${finalEntries.length - 4} ${pluralRu(finalEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
                 </button>
               ) : null}
             </div>
@@ -260,7 +263,9 @@ export function QuizControls({
             <>
               <div className="console-q-label">Квиз не начат</div>
               <p className="console-fh-sub">
-                В колоде {questions.length} вопросов. Игроки видят экран ожидания.
+                В колоде {questions.length}{' '}
+                {pluralRu(questions.length, 'вопрос', 'вопроса', 'вопросов')}. Игроки видят экран
+                ожидания.
               </p>
             </>
           ) : (
@@ -390,7 +395,9 @@ export function QuizControls({
                   className="console-tracks-toggle"
                   onClick={() => setExpanded((v) => !v)}
                 >
-                  {expanded ? 'Свернуть' : `ещё ${trackEntries.length - 4} — развернуть`}
+                  {expanded
+                    ? 'Свернуть'
+                    : `ещё ${trackEntries.length - 4} ${pluralRu(trackEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
                 </button>
               ) : null}
             </div>

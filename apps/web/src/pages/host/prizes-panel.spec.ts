@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
 import {
   DRAW_ID_GENERATION_FAILED,
+  drawPrizeName,
   isDrawable,
   lastCompletedDraw,
   startDrawAttempt,
   startParticipantDrawAttempt,
   tryStartDrawAttempt,
   tryStartParticipantDrawAttempt,
+  type CompletedDraw,
   type DrawAttempt,
 } from './prizes-panel';
 
@@ -184,5 +186,36 @@ describe('lastCompletedDraw', () => {
     const last = drawEvent('66666666-6666-4666-8666-666666666666', null);
     expect(lastCompletedDraw([first, last])).toEqual(last.payload);
     expect(lastCompletedDraw([last, first])).toEqual(first.payload);
+  });
+});
+
+// Название приза в баннере победителя (T13, извлечение из рендера панели):
+// find по локальному списку панели. Три ветки: приз найден → имя; prizeId есть,
+// но приз удалён из списка → null (строка без названия — fallback брифа T11);
+// безпризовой draw (prizeId null) → null.
+describe('drawPrizeName', () => {
+  const draw = (prizeId: string | null): CompletedDraw => ({
+    drawId: '33333333-3333-4333-8333-333333333333',
+    prizeId,
+    winnerId: '0f8fad5b-d9cb-469f-a165-70867728950e',
+  });
+
+  it('приз найден в списке панели → его название', () => {
+    const p = prize(1);
+    expect(drawPrizeName(draw(p.id), [p])).toBe('Кубок');
+  });
+
+  it('prizeId есть, но приз удалён из списка → null (баннер без названия)', () => {
+    expect(drawPrizeName(draw(prize(1).id), [])).toBeNull();
+    // Список ещё не загружен (null) — тот же fallback.
+    expect(drawPrizeName(draw(prize(1).id), null)).toBeNull();
+  });
+
+  it('безпризовой draw (prizeId null) → null', () => {
+    expect(drawPrizeName(draw(null), [prize(1)])).toBeNull();
+  });
+
+  it('розыгрышей не было (draw null) → null', () => {
+    expect(drawPrizeName(null, [prize(1)])).toBeNull();
   });
 });

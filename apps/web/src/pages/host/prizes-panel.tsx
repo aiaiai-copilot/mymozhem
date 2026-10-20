@@ -106,6 +106,16 @@ export const lastCompletedDraw = (events: ProjectedEvent[]): CompletedDraw | nul
   return last;
 };
 
+// Название приза для баннера победителя (T13, извлечение из рендера): find по
+// локальному списку панели. Приз мог быть удалён из выдачи или список ещё не
+// загружен → null (строка без названия, fallback брифа T11); безпризовой draw
+// (prizeId null) и отсутствие розыгрышей → тоже null.
+export const drawPrizeName = (
+  draw: CompletedDraw | null,
+  prizes: PrizeResponse[] | null,
+): string | null =>
+  draw?.prizeId != null ? (prizes?.find((p) => p.id === draw.prizeId)?.name ?? null) : null;
+
 interface PrizesPanelProps {
   roomId: string;
   // Пин приложения из payload core.room.activated (REQ-RT-004): кнопка
@@ -243,10 +253,7 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
   // по prizeId; приз мог быть удалён из выдачи — тогда строка без названия
   // (fallback брифа T11), безпризовой draw — тоже без названия.
   const lastDraw = lastCompletedDraw(events);
-  const drawPrizeName =
-    lastDraw?.prizeId != null
-      ? (prizes?.find((p) => p.id === lastDraw.prizeId)?.name ?? null)
-      : null;
+  const lastDrawPrizeName = drawPrizeName(lastDraw, prizes);
 
   return (
     <section className="console-card">
@@ -255,8 +262,8 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
         <div className="console-winner-banner">
           <div className="console-wb-label">Розыгрыш завершён</div>
           <div className="console-wb-name">{displayNameOf(names, lastDraw.winnerId)}</div>
-          {drawPrizeName !== null ? (
-            <div className="console-wb-prize">выигрывает «{drawPrizeName}»</div>
+          {lastDrawPrizeName !== null ? (
+            <div className="console-wb-prize">выигрывает «{lastDrawPrizeName}»</div>
           ) : null}
         </div>
       ) : null}
