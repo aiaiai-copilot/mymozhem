@@ -201,6 +201,7 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
                   min={5}
                   max={600}
                   step={1}
+                  aria-label="Время на ответ, секунд"
                   value={q.durationSec}
                   disabled={q.unlimited}
                   onChange={(e) => updateQuestion(qIndex, { durationSec: e.target.value })}
