@@ -72,3 +72,57 @@ Ruling (стоп): после 4 подряд смертей таск-ревью�
 - Незакрытые вопросы ревью T3 (для следующей сессии, частично разрешённые умершими ревьюерами): (1) Ajv/addFormats — контракт-спека без addFormats, strict:false → негативный кейс не-ISO `openedAt` через Ajv-артефакт ВАКУУМЕН, если он ходит через toRegisteredSchema, а не через zod; проверить, каким путём идёт кейс (если вакуумен — Minor/Important, усилить или зафиксировать); (2) raw-JSON concern — СНЯТ (дефолты на parse, quiz-handlers.ts:191); (3) repo-wide ripple grep версий — не завершён (implementer проgrepал и отчитался: projections.spec, quiz-editor.spec, e2e QUIZ_SETTINGS ×2, quiz.e2e:398).
 - Финревью батча (whole-branch, fable) — НЕ начато.
 - Следующая сессия: доделать таск-ревью T3 (при желании — одним диспатчем с этими тремя пунктами), затем финревью батча, finishing-a-development-branch, консолидация леджера (снять вложенный .superpowers/sdd/.gitignore), HANDOFF.
+
+---
+
+# Батч B (задачи 4–6) — сессия 49 (2026-10-20)
+
+Scope this session: **батч B (T4–T6: визуальный фундамент и вычислимое)** — правило владельца «батчи по 3 задачи, каждый батч новой сессией».
+Branch: `design-ui-slice` (worktree `.worktrees/design-ui-slice`, решение владельца: один worktree/ветка на СРЕЗ, батчи B–E копятся в ней, мердж одним куском в конце среза). BASE на старте батча: `b1c7fe3` (= main с мерджем батча A `3c95e94`).
+Baseline при входе: `pnpm install` + `pnpm build` + prisma:generate OK; `pnpm -r --filter '@mymozhem/*' test` (unit-сьюты всех пакетов) — зелёный (exit 0).
+Spec: `docs/sessions/2026-10-19-design-ui-slice-design.md` — прочитаны §4 (палитры), §5 (лей-ауты), §6 (таймер), §7 (дорожки), §8 (состояния), «Канонические мокапы»; интерпретации плана I-1…I-12 прочитаны. План им соответствует (токены verbatim §4 + I-6 дополнения из мокапа).
+
+## Pre-flight scan (батч B)
+
+Проверено в коде: vitest `environment: 'node'`, include `src/**/*.spec.ts` — `tokens.spec.ts` (fs-чтение CSS) подхватывается; `apps/web/package.json` зависит от `@mymozhem/sdk` и `@mymozhem/app-quiz` (интерфейсы T6); `main.tsx:5` импортирует `./styles.css` (24 строки, есть); `index.html` без `data-theme` (добавляется T4); `standings.tsx` жив до T9 (I-4, T6 его не трогает); `projections.ts` проецирует quiz state — `lastRoundGains` T6 новый модуль, дублирования нет. Мокапы — НЕ в git (untracked `.superpowers/brainstorm/` основного чекаута, HANDOFF: «не коммитить, лицензии»); в диспатчах — абсолютные пути. woff2 в репо нет — скачиваются T4 (файлы в `public/`, не npm-зависимости — Global Constraint «ноль новых npm-зависимостей» соблюдён).
+
+| Пара/задача | Что один производит / другой потребляет | Находка |
+|---|---|---|
+| T4 → T6 | токены `--track-canvas-dark/light`, `--t-race`, кнопочная система → компонент RaceTracks | Чисто: порядок T4→T6; имена/значения токенов идентичны в Interfaces обеих задач (§4 + I-6) |
+| T4 ↔ T5 | — | Нет пересечения: T5 — чистая логика + хук, CSS не потребляет |
+| T4 внутри | spec (fs.readFileSync tokens.css/transitions.css) → файлы по Interfaces → main.tsx/index.html wiring | Чисто: node-environment vitest допускает fs; RED-прогон реальный (файлов нет) |
+| T4 vs Global Constraints | шрифты woff2 в `public/fonts/` (Oranienbaum 400, PT Sans 400/700, кириллица, OFL) | Чисто: файлы ≠ npm-зависимость; Blagovest не скачивать/не коммитить (гейт лицензии) |
+| T5 → T6 | общего состояния нет; оба — потребители для T7–T9 | Чисто |
+| T6 внутри | `lastRoundGains` ← `ProjectedEvent` (SDK) + payload `quiz.question.revealed` (app-quiz) | Чисто: обе зависимости объявлены в apps/web; `quiz-log.fixture.ts` (обновлён T3 под v3 + openedAt) — готовая фикстура для тестов |
+| T6 vs существующее | `standings.tsx`/`projections.ts` остаются до T7–T9 | Чисто (I-4): T6 только добавляет модуль и компонент, потребителей пока нет |
+| Carry батча A → батч B | «T5/T9: durationSec через quizSettingsSchema.parse на границе проекции» | Относится к потребителям проекции (T7–T9), не к T5 (получает durationSec параметром) — указатель переносится в диспатчи батча C |
+| План vs рубрика ревью | T4 spec — grep-ассерты CSS по точным значениям; T5/T6 — юнит чистых функций | Чисто: дефектных паттернов (тесты без ассертов, дубли логики) план не мандатирует |
+
+Pre-flight ruling B-1: Диспатчам T4/T6 передаются абсолютные пути мокапов основного чекаута (untracked, лицензии) — копировать мокапы в worktree/git нельзя. Cost if wrong: субагент не найдёт файл по имени и спросит — цена один раунд вопроса.
+Pre-flight ruling B-2: Скачивание woff2 — через Google Fonts css2 API с desktop-UA (отдаёт woff2-URL), subset cyrillic; файл-источник не коммитится, коммитятся только woff2. Cost if wrong: неверный subset/начертание вскроется на визуальной приёмке T13/чеклисте — цена перекачка файлов.
+
+Конфликтов, требующих остановки, нет. Диспатчу Task 4.
+
+## Execution (батч B)
+Task 4: complete (commits b1c7fe3..ec06703, review clean — spec ✅, quality approved; sonnet-ревьюер, без fix-волн). Оба заявленных отклонения подтверждены ревьюем как value-preserving: сцена привязана к `.btn-scene` вместо `.panel.dark`-обёртки мокапа (в приложении её нет); `node-test-shims.d.ts` — узкие ambient-декларации readFileSync/fileURLToPath (запрет install; header-нота об удалении при появлении @types/node). ⚠️-пункт (бинарное содержимое woff2 вне диффа) закрыт контроллером: наличие/именование/@font-face-подключение проверены ревьюем, рендер-верификация — T13/чеклист приёмки.
+Task 4: minor (deferred): (1) gold focus-visible сужен до `.btn-scene` (мокап — любой `.btn` на тёмной панели; эквивалентно сегодня — watch-item T8, если консольный `.btn-primary` появится на сцене); (2) арифметика отчёта («31 токен» vs фактические 29 exact + 3 font) — косметика отчёта, не кода.
+Task 5: dispatched (haiku). BASE = ec06703.
+Task 5: complete (commits ec06703..b6c2a0a, review clean — spec ✅, quality approved; sonnet-ревьюер, без fix-волн). Все 8 кейсов брифа запинаны; floor-после-деления и двусторонний clamp подтверждены построчно; хук без 1-с лага (инициализатор useState), cleanup + deps на месте.
+Task 5: minor (deferred): (1) граница elapsed == durationSec → ровно 0 отдельным кейсом не запинана (тот же код-путь через Math.max, риск нулевой); (2) formatTimer без защиты от нецелого входа (в реальном потоке всегда целый из remainingSec — контракт словом при следующем касании).
+Task 6: dispatched (sonnet). BASE = b6c2a0a.
+Ruling B-3 (диспатч T6): бриф не указывает, куда кладётся CSS дорожек — разрешено на усмотрение имплементера в рамках существующих styles/ (с обоснованием в отчёте); ревьюер оценит выбор. Cost if wrong: CSS переедет при касании T7–T9 — цена одна правка.
+Task 6: complete (commits b6c2a0a..b3a0bf8, review clean — spec ✅, quality approved; sonnet-ревьюер, без fix-волн). Все 5 concerns имплементера разрешены обоснованно: единый `--track-fill` по дизайну §7 (мокапный `--console-primary` для консоли — расхождение мокапов, бриф важнее), «ещё N» дословно, `.tr-more` (бриф класс не пинит), `.fill.solo` зафиксирован как Extra из неканонических мокапов (финальное слово — T13), расширение reduced-motion блока transitions.css механически корректно (старое `.btn`-правило дословно сохранено, добавлены `.race-tracks .fill/.gain`). ⚠️-пункты (пиксель-в-пиксель мокап, a11y-минимум) — отложены брифом на T13, закрыты контроллером как by-design. Golden-тест на существующей фикстуре quiz-log.fixture.ts (два reveal) — проверяет и схему payload, и «последний reveal» на реальных данных.
+Task 6: minor (deferred): (1) `.fill.solo` — Extra сверх брифа (одна строка CSS + тернарник; вердикт — T13); (2) `topN=0` → пустой список + «ещё N» (край не запрещён брифом, потребители T7–T9); (3) «ещё N» без плюрализации/слова «участников» (дословно по брифу; мокапы «+ ещё N участников» — кандидат при приёмке); (4) a11y дорожек (div'ы без ролей; в пределах паттерна репо — рассмотреть role=list на T13).
+
+## Финревью батча B (fable, whole-branch b1c7fe3..b3a0bf8)
+
+Вердикт: **Ready to merge: Yes.** Гейты перепрогнаны свежими на HEAD b3a0bf8: build 6/6, lint 6/6, typecheck 10/10, test 10/10 (sdk 329, core 230, app-quiz 97, app-lottery 39, web 145, server 71), test:int 223/223 testcontainers, boundary-check 0 (757 модулей), guardrails 8/8. Перекрёстных дефектов T4↔T5↔T6 и web→backend нет; все 25 var() резолвятся; контракт батча A соблюдён.
+**Important #1 (дефект транскрипции плана, не имплементера):** компонент RaceTracks не рендерит числовую дельту `+N` рядом со счётом — дизайн §7: «дельта дублируется числом рядом» (a11y-обоснование мокапа: без цвета всё читается); эталон плана component-states-live.html дельту не содержал (демо с пустым gain) — потеряно при транскрипции. Решение: fix-волна сейчас (прецедент D-10.3 — Important финревью в fix-волну), до появления потребителей T7–T9.
+Deferred 8/8 — stay-deferred (триаж финревью подтверждён): T4 ×2 (gold focus watch-item T8; арифметика отчёта), T5 ×2 (граница elapsed==duration; formatTimer нецелый), T6 ×4 (.fill.solo, topN=0, «ещё N» плюрализация, a11y-роли — все кандидаты T13).
+Minor финревью (при следующем касании): tokens.spec.ts:122 — ассерт data-theme матчит комментарий, не index.html (добавить fs-ассерт index.html); question-timer.ts — Date.parse невалидного openedAt → NaN (контракт словом; на потоке валидировано схемой).
+Рекомендации финревью владельцу/плану: (1) эталон разметки табличных компонентов — списком мокапов (канонический + контурные), не одним; (2) fs-ассерт data-theme при касании tokens.spec.
+Финревью fix-волна 1/1: Important #1 (числовая дельта `+N`) — fix `8bc916d` (haiku): условный `<span className="delta">+{gain}</span>` при gain>0 внутри `.tr-score` + `.delta` (`var(--gold)`, tabular-nums, 700/12px) по мокапу console-reveal-tracks; typecheck + web 145/145 зелёные. Scoped re-review (sonnet): **ADDRESSED**, новых поломок нет, named-risk (тип gain) снят; out-of-scope: мокап красил дельту в `var(--ok)`, фикс взял `var(--gold)` в тон сегменту `.gain` — осознанно, задокументировано.
+
+**Батч B ПРОЦЕССНО ЗАВЕРШЁН (3/3 + fix-волна, все ревью чистые).** Ветка `design-ui-slice` продолжается батчами C–E (мердж одним куском в конце среза). Следующая сессия — батч C (T7–T9: сцена и консольный каркас) новой сессией.
+Carry в батч C: (1) durationSec читать через `quizSettingsSchema.parse` на границе проекции (carry батча A, потребители T7–T9); (2) watch-item T8: gold focus-visible сужен до `.btn-scene` — если консольный `.btn-primary` появится на сцене; (3) рекомендация финревью: эталон разметки табличных компонентов указывать списком мокапов (канонический + контурные); (4) при касании tokens.spec — fs-ассерт data-theme в index.html; (5) кандидаты T13: `.fill.solo`, плюрализация «ещё N», a11y-роли дорожек, рендер-верификация woff2.
+Опыт сессии 49: environmentной нестабильности не было — все 7 диспатчей с первого раза (haiku ×3 имплементеры T4/T5 + fix, sonnet ×3 таск-ревью, fable финревью); диспозиция «haiku на транскрипцию/мелкие фиксы, sonnet на интеграцию и ревью, fable на финревью» — третья чистая сессия подряд без fix-волн на тасках; дефект транскрипции плана (дельта +N) пойман именно финревью с чтением контурных мокапов — целобранчевая оптика снова окупилась.
