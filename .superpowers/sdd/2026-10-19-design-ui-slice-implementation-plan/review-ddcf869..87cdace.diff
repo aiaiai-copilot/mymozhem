@@ -1,0 +1,617 @@
+diff --git a/apps/web/src/pages/host/quiz-editor.spec.ts b/apps/web/src/pages/host/quiz-editor.spec.ts
+index 72f873b..a0eaa97 100644
+--- a/apps/web/src/pages/host/quiz-editor.spec.ts
++++ b/apps/web/src/pages/host/quiz-editor.spec.ts
+@@ -6,25 +6,33 @@ import { buildQuizSettings, type QuizFormState } from './quiz-editor';
+ // DOM (раннер node, vite.config.ts). Валидация результата — той же
+ // quizSettingsSchema, что и на сервере: дрейф клиент/сервер невозможен структурно.
+ // Числовые поля формы — строки: DOM-контролы отдают строки, конверсия внутри
+-// buildQuizSettings.
++// buildQuizSettings. durationSec формы (Task 10): строка 5–600 либо
++// unlimited → null («без лимита», дизайн §6).
+ 
+ const validForm: QuizFormState = {
+   questions: [
+-    { text: 'Столица Франции?', options: ['Париж', 'Лион'], correctIndex: 0 },
+-    { text: '2+2?', options: ['3', '4', '5'], correctIndex: 1 },
++    { text: 'Столица Франции?', options: ['Париж', 'Лион'], correctIndex: 0, durationSec: '30', unlimited: false },
++    { text: '2+2?', options: ['3', '4', '5'], correctIndex: 1, durationSec: '30', unlimited: false },
+   ],
+   minAnswerIntervalMs: '0',
+   scoringBase: '100',
+   scoringStep: '10',
+ };
+ 
++// Вопрос с переопределёнными полями длительности поверх валидной заготовки.
++const formWithDuration = (durationSec: string, unlimited: boolean): QuizFormState => ({
++  ...validForm,
++  questions: [{ text: 'Вопрос?', options: ['а', 'б'], correctIndex: 0, durationSec, unlimited }],
++});
++
+ describe('buildQuizSettings', () => {
+   it('maps form rows to quiz settings (correctAnswers из отмеченных радио)', () => {
+     const settings = buildQuizSettings(validForm);
+ 
+     // correctAnswers собираются из радио «правильный» каждого вопроса — индекс
+     // в массиве совпадает с индексом вопроса, значение — с выбранным вариантом.
+-    // durationSec форма пока не редактирует (Task 10) — схема подставляет дефолт 30.
++    // Дефолт формы (emptyQuestion) — durationSec '30', unlimited false → 30
++    // в parse-результате (дефолт схемы совпадает, но форма шлёт явно).
+     expect(quizSettingsSchema.parse(settings)).toEqual({
+       questions: [
+         { text: 'Столица Франции?', options: ['Париж', 'Лион'], durationSec: 30 },
+@@ -36,16 +44,33 @@ describe('buildQuizSettings', () => {
+     });
+   });
+ 
+-  it('trim текстов и вариантов перед сборкой', () => {
++  it('unlimited → durationSec: null («без лимита», дизайн §6)', () => {
++    // Строка длительности при unlimited игнорируется — чекбокс «снимает число»
++    // (мокап console-editor): даже мусор в поле не должен доезжать до схемы.
++    const settings = buildQuizSettings(formWithDuration('abc', true));
++
++    expect(quizSettingsSchema.parse(settings).questions[0].durationSec).toBeNull();
++  });
++
++  it('границы durationSec: 5 и 600 проходят схему, 4 и 601 — общая ошибка формы', () => {
++    // Границы — норма схемы app-quiz (5–600); редактор свою валидацию не
++    // дублирует, некорректное значение доезжает до safeParse как есть.
++    expect(quizSettingsSchema.safeParse(buildQuizSettings(formWithDuration('5', false))).success).toBe(true);
++    expect(quizSettingsSchema.safeParse(buildQuizSettings(formWithDuration('600', false))).success).toBe(true);
++    expect(quizSettingsSchema.safeParse(buildQuizSettings(formWithDuration('4', false))).success).toBe(false);
++    expect(quizSettingsSchema.safeParse(buildQuizSettings(formWithDuration('601', false))).success).toBe(false);
++  });
++
++  it('trim текстов, вариантов и durationSec перед сборкой', () => {
+     const settings = buildQuizSettings({
+       ...validForm,
+-      questions: [{ text: '  Вопрос?  ', options: [' а ', '  б'], correctIndex: 1 }],
++      questions: [{ text: '  Вопрос?  ', options: [' а ', '  б'], correctIndex: 1, durationSec: ' 45 ', unlimited: false }],
+     });
+ 
+     expect(quizSettingsSchema.parse(settings).questions[0]).toEqual({
+       text: 'Вопрос?',
+       options: ['а', 'б'],
+-      durationSec: 30,
++      durationSec: 45,
+     });
+   });
+ 
+@@ -53,14 +78,14 @@ describe('buildQuizSettings', () => {
+     // Пробельный текст после trim — пустая строка: схема (min(1)) не пускает.
+     const noText = buildQuizSettings({
+       ...validForm,
+-      questions: [{ text: '   ', options: ['а', 'б'], correctIndex: 0 }],
++      questions: [{ text: '   ', options: ['а', 'б'], correctIndex: 0, durationSec: '30', unlimited: false }],
+     });
+     expect(quizSettingsSchema.safeParse(noText).success).toBe(false);
+ 
+     // То же для варианта ответа.
+     const noOption = buildQuizSettings({
+       ...validForm,
+-      questions: [{ text: 'Вопрос?', options: ['а', ' '], correctIndex: 0 }],
++      questions: [{ text: 'Вопрос?', options: ['а', ' '], correctIndex: 0, durationSec: '30', unlimited: false }],
+     });
+     expect(quizSettingsSchema.safeParse(noOption).success).toBe(false);
+   });
+@@ -71,7 +96,7 @@ describe('buildQuizSettings', () => {
+       quizSettingsSchema.safeParse(
+         buildQuizSettings({
+           ...validForm,
+-          questions: [{ text: 'Вопрос?', options: ['а'], correctIndex: 0 }],
++          questions: [{ text: 'Вопрос?', options: ['а'], correctIndex: 0, durationSec: '30', unlimited: false }],
+         }),
+       ).success,
+     ).toBe(false);
+diff --git a/apps/web/src/pages/host/quiz-editor.tsx b/apps/web/src/pages/host/quiz-editor.tsx
+index 912c5fd..cf46e04 100644
+--- a/apps/web/src/pages/host/quiz-editor.tsx
++++ b/apps/web/src/pages/host/quiz-editor.tsx
+@@ -3,11 +3,14 @@ import { quizSettingsSchema, type QuizSettings } from '@mymozhem/app-quiz';
+ 
+ // Состояние формы редактора квиза: числовые поля — строки (DOM-контролы отдают
+ // строки), конверсия — в buildQuizSettings. correctIndex — выбранное радио
+-// «правильный ответ» внутри вопроса.
++// «правильный ответ» внутри вопроса; durationSec/unlimited — лимит времени на
++// ответ (дизайн §6): строка 5–600 либо «без лимита» (unlimited).
+ export interface QuizQuestionForm {
+   text: string;
+   options: string[];
+   correctIndex: number;
++  durationSec: string;
++  unlimited: boolean;
+ }
+ 
+ export interface QuizFormState {
+@@ -21,10 +24,13 @@ export interface QuizFormState {
+ // Валидации здесь нет нарочно — её делает quizSettingsSchema у вызывающего
+ // (та же схема, что серверная: дрейф невозможен структурно, REQ-CTR-005);
+ // некорректный ввод доезжает до схемы как есть (NaN, пустые строки после trim).
++// durationSec (Task 10): unlimited → null (чекбокс «снимает число» — строка
++// игнорируется), иначе Number после trim; границы 5–600 — норма схемы.
+ export const buildQuizSettings = (form: QuizFormState): unknown => ({
+   questions: form.questions.map((q) => ({
+     text: q.text.trim(),
+     options: q.options.map((o) => o.trim()),
++    durationSec: q.unlimited ? null : Number(q.durationSec.trim()),
+   })),
+   // correctAnswers — из отмеченных радио: индекс в массиве = индекс вопроса.
+   correctAnswers: form.questions.map((q) => q.correctIndex),
+@@ -37,17 +43,26 @@ export const buildQuizSettings = (form: QuizFormState): unknown => ({
+ const MIN_OPTIONS = 2;
+ const MAX_OPTIONS = 6;
+ 
+-const emptyQuestion = (): QuizQuestionForm => ({ text: '', options: ['', ''], correctIndex: 0 });
++// Дефолты нового вопроса (дизайн §6): 30 секунд, лимит включён.
++const emptyQuestion = (): QuizQuestionForm => ({
++  text: '',
++  options: ['', ''],
++  correctIndex: 0,
++  durationSec: '30',
++  unlimited: false,
++});
+ 
+ interface QuizEditorProps {
+   onSubmit: (settings: QuizSettings) => void;
+   busy: boolean;
+ }
+ 
+-// Редактор квиза (дизайн Task 13): вопросы (текст, 2–6 вариантов, радио
+-// «правильный»), scoring base/step, minAnswerIntervalMs. Submit →
+-// buildQuizSettings → quizSettingsSchema.parse на клиенте → onSubmit(settings);
+-// организатор видит ошибки формы до похода на сервер.
++// Редактор квиза (дизайн §5.3 «Редактор», мокап console-editor): вопросы
++// (текст, 2–6 вариантов, radio-группа «Правильный ответ» с одним legend —
++// п. 9), поле «Время на ответ» с чекбоксом «Без лимита» (§6), scoring
++// base/step, minAnswerIntervalMs. Submit → buildQuizSettings →
++// quizSettingsSchema.parse на клиенте → onSubmit(settings); организатор
++// видит ошибки формы до похода на сервер.
+ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+   const [questions, setQuestions] = useState<QuizQuestionForm[]>([emptyQuestion()]);
+   const [minAnswerIntervalMs, setMinAnswerIntervalMs] = useState('0');
+@@ -104,6 +119,7 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+       // вывода zod-issues (они на английском и про пути, не про смысл).
+       setError(
+         'Проверьте форму: у каждого вопроса нужны текст и минимум 2 непустых варианта; ' +
++          'время на ответ — целое 5–600 с или «без лимита»; ' +
+           'баллы и интервал — целые числа (база > 0, шаг и интервал ≥ 0).',
+       );
+       return;
+@@ -113,68 +129,118 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+   };
+ 
+   return (
+-    <form onSubmit={submit}>
++    <form className="editor-form" onSubmit={submit}>
+       <fieldset disabled={busy}>
+-        <legend>Вопросы</legend>
++        <legend className="editor-legend">Вопросы</legend>
+         {questions.map((q, qIndex) => (
+-          <fieldset key={qIndex}>
+-            <legend>Вопрос {qIndex + 1}</legend>
+-            <label>
++          <section className="editor-q-card" key={qIndex}>
++            <div className="editor-q-head">
++              {/* Полоса номеров/длительностей списка (мокап console-editor):
++                  темп виден до открытия вопроса, ∞ — «без лимита». */}
++              <span className="editor-q-title">Вопрос {qIndex + 1}</span>
++              <span className="editor-q-time">
++                {q.unlimited ? '∞' : `${q.durationSec.trim() || '—'}с`}
++              </span>
++            </div>
++            <label className="editor-label">
+               Текст вопроса
+               <input
++                className="editor-input"
+                 value={q.text}
+                 onChange={(e) => updateQuestion(qIndex, { text: e.target.value })}
+               />
+             </label>
+-            <ul>
++            {/* Radio-группа (п. 9): один видимый legend на всю группу,
++                у каждого radio — доступное имя; повторяющийся видимый label
++                «Правильный» у вариантов убран. */}
++            <fieldset className="editor-options">
++              <legend>Правильный ответ</legend>
+               {q.options.map((option, oIndex) => (
+-                <li key={oIndex}>
+-                  <label>
+-                    <input
+-                      type="radio"
+-                      name={`correct-${qIndex}`}
+-                      checked={q.correctIndex === oIndex}
+-                      onChange={() => updateQuestion(qIndex, { correctIndex: oIndex })}
+-                    />
+-                    Правильный
+-                  </label>
++                <div className="editor-opt-row" key={oIndex}>
++                  <input
++                    type="radio"
++                    name={`correct-${qIndex}`}
++                    aria-label={`Вариант ${oIndex + 1} — правильный`}
++                    checked={q.correctIndex === oIndex}
++                    onChange={() => updateQuestion(qIndex, { correctIndex: oIndex })}
++                  />
+                   <input
++                    className="editor-input"
+                     value={option}
+                     placeholder={`Вариант ${oIndex + 1}`}
+                     onChange={(e) => updateOption(qIndex, oIndex, e.target.value)}
+                   />
+                   {q.options.length > MIN_OPTIONS ? (
+-                    <button type="button" onClick={() => removeOption(qIndex, oIndex)}>
+-                      Удалить вариант
++                    <button
++                      type="button"
++                      className="btn btn-quiet editor-remove"
++                      onClick={() => removeOption(qIndex, oIndex)}
++                    >
++                      Удалить
+                     </button>
+                   ) : null}
+-                </li>
++                </div>
+               ))}
+-            </ul>
++            </fieldset>
+             {q.options.length < MAX_OPTIONS ? (
+-              <button type="button" onClick={() => addOption(qIndex)}>
+-                Добавить вариант
++              <button
++                type="button"
++                className="btn btn-secondary editor-add-option"
++                onClick={() => addOption(qIndex)}
++              >
++                + Добавить вариант
+               </button>
+             ) : null}
++            {/* Время на ответ (§6): число 5–600 либо «без лимита» — чекбокс
++                снимает число (поле disabled, значение сохраняется в состоянии). */}
++            <span className="editor-label">Время на ответ</span>
++            <div className="editor-duration-row">
++              <span className="editor-duration-input">
++                <input
++                  type="number"
++                  min={5}
++                  max={600}
++                  step={1}
++                  value={q.durationSec}
++                  disabled={q.unlimited}
++                  onChange={(e) => updateQuestion(qIndex, { durationSec: e.target.value })}
++                />
++                <span className="editor-duration-unit">сек</span>
++              </span>
++              <label className="editor-nolimit">
++                <input
++                  type="checkbox"
++                  checked={q.unlimited}
++                  onChange={(e) => updateQuestion(qIndex, { unlimited: e.target.checked })}
++                />
++                Без лимита
++              </label>
++            </div>
+             {questions.length > 1 ? (
+               <button
+                 type="button"
++                className="btn btn-quiet editor-remove"
+                 onClick={() => setQuestions((prev) => prev.filter((_, i) => i !== qIndex))}
+               >
+                 Удалить вопрос
+               </button>
+             ) : null}
+-          </fieldset>
++          </section>
+         ))}
+-        <button type="button" onClick={() => setQuestions((prev) => [...prev, emptyQuestion()])}>
+-          Добавить вопрос
++        <button
++          type="button"
++          className="btn btn-secondary"
++          onClick={() => setQuestions((prev) => [...prev, emptyQuestion()])}
++        >
++          + Добавить вопрос
+         </button>
+       </fieldset>
+-      <fieldset disabled={busy}>
+-        <legend>Баллы и темп</legend>
+-        <label>
++      <fieldset className="editor-scoring" disabled={busy}>
++        <legend className="editor-legend">Баллы и темп</legend>
++        <label className="editor-label">
+           Баллы за первый правильный ответ (база)
+           <input
++            className="editor-input"
+             type="number"
+             min={1}
+             step={1}
+@@ -182,9 +248,10 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+             onChange={(e) => setScoringBase(e.target.value)}
+           />
+         </label>
+-        <label>
++        <label className="editor-label">
+           Убывание баллов за ответ (шаг)
+           <input
++            className="editor-input"
+             type="number"
+             min={0}
+             step={1}
+@@ -192,9 +259,10 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+             onChange={(e) => setScoringStep(e.target.value)}
+           />
+         </label>
+-        <label>
++        <label className="editor-label">
+           Минимальный интервал между ответами, мс
+           <input
++            className="editor-input"
+             type="number"
+             min={0}
+             step={1}
+@@ -203,8 +271,12 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+           />
+         </label>
+       </fieldset>
+-      {error ? <p role="alert">{error}</p> : null}
+-      <button type="submit" disabled={busy}>
++      {error ? (
++        <p role="alert" className="console-error">
++          {error}
++        </p>
++      ) : null}
++      <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
+         Сохранить и запустить
+       </button>
+     </form>
+diff --git a/apps/web/src/pages/host/setup-page.tsx b/apps/web/src/pages/host/setup-page.tsx
+index 3711745..3836c1a 100644
+--- a/apps/web/src/pages/host/setup-page.tsx
++++ b/apps/web/src/pages/host/setup-page.tsx
+@@ -95,25 +95,30 @@ export function SetupPage() {
+ 
+   if (roomError) {
+     return (
+-      <main>
+-        <p role="alert">{roomError}</p>
++      <main className="console-page">
++        <p role="alert" className="console-error">
++          {roomError}
++        </p>
+       </main>
+     );
+   }
+   if (!roomId) {
+     return (
+-      <main>
+-        <p>Создаём комнату…</p>
++      <main className="console-page">
++        <p className="console-note">Создаём комнату…</p>
+       </main>
+     );
+   }
+ 
++  // Палитра/классы консоли (Task 10, мокапы forms-and-system-states-v2 /
++  // editor-secondary-button-darker): каркас console-page, заголовок display-
++  // шрифтом, выбор приложения — карточкой; поведение не меняется.
+   return (
+-    <main>
+-      <h1>Настройка комнаты</h1>
+-      <fieldset disabled={busy}>
+-        <legend>Приложение</legend>
+-        <label>
++    <main className="console-page">
++      <h1 className="setup-title">Настройка комнаты</h1>
++      <fieldset className="console-card setup-appkind" disabled={busy}>
++        <legend className="editor-legend">Приложение</legend>
++        <label className="setup-appkind-option">
+           <input
+             type="radio"
+             name="app-kind"
+@@ -122,7 +127,7 @@ export function SetupPage() {
+           />
+           Квиз
+         </label>
+-        <label>
++        <label className="setup-appkind-option">
+           <input
+             type="radio"
+             name="app-kind"
+@@ -136,17 +141,22 @@ export function SetupPage() {
+         <QuizEditor onSubmit={submitQuiz} busy={busy} />
+       ) : (
+         <form
++          className="editor-form"
+           onSubmit={(e) => {
+             e.preventDefault();
+             submitLottery();
+           }}
+         >
+-          <button type="submit" disabled={busy}>
++          <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
+             Сохранить и запустить
+           </button>
+         </form>
+       )}
+-      {submitError ? <p role="alert">{submitError}</p> : null}
++      {submitError ? (
++        <p role="alert" className="console-error">
++          {submitError}
++        </p>
++      ) : null}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/styles/console.css b/apps/web/src/styles/console.css
+index ee52227..62052c8 100644
+--- a/apps/web/src/styles/console.css
++++ b/apps/web/src/styles/console.css
+@@ -297,3 +297,169 @@
+   .console-sections .console-card { margin-bottom: 0; }
+   .console-finish { width: calc(100% - 24px); margin: 12px; }
+ }
++
++/* --- Setup и редактор квиза (Task 10, дизайн §5.3 «Редактор», п. 9/14;
++   мокапы-эталоны: console-editor, forms-and-system-states-v2,
++   editor-secondary-button-darker). Цвета — только токены T4; единственный
++   литерал — белый фон полей ввода (--input-bg мокапа #FFFFFF, прецедент
++   литерала — .console-conn выше). Кнопки — общая система .btn
++   (transitions.css): secondary #C4D8CC, primary #10514F с золотым текстом,
++   тихие без рамок (п. 15). --- */
++.setup-title {
++  margin: 18px 14px 14px;
++  font-family: var(--font-display);
++  font-size: 24px;
++  font-weight: 400;
++}
++
++/* Выбор приложения — карточкой панели; радио-строки с отступом */
++.setup-appkind {
++  border: none;
++  margin: 0 14px 12px;
++  padding: 14px 16px;
++}
++.setup-appkind-option {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 4px 0;
++  font-size: 15px;
++}
++.setup-appkind-option input[type='radio'] {
++  width: 18px;
++  height: 18px;
++  accent-color: var(--console-primary);
++}
++
++.editor-form { margin: 0 14px; }
++.editor-form fieldset { border: none; margin: 0; padding: 0; }
++/* Legend секций редактора — стиль подписей мокапа (f-label): малая,
++   плотная, uppercase, приглушённая */
++.editor-legend {
++  padding: 0;
++  margin-bottom: 8px;
++  color: var(--muted);
++  font-size: 13px;
++  font-weight: 700;
++  letter-spacing: 0.07em;
++  text-transform: uppercase;
++}
++
++/* Карточка вопроса: панель + шапка «номер · длительность» (полоса номеров
++   мокапа: темп виден до открытия вопроса) */
++.editor-q-card {
++  margin-bottom: 12px;
++  padding: 14px 16px;
++  background: var(--console-panel);
++  border-radius: 12px;
++}
++.editor-q-head {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++  gap: 10px;
++  margin-bottom: 12px;
++}
++.editor-q-title {
++  font-family: var(--font-display);
++  font-size: 20px;
++}
++.editor-q-time {
++  color: var(--muted);
++  font-size: 13px;
++  font-variant-numeric: tabular-nums;
++}
++
++.editor-label {
++  display: block;
++  margin-bottom: 6px;
++  color: var(--muted);
++  font-size: 13px;
++  font-weight: 700;
++  letter-spacing: 0.07em;
++  text-transform: uppercase;
++}
++.editor-input {
++  width: 100%;
++  margin-top: 6px;
++  margin-bottom: 12px;
++  padding: 10px 12px;
++  border: none;
++  border-radius: 8px;
++  background: #fff;
++  color: var(--ink);
++  font: 15px var(--font-body);
++}
++.editor-input:focus-visible {
++  outline: 3px solid var(--console-primary);
++  outline-offset: 2px;
++}
++
++/* Radio-группа «Правильный ответ» (п. 9): один legend, строки radio+вариант */
++.editor-options { margin-bottom: 12px; }
++.editor-options legend {
++  padding: 0;
++  margin-bottom: 8px;
++  color: var(--muted);
++  font-size: 13px;
++  font-weight: 700;
++  letter-spacing: 0.07em;
++  text-transform: uppercase;
++}
++.editor-opt-row {
++  display: flex;
++  align-items: center;
++  gap: 10px;
++}
++.editor-opt-row input[type='radio'] {
++  width: 18px;
++  height: 18px;
++  flex-shrink: 0;
++  accent-color: var(--console-primary);
++}
++.editor-opt-row .editor-input { flex: 1; margin-top: 0; margin-bottom: 8px; }
++.editor-remove { flex-shrink: 0; padding: 6px 0; font-size: 13px; }
++
++.editor-add-option { margin-bottom: 16px; font-size: 14px; }
++
++/* «Время на ответ» (§6): число + «без лимита» в одной строке (мокап
++   .duration-row); disabled-поле при unlimited не стилизуем отдельно —
++   браузерное disabled читается, значение сохраняется в состоянии формы */
++.editor-duration-row {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: 10px;
++  margin-bottom: 12px;
++}
++.editor-duration-input { display: flex; align-items: center; gap: 8px; }
++.editor-duration-input input {
++  width: 76px;
++  padding: 10px 12px;
++  border: none;
++  border-radius: 8px;
++  background: #fff;
++  color: var(--ink);
++  font: 15px var(--font-body);
++  font-variant-numeric: tabular-nums;
++}
++.editor-duration-input input:focus-visible {
++  outline: 3px solid var(--console-primary);
++  outline-offset: 2px;
++}
++.editor-duration-unit { color: var(--muted); font-size: 14px; }
++.editor-nolimit {
++  display: flex;
++  align-items: center;
++  gap: 7px;
++  margin-left: auto;
++  font-size: 14px;
++}
++.editor-nolimit input[type='checkbox'] {
++  width: 17px;
++  height: 17px;
++  accent-color: var(--console-primary);
++}
++
++.editor-scoring { margin-bottom: 12px; }
++.editor-submit { width: 100%; }

@@ -1,0 +1,284 @@
+diff --git a/apps/web/src/pages/host/members-panel.spec.ts b/apps/web/src/pages/host/members-panel.spec.ts
+index c711ab8..8f71125 100644
+--- a/apps/web/src/pages/host/members-panel.spec.ts
++++ b/apps/web/src/pages/host/members-panel.spec.ts
+@@ -10,8 +10,9 @@ const entry = (identityId: string): RosterEntry => ({
+   role: 'participant',
+ });
+ 
+-// Рефетч в момент действия (находка №6): join не эмитит событий (I-3), ростер
+-// консоли стейл — «Исключить» по прежней identity перезашедшего бьёт мимо.
++// Рефетч в момент действия (находка №6): событийный рефетч по core.member.joined
++// дедуплицируется (min 2 с) и асинхронен — ростер консоли может быть стейл
++// в момент клика, «Исключить» по прежней identity перезашедшего бьёт мимо.
+ // Перед exclude ростер рефетчится; ушедшей identity exclude НЕ отправляется.
+ describe('excludeIfStillActive', () => {
+   it('identity активна в свежем ростере → exclude отправлен (listMembers ДО exclude)', async () => {
+diff --git a/apps/web/src/pages/play/play-page.tsx b/apps/web/src/pages/play/play-page.tsx
+index 1e57642..cf7bb18 100644
+--- a/apps/web/src/pages/play/play-page.tsx
++++ b/apps/web/src/pages/play/play-page.tsx
+@@ -14,7 +14,7 @@ import { Winners } from '../../components/winners';
+ import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
+ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+ import { lastRoundGains, myPlace } from '../../state/race-tracks';
+-import { shouldRefetchRoster } from '../../state/roster-refetch';
++import { createRosterEventRefetcher } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { JoinForm } from './join-form';
+@@ -131,7 +131,8 @@ export function PlayPage() {
+ 
+   const [members, setMembers] = useState<RosterEntry[]>([]);
+ 
+-  // Ростер (ruling 3): join не эмитит событий — первая загрузка на subscribe…
++  // Ростер (ruling 3): первая загрузка на subscribe (гонка snapshot/replay,
++  // I-8)…
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+@@ -147,14 +148,25 @@ export function PlayPage() {
+     };
+   }, [roomId, client]);
+ 
+-  // …и событийный рефетч там, где имена появляются на экране (Task 9).
+-  useEffect(() => {
+-    const last = events[events.length - 1];
+-    if (!roomId || !last || !shouldRefetchRoster(last.type)) return;
++  // …и событийный рефетч там, где имена появляются на экране (Task 9), плюс
++  // live-ростер по core.member.joined: join теперь эмитит public-событие
++  // (дизайн §9). Дедуп min 2 с (Review Focus 3): join-шторм на старте события
++  // не дёргает REST пачкой; стабильные инстансы — useCallback/useMemo по
++  // дисциплине файла.
++  const refetchRoster = useCallback(() => {
++    if (!roomId) return;
+     listMembers(client, roomId)
+       .then((r) => setMembers(r.members))
++      // Best effort: имена дорисуются при следующем рефетче, состояние
++      // соединения и так показывает баннер.
+       .catch(() => {});
+-  }, [events, roomId, client]);
++  }, [roomId, client]);
++  const rosterEventRefetch = useMemo(() => createRosterEventRefetcher(refetchRoster), [refetchRoster]);
++  useEffect(() => {
++    const last = events[events.length - 1];
++    if (!last) return;
++    rosterEventRefetch(last.type);
++  }, [events, rosterEventRefetch]);
+ 
+   const names = useMemo(() => rosterNames(members), [members]);
+ 
+diff --git a/apps/web/src/pages/screen/screen-page.tsx b/apps/web/src/pages/screen/screen-page.tsx
+index 58fb555..3566eb4 100644
+--- a/apps/web/src/pages/screen/screen-page.tsx
++++ b/apps/web/src/pages/screen/screen-page.tsx
+@@ -14,7 +14,7 @@ import { deriveRoomStatus, projectLottery, projectQuiz } from '../../state/proje
+ import { isCompactQuestion } from '../../state/question-density';
+ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+ import { lastRoundGains } from '../../state/race-tracks';
+-import { shouldRefetchRoster } from '../../state/roster-refetch';
++import { createRosterEventRefetcher } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ 
+@@ -112,7 +112,8 @@ export function ScreenPage() {
+ 
+   const [members, setMembers] = useState<RosterEntry[]>([]);
+ 
+-  // Ростер (ruling 4): join не эмитит событий — первая загрузка на subscribe…
++  // Ростер (ruling 4): первая загрузка на subscribe (гонка snapshot/replay,
++  // I-8)…
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+@@ -128,14 +129,25 @@ export function ScreenPage() {
+     };
+   }, [roomId, client]);
+ 
+-  // …и событийный рефетч там, где имена появляются на экране (табло/победители).
+-  useEffect(() => {
+-    const last = events[events.length - 1];
+-    if (!roomId || !last || !shouldRefetchRoster(last.type)) return;
++  // …и событийный рефетч там, где имена появляются на экране (табло/победители),
++  // плюс live-ростер по core.member.joined: join теперь эмитит public-событие
++  // (дизайн §9). Дедуп min 2 с (Review Focus 3): join-шторм на старте события
++  // не дёргает REST пачкой; стабильные инстансы — useCallback/useMemo по
++  // дисциплине файла.
++  const refetchRoster = useCallback(() => {
++    if (!roomId) return;
+     listMembers(client, roomId)
+       .then((r) => setMembers(r.members))
++      // Best effort: имена дорисуются при следующем рефетче, состояние
++      // соединения и так показывает баннер.
+       .catch(() => {});
+-  }, [events, roomId, client]);
++  }, [roomId, client]);
++  const rosterEventRefetch = useMemo(() => createRosterEventRefetcher(refetchRoster), [refetchRoster]);
++  useEffect(() => {
++    const last = events[events.length - 1];
++    if (!last) return;
++    rosterEventRefetch(last.type);
++  }, [events, rosterEventRefetch]);
+ 
+   const names = useMemo(() => rosterNames(members), [members]);
+ 
+diff --git a/apps/web/src/state/roster-refetch.spec.ts b/apps/web/src/state/roster-refetch.spec.ts
+index a176639..102713c 100644
+--- a/apps/web/src/state/roster-refetch.spec.ts
++++ b/apps/web/src/state/roster-refetch.spec.ts
+@@ -1,11 +1,12 @@
+-import { describe, expect, it } from 'vitest';
+-import { shouldRefetchRoster } from './roster-refetch';
++import { describe, expect, it, vi } from 'vitest';
++import { createRosterEventRefetcher, shouldRefetchRoster } from './roster-refetch';
+ 
+-// Review Focus 2: join не эмитит событий — ростер рефетчится на subscribe
+-// (это делает useRoomBinding, Task 10) и на событиях, где имена показываются.
++// Дизайн §9: join теперь эмитит public-событие core.member.joined (payload —
++// только identityId, REQ-SEC-009), ростер по нему перечитывается REST'ом;
++// плюс события, где имена появляются на экране (табло/победители, Review Focus 2).
+ describe('shouldRefetchRoster', () => {
+-  it.each(['quiz.question.revealed', 'quiz.game.finished', 'lottery.draw.completed'])(
+-    'true для %s (на экране появляются имена)',
++  it.each(['core.member.joined', 'quiz.question.revealed', 'quiz.game.finished', 'lottery.draw.completed'])(
++    'true для %s (live-ростер / на экране появляются имена)',
+     (type) => {
+       expect(shouldRefetchRoster(type)).toBe(true);
+     },
+@@ -18,3 +19,42 @@ describe('shouldRefetchRoster', () => {
+     },
+   );
+ });
++
++// Дедуп событийного рефетча (Review Focus 3): join-шторм на старте события
++// (десятки member.joined подряд) не должен дёргать REST пачкой. Тест без DOM,
++// по прецеденту focus-refetch.spec.
++describe('createRosterEventRefetcher', () => {
++  it('два member.joined в пределах окна → один вызов refetch; после окна → снова вызов', () => {
++    const refetch = vi.fn();
++    let now = 1_000;
++    const onEvent = createRosterEventRefetcher(refetch, 2_000, () => now);
++
++    onEvent('core.member.joined'); // t=1000 → рефетч
++    now = 2_000;
++    onEvent('core.member.joined'); // внутри окна → пропуск
++    expect(refetch).toHaveBeenCalledTimes(1);
++
++    now = 3_500; // 3500-1000 = 2500 > 2000
++    onEvent('core.member.joined'); // окно прошло → рефетч
++    expect(refetch).toHaveBeenCalledTimes(2);
++  });
++
++  it('дедуп общий на вызывающего, не per-type: revealed и member.joined в одном окне → один вызов', () => {
++    const refetch = vi.fn();
++    let now = 1_000;
++    const onEvent = createRosterEventRefetcher(refetch, 2_000, () => now);
++
++    onEvent('quiz.question.revealed'); // t=1000 → рефетч
++    now = 1_500;
++    onEvent('core.member.joined'); // то же окно → пропуск
++    expect(refetch).toHaveBeenCalledTimes(1);
++  });
++
++  it('событие вне списка рефетча → refetch не вызывается', () => {
++    const refetch = vi.fn();
++    const onEvent = createRosterEventRefetcher(refetch, 2_000, () => 1_000);
++
++    onEvent('quiz.question.opened');
++    expect(refetch).not.toHaveBeenCalled();
++  });
++});
+diff --git a/apps/web/src/state/roster-refetch.ts b/apps/web/src/state/roster-refetch.ts
+index cb7d4bd..65e5e3c 100644
+--- a/apps/web/src/state/roster-refetch.ts
++++ b/apps/web/src/state/roster-refetch.ts
+@@ -1,4 +1,31 @@
+-// roster-refetch.ts — join не эмитит событий: ростер рефетчим на subscribe и на
+-// событиях, где имена показываются (Review Focus 2).
+-const ROSTER_REFETCH_EVENTS = new Set(['quiz.question.revealed', 'quiz.game.finished', 'lottery.draw.completed']);
++import { createFocusRefetcher } from './focus-refetch';
++
++// roster-refetch.ts — событийный рефетч ростера. Join теперь ЭМИТИТ public-
++// событие core.member.joined (payload — только identityId, REQ-SEC-009;
++// дизайн §9): displayName в лог не попадает, ростер перечитывается REST'ом
++// (GET /rooms/:id/members). Плюс события, где имена появляются на экране
++// (табло/победители, Review Focus 2).
++const ROSTER_REFETCH_EVENTS = new Set([
++  'core.member.joined',
++  'quiz.question.revealed',
++  'quiz.game.finished',
++  'lottery.draw.completed',
++]);
+ export const shouldRefetchRoster = (type: string): boolean => ROSTER_REFETCH_EVENTS.has(type);
++
++// Дедуп событийного рефетча min 2 с (Review Focus 3): join-шторм на старте
++// события (десятки member.joined подряд) не должен дёргать REST пачкой.
++// Дедуп общий на вызывающего, не per-type: reveal сразу после join перечитал
++// бы тот же ростер. min-interval-семантика переиспользована композицией над
++// createFocusRefetcher (не копия). Чистая фабрика — тест без DOM.
++export function createRosterEventRefetcher(
++  refetch: () => void,
++  minIntervalMs = 2_000,
++  now: () => number = Date.now,
++): (type: string) => void {
++  const deduped = createFocusRefetcher(refetch, minIntervalMs, now);
++  return (type: string) => {
++    if (!shouldRefetchRoster(type)) return;
++    deduped();
++  };
++}
+diff --git a/apps/web/src/state/use-room-feed.ts b/apps/web/src/state/use-room-feed.ts
+index e4e6bcb..b3c2b87 100644
+--- a/apps/web/src/state/use-room-feed.ts
++++ b/apps/web/src/state/use-room-feed.ts
+@@ -7,7 +7,7 @@ import { listMembers } from '../api/endpoints';
+ import { rosterNames } from '../components/roster-names';
+ import { deriveRoomStatus, projectLottery, projectQuiz } from './projections';
+ import { createFocusRefetcher } from './focus-refetch';
+-import { shouldRefetchRoster } from './roster-refetch';
++import { createRosterEventRefetcher } from './roster-refetch';
+ 
+ // Общий клей «лог → ростер + проекции» (ruling Task 14): до этого блок копировался
+ // в play-page и screen-page; консоль — третий потребитель, поэтому клей поднят
+@@ -39,7 +39,8 @@ export function useRoomFeed(
+       .catch(() => {});
+   }, [roomId, client]);
+ 
+-  // Ростер: join не эмитит событий — первая загрузка на subscribe (Review Focus 2).
++  // Ростер: первая загрузка на subscribe (гонка snapshot/replay, I-8); join
++  // теперь эмитит core.member.joined — событийный рефетч ниже (дизайн §9).
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+@@ -55,16 +56,24 @@ export function useRoomFeed(
+     };
+   }, [roomId, client]);
+ 
+-  // …и событийный рефетч там, где имена появляются на экране (табло/победители).
++  // …и событийный рефетч там, где имена появляются на экране (табло/победители),
++  // плюс live-ростер по core.member.joined (дизайн §9). Дедуп min 2 с
++  // (Review Focus 3): join-шторм на старте события не дёргает REST пачкой.
++  // Стабильный инстанс фабрики — useMemo над стабильным refetchMembers.
++  const rosterEventRefetch = useMemo(
++    () => createRosterEventRefetcher(refetchMembers),
++    [refetchMembers],
++  );
+   useEffect(() => {
+     const last = events[events.length - 1];
+-    if (!last || !shouldRefetchRoster(last.type)) return;
+-    refetchMembers();
+-  }, [events, refetchMembers]);
++    if (!last) return;
++    rosterEventRefetch(last.type);
++  }, [events, rosterEventRefetch]);
+ 
+-  // Рефетч по возврату во вкладку (находка №6): join не эмитит событий — ростер
+-  // стейл, пока ведущий был в другой вкладке. Без поллинга (решение владельца);
+-  // дедуп парных visibilitychange/focus — в createFocusRefetcher.
++  // Рефетч по возврату во вкладку (находка №6) — НЕЗАВИСИМЫЙ триггер
++  // (дизайн §9): member.joined не покрывает окно, пока вкладка была неактивна.
++  // Без поллинга (решение владельца); дедуп парных visibilitychange/focus —
++  // в createFocusRefetcher.
+   useEffect(() => {
+     if (!roomId) return;
+     const onFocus = createFocusRefetcher(() => {
