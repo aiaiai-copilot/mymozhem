@@ -70,16 +70,3 @@ body {
   font-family: var(--font-body);
   color: var(--ink);
 }
-
-/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
-   с привязкой к ширине зала (vw), варианты без маркеров. Переехало из
-   styles.css как есть — потребители живы до T8. */
-.screen-question {
-  font-size: clamp(2rem, 6vw, 4rem);
-}
-
-.screen-options {
-  font-size: clamp(1.25rem, 3vw, 2rem);
-  list-style: none;
-  padding: 0;
-}
