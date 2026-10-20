@@ -1,0 +1,726 @@
+# Review package: 7a3fcfe..1a39801
+
+## Commits
+1a39801 feat(web): контур участника по дизайн-срезу (вход/ожидание/вопрос с таймером/reveal с дорожками/финал)
+
+## Files changed
+ apps/web/src/components/logo.tsx      |  16 +++
+ apps/web/src/main.tsx                 |   4 +-
+ apps/web/src/pages/play/join-form.tsx |  72 +++++++-----
+ apps/web/src/pages/play/play-page.tsx | 201 ++++++++++++++++++++++++--------
+ apps/web/src/styles/scene.css         | 212 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 427 insertions(+), 78 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/components/logo.tsx b/apps/web/src/components/logo.tsx
+new file mode 100644
+index 0000000..58b3c2a
+--- /dev/null
++++ b/apps/web/src/components/logo.tsx
+@@ -0,0 +1,16 @@
++// Логотип «МЫ МОЖЕМЪ» (дизайн п. 3/17; написание — Приложение A, verbatim).
++// Шрифт — var(--font-logo): до подтверждения лицензии Blagovest это Oranienbaum
++// (гейт п. 4), замена — одна строка в tokens.css. Компонент несёт только
++// начертание/цвет/кегль; позиционирование (центр вверху у участника, левый
++// верхний угол у проектора) — обязанность страницы-родителя (ruling C-1).
++
++interface LogoProps {
++  // Сцена — золото на тёмном; консоль — primary на светлом (потребитель T9).
++  contour: 'scene' | 'console';
++  // participant — 19px, projector — 22px (п. 17; потребитель projector — T8).
++  size: 'participant' | 'projector';
++}
++
++export function Logo({ contour, size }: LogoProps) {
++  return <div className={`logo logo-${contour} logo-${size}`}>МЫ МОЖЕМЪ</div>;
++}
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 849ed33..96307fc 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,18 +1,20 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import { App } from './App';
+-// Визуальный фундамент (T4): порядок важен — токены → база → состояния.
++// Визуальный фундамент (T4): порядок важен — токены → база → состояния;
++// экраны контуров (T7+) — последними, переопределяют базу по классам.
+ import './styles/tokens.css';
+ import './styles/base.css';
+ import './styles/transitions.css';
++import './styles/scene.css';
+ 
+ // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
+ // под MemoryRouter без привязки к DOM.
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <BrowserRouter>
+       <App />
+     </BrowserRouter>
+   </StrictMode>,
+ );
+diff --git a/apps/web/src/pages/play/join-form.tsx b/apps/web/src/pages/play/join-form.tsx
+index 4ee372b..9df024e 100644
+--- a/apps/web/src/pages/play/join-form.tsx
++++ b/apps/web/src/pages/play/join-form.tsx
+@@ -1,15 +1,16 @@
+ import { useState, type FormEvent } from 'react';
+ import { DISPLAY_NAME_MAX_LENGTH, type JoinRequest } from '@mymozhem/sdk';
+ import { ApiError } from '../../api/api-error';
+ import type { ApiClient } from '../../api/api-client';
+ import { joinRoom } from '../../api/endpoints';
++import { Logo } from '../../components/logo';
+ import { decodeAccessClaims, SessionStore } from '../../state/session';
+ 
+ // Тело join (ADR-012 §3): имя необязательно — пустое уходит БЕЗ ключа
+ // displayName (пустая строка не прошла бы displayNameSchema.min(1)), сервер
+ // назначит псевдоним и вернёт фактическое имя в ответе.
+ export const buildJoinRequest = (code: string, trimmedName: string): JoinRequest =>
+   trimmedName ? { code, displayName: trimmedName } : { code };
+ 
+ interface JoinFormProps {
+   // Код из URL (:code): ссылка-приглашение — код показываем read-only, вводить
+@@ -78,46 +79,61 @@ export function JoinForm({
+         }
+         // Переживающая перезагрузку идентификация (дизайн §5): код+имя, не токен.
+         // Сохраняем ФАКТИЧЕСКОЕ имя из ответа — оно могло быть псевдонимом.
+         SessionStore.saveGuest({ code: trimmedCode, displayName: res.displayName });
+         onJoined(claims.roomId);
+       })
+       .catch((err: unknown) => setError(joinErrorText(err)))
+       .finally(() => setBusy(false));
+   };
+ 
++  // Разметка — эталон participant-join-lobby-center-fix: логотип по центру,
++  // «Входъ в игру» (Приложение A), золотые подписи полей, кнопка «Играть» —
++  // сценический вариант (.btn-scene + .btn-join), не консольный .btn-primary.
+   return (
+-    <form onSubmit={submit}>
+-      <h1>Вход в игру</h1>
+-      {codeFromUrl ? (
+-        <p>
+-          Код комнаты: <strong>{codeFromUrl}</strong>
+-        </p>
+-      ) : (
+-        <label>
+-          Код комнаты
++    <>
++      <Logo contour="scene" size="participant" />
++      <h1 className="play-title">Входъ в игру</h1>
++      <form onSubmit={submit}>
++        {codeFromUrl ? (
++          // Ссылка-приглашение: код показываем read-only полем (мокап входа),
++          // вводить не просим.
++          <label className="play-field">
++            Код комнаты
++            <input className="play-input" value={codeFromUrl} readOnly autoComplete="off" />
++          </label>
++        ) : (
++          <label className="play-field">
++            Код комнаты
++            <input
++              className="play-input"
++              value={code}
++              onChange={(e) => setCode(e.target.value)}
++              autoComplete="off"
++              disabled={busy}
++            />
++          </label>
++        )}
++        <label className="play-field">
++          Ваше имя (необязательно)
+           <input
+-            value={code}
+-            onChange={(e) => setCode(e.target.value)}
++            className="play-input"
++            value={displayName}
++            onChange={(e) => setDisplayName(e.target.value)}
++            maxLength={DISPLAY_NAME_MAX_LENGTH}
++            placeholder="Получите псевдоним, если пусто"
+             autoComplete="off"
+             disabled={busy}
+           />
+         </label>
+-      )}
+-      <label>
+-        Ваше имя (необязательно)
+-        <input
+-          value={displayName}
+-          onChange={(e) => setDisplayName(e.target.value)}
+-          maxLength={DISPLAY_NAME_MAX_LENGTH}
+-          placeholder="Получите псевдоним, если пусто"
+-          autoComplete="off"
+-          disabled={busy}
+-        />
+-      </label>
+-      {error ? <p role="alert">{error}</p> : null}
+-      <button type="submit" disabled={busy}>
+-        {busy ? 'Входим…' : 'Играть'}
+-      </button>
+-    </form>
++        {error ? (
++          <p role="alert" className="play-error">
++            {error}
++          </p>
++        ) : null}
++        <button type="submit" className="btn btn-scene btn-join" disabled={busy}>
++          {busy ? 'Входим…' : 'Играть'}
++        </button>
++      </form>
++    </>
+   );
+ }
+diff --git a/apps/web/src/pages/play/play-page.tsx b/apps/web/src/pages/play/play-page.tsx
+index 14a7b30..031db64 100644
+--- a/apps/web/src/pages/play/play-page.tsx
++++ b/apps/web/src/pages/play/play-page.tsx
+@@ -1,32 +1,35 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useParams } from 'react-router-dom';
+ import type { RosterEntry } from '@mymozhem/sdk';
+-import {
+-  gameFinishedPayload,
+-  questionRevealedPayload,
+-  quizSettingsSchema,
+-} from '@mymozhem/app-quiz';
++import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
+ import { ApiClient } from '../../api/api-client';
+ import { ApiError } from '../../api/api-error';
+ import { listMembers, refreshSession } from '../../api/endpoints';
+ import { rejoinAsGuest } from '../../state/guest-rejoin';
+ import { ConnectionBanner } from '../../components/connection-banner';
+-import { rosterNames } from '../../components/roster-names';
+-import { Standings } from '../../components/standings';
++import { Logo } from '../../components/logo';
++import { RaceTracks } from '../../components/race-tracks';
++import { displayNameOf, rosterNames } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
++import { formatTimer, useQuestionTimer } from '../../state/question-timer';
++import { lastRoundGains, myPlace } from '../../state/race-tracks';
+ import { shouldRefetchRoster } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { JoinForm } from './join-form';
+ 
++// Буквенные метки вариантов (золотые <b> в .btn-scene, мокапы component-states-live
++// и timer-projector-participant). Вариантов больше, чем букв, — рендер без метки.
++const OPTION_LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
++
+ // anonClient (ruling): join/refresh — auth:false, access-токена им не нужен,
+ // поэтому провайдер всегда отдаёт null. Module-level const — это не мутабельное
+ // состояние: клиент безстейтов, токены живут в SessionStore страницы.
+ const anonClient = new ApiClient({
+   getAccessToken: () => null,
+   refresh: () => Promise.resolve(),
+ });
+ 
+ const answerErrorText = (e: unknown): string => {
+   if (e instanceof ApiError) {
+@@ -170,20 +173,46 @@ export function PlayPage() {
+   }, [session, roomId]);
+ 
+   // Публичная проекция appSettings (REQ-CORE-008): correctAnswers сюда
+   // структурно не доезжают, поэтому парсим только public-ключ questions —
+   // полной quizSettingsSchema клиенту не собрать и не нужно.
+   const questions = useMemo(() => {
+     const parsed = quizSettingsSchema.shape.questions.safeParse(binding.appSettings.questions);
+     return parsed.success ? parsed.data : [];
+   }, [binding.appSettings]);
+ 
++  // Таймер вопроса (п. 12): durationSec — только из распарсенных настроек
++  // (дефолт 30 материализуется на parse; без raw appSettings и без «?? 30»),
++  // openedAt — серверный штамп из проекции. «Без лимита»/вопроса нет → null →
++  // таймер не рендерится вообще. Хук вызван до ранних return (rules of hooks).
++  const question = currentQuestion !== null ? questions[currentQuestion] : undefined;
++  const durationSec = question?.durationSec ?? null;
++  const timerSec = useQuestionTimer(durationSec, quiz.openedAt);
++
++  // Табло дорожками (дизайн §7): итоги из проекции, прирост — из последнего
++  // reveal в логе (lastRoundGains), имена — через displayNameOf (fallback
++  // «Гость» внутри). Место — плотный ранг в отсортированном списке (myPlace).
++  const gains = lastRoundGains(events);
++  const trackEntries = Object.entries(quiz.totals).map(([actorId, total]) => ({
++    actorId,
++    name: displayNameOf(names, actorId),
++    total,
++    gain: gains[actorId] ?? 0,
++  }));
++  const place =
++    myId !== null
++      ? myPlace(
++          [...trackEntries].sort((a, b) => b.total - a.total),
++          myId,
++        )
++      : null;
++
+   // Reveal текущего вопроса: revealed-событие позже close для того же индекса.
+   const reveal = useMemo(() => {
+     let revealIndex = -1;
+     let closeIndex = -1;
+     events.forEach((e, i) => {
+       const qi = (e.payload as { questionIndex?: unknown }).questionIndex;
+       if (qi !== currentQuestion) return;
+       if (e.type === 'quiz.question.revealed') revealIndex = i;
+       else if (e.type === 'quiz.question.closed') closeIndex = i;
+     });
+@@ -215,124 +244,198 @@ export function PlayPage() {
+   const submitAnswer = (optionIndex: number) => {
+     if (currentQuestion === null) return;
+     setAnswerError(null);
+     void binding
+       .publish('quiz.answer.submitted', { questionIndex: currentQuestion, optionIndex })
+       .then(() => setAnswerAck(true))
+       .catch((e: unknown) => setAnswerError(answerErrorText(e)));
+   };
+ 
+   if (!roomId) {
+-    if (autoJoinPending) return <p>Входим…</p>;
++    if (autoJoinPending)
++      return (
++        <main className="play-page">
++          <Logo contour="scene" size="participant" />
++          <p className="play-waiting">Входим…</p>
++        </main>
++      );
+     return (
+-      <main>
++      <main className="play-page">
+         <JoinForm
+           codeFromUrl={code}
+           initialDisplayName={saved?.displayName}
+           initialError={autoJoinError}
+           client={anonClient}
+           session={session}
+           onJoined={setRoomId}
+         />
+       </main>
+     );
+   }
+ 
+   const myAnswered = myId !== null && answeredActors.has(myId);
+   const answered = answerAck || myAnswered;
+ 
+   let view;
+   if (quiz.finished || status === 'COMPLETED') {
+-    // Финал: итоговое табло (места из payload game.finished, если событие было)
+-    // + победители розыгрыша (дизайн §4).
+-    const finishedEvent = [...events].reverse().find((e) => e.type === 'quiz.game.finished');
+-    const finalStandings = finishedEvent
+-      ? gameFinishedPayload.parse(finishedEvent.payload).standings
+-      : undefined;
++    // Финал (§5.1, п. 18): итоговое полное табло дорожками + победители
++    // розыгрыша — только если розыгрыш был (явный гард; Winners и сам вернёт
++    // null на пустых draws, но условие читается здесь).
++    const hasDraws = Object.keys(lottery.draws).length > 0;
+     view = (
+       <section>
+-        <h1>Игра завершена</h1>
+-        {myId && quiz.totals[myId] !== undefined ? <p>Ваши очки: {quiz.totals[myId]}</p> : null}
+-        <Standings standings={finalStandings} totals={quiz.totals} names={names} />
+-        <Winners draws={lottery.draws} names={names} />
++        <h1 className="play-title">Игра завершена</h1>
++        {myId && quiz.totals[myId] !== undefined ? (
++          <p className="play-points">Ваши очки: {quiz.totals[myId]}</p>
++        ) : null}
++        <div className="play-standings-head">
++          <span className="play-standings-title">Итоговое табло</span>
++          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
++        </div>
++        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
++        {hasDraws ? (
++          <div className="play-winners">
++            <Winners draws={lottery.draws} names={names} />
++          </div>
++        ) : null}
+       </section>
+     );
+   } else if (status === 'CANCELLED') {
+     view = <p>Комната отменена организатором.</p>;
+   } else if (status !== 'ACTIVE') {
+-    view = <p>Вы в игре. Ожидаем начала — организатор ещё готовит комнату…</p>;
++    // Ожидание (п. 7): текст центрирован относительно всей высоты
++    // (top: 50% + translateY(-50%) в .play-waiting), логотип и заголовок
++    // на центрирование не влияют.
++    view = (
++      <section>
++        <h1 className="play-title">Вы в игре</h1>
++        <p className="play-waiting">Ожидаем начала — организатор ещё готовит комнату…</p>
++      </section>
++    );
+   } else if (currentQuestion !== null && quiz.accepting) {
+-    const question = questions[currentQuestion];
++    // Вопрос (§5.1, п. 12): верхняя строка — «Вопросъ N из M» + таймер 40px
++    // (только при включённом лимите), отступ перед вариантами 30px, варианты
++    // .btn-scene растут по высоте, скролл — страничный.
+     view = (
+       <section>
+-        <h1>{question ? question.text : `Вопрос ${currentQuestion + 1}`}</h1>
++        <div className="play-strip">
++          <span className="play-kicker">
++            {question
++              ? `Вопросъ ${currentQuestion + 1} из ${questions.length}`
++              : `Вопросъ ${currentQuestion + 1}`}
++          </span>
++          {timerSec !== null ? <span className="play-timer">{formatTimer(timerSec)}</span> : null}
++        </div>
++        <h1 className="play-question">
++          {question ? question.text : `Вопросъ ${currentQuestion + 1}`}
++        </h1>
+         {answered ? (
+           <p>Ответ принят.</p>
+         ) : (
+-          <ul>
+-            {(question?.options ?? []).map((option, optionIndex) => (
+-              <li key={optionIndex}>
+-                <button type="button" onClick={() => submitAnswer(optionIndex)}>
+-                  {option}
+-                </button>
+-              </li>
+-            ))}
++          <ul className="play-options">
++            {(question?.options ?? []).map((option, optionIndex) => {
++              const letter = OPTION_LETTERS[optionIndex];
++              return (
++                <li key={optionIndex}>
++                  <button
++                    type="button"
++                    className="btn btn-scene"
++                    onClick={() => submitAnswer(optionIndex)}
++                  >
++                    {letter ? <b>{letter}</b> : null}
++                    {option}
++                  </button>
++                </li>
++              );
++            })}
+           </ul>
+         )}
+-        {answerError ? <p role="alert">{answerError}</p> : null}
++        {answerError ? (
++          <p role="alert" className="play-error">
++            {answerError}
++          </p>
++        ) : null}
+       </section>
+     );
+   } else if (currentQuestion !== null && reveal) {
+-    // Reveal: верно/неверно + очки из payload (единственный публичный источник
+-    // баллов); correctAnswers клиенту структурно недоступны и не запрашиваются.
++    // Reveal (§5.1, мокап game-states): вердикт значком+текстом+цветом, очки
++    // из payload (единственный публичный источник баллов), «Правильный отвѣтъ»
++    // (Приложение A) плашкой, табло — полные дорожки с «это ты» и местом
++    // в шапке. correctAnswers клиенту структурно недоступны и не запрашиваются.
+     const myPoints = myId
+       ? (reveal.awarded.find((a) => a.actorId === myId)?.points ?? 0)
+       : 0;
+-    const verdict = !answered
+-      ? 'Вы не успели ответить.'
+-      : reveal.correctIndex === undefined
+-        ? 'Ответ принят.'
+-        : // Верно ⇔ актор в awarded (баллы начисляются только за правильный
+-          // ответ); optionIndex на клиенте недоступен — сравнивать нечего.
+-          myId !== null && reveal.awarded.some((a) => a.actorId === myId)
+-          ? 'Верно!'
+-          : 'Неверно.';
++    let verdictText: string;
++    let verdictClass = '';
++    let verdictIcon = '';
++    if (!answered) {
++      verdictText = 'Вы не успели ответить.';
++    } else if (reveal.correctIndex === undefined) {
++      verdictText = 'Ответ принят.';
++    } else if (myId !== null && reveal.awarded.some((a) => a.actorId === myId)) {
++      // Верно ⇔ актор в awarded (баллы начисляются только за правильный
++      // ответ); optionIndex на клиенте недоступен — сравнивать нечего.
++      verdictText = 'Верно!';
++      verdictClass = ' play-verdict-success';
++      verdictIcon = '✓ ';
++    } else {
++      verdictText = 'Неверно.';
++      verdictClass = ' play-verdict-danger';
++      verdictIcon = '× ';
++    }
+     const correctOption =
+       reveal.correctIndex !== undefined
+         ? questions[currentQuestion]?.options[reveal.correctIndex]
+         : undefined;
+     view = (
+       <section>
+-        <h1>{verdict}</h1>
+-        {myPoints > 0 ? <p>+{myPoints} очков</p> : null}
+-        {correctOption ? <p>Правильный ответ: {correctOption}</p> : null}
+-        <Standings totals={quiz.totals} names={names} />
++        <h1 className={`play-verdict${verdictClass}`}>
++          {verdictIcon}
++          {verdictText}
++        </h1>
++        {myPoints > 0 ? <p className="play-points">+{myPoints} очков</p> : null}
++        {correctOption ? (
++          <div className="play-correct">
++            <div className="play-correct-label">Правильный отвѣтъ</div>
++            <div className="play-correct-answer">{correctOption}</div>
++          </div>
++        ) : null}
++        <div className="play-standings-head">
++          <span className="play-standings-title">Табло</span>
++          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
++        </div>
++        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
+       </section>
+     );
+   } else if (currentQuestion !== null) {
+     view = <p>Ответы закрыты, ждём результатов…</p>;
+   } else {
+     // ACTIVE без открытого вопроса: ждём первый вопрос; в лотерейной комнате
+     // здесь же появляются победители по мере розыгрышей.
+     view = (
+       <section>
+         <p>Игра идёт. Ждём вопрос…</p>
+-        <Winners draws={lottery.draws} names={names} />
++        {Object.keys(lottery.draws).length > 0 ? (
++          <div className="play-winners">
++            <Winners draws={lottery.draws} names={names} />
++          </div>
++        ) : null}
+       </section>
+     );
+   }
+ 
+   return (
+-    <main>
++    <main className="play-page">
+       <ConnectionBanner state={binding.connectionState} />
+       {rejoined ? (
+         <p role="status">
+           Сессия истекла — вы вошли заново, прежние очки не переносятся.{' '}
+-          <button type="button" onClick={() => setRejoined(false)}>
++          <button type="button" className="btn btn-scene" onClick={() => setRejoined(false)}>
+             Понятно
+           </button>
+         </p>
+       ) : null}
++      <Logo contour="scene" size="participant" />
+       {view}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/styles/scene.css b/apps/web/src/styles/scene.css
+new file mode 100644
+index 0000000..82fc0f2
+--- /dev/null
++++ b/apps/web/src/styles/scene.css
+@@ -0,0 +1,212 @@
++/* Тёмная сцена — контур участника (/play), дизайн §4/§5.1, п. 6/7/12/13/17/18.
++   Значения перенесены из мокапов-эталонов: participant-join-lobby-center-fix,
++   participant-flow-layout-v2, participant-long-content, game-states (сессия 44),
++   timer-projector-participant, tracks-scene-with-logo (сессия 45); цвета —
++   токены T4. Стили логотипа живут здесь же (компонент несёт начертание/цвет/
++   кегль, позиционирование — у страницы, ruling C-1). Размещение — отдельным
++   файлом от transitions.css: там система состояний, здесь раскладка экранов
++   (ruling C-2); проектор (T8) расширит этот же файл или добавит соседний. */
++
++/* --- Логотип (ruling C-1) --- */
++.logo {
++  font-family: var(--font-logo);
++  font-weight: 400;
++  line-height: 1.2;
++  letter-spacing: 0.02em;
++}
++.logo-scene { color: var(--gold); }
++.logo-console { color: var(--console-primary); }
++.logo-participant { font-size: 19px; }
++.logo-projector { font-size: 22px; }
++
++/* --- Страница участника --- */
++.play-page {
++  /* position:relative — опора центрирования ожидания (п. 7) */
++  position: relative;
++  min-height: 100vh;
++  min-height: 100dvh;
++  padding: 21px 18px 23px;
++  background: var(--scene-bg);
++  color: var(--scene-text);
++}
++/* Логотип участника — по центру вверху (п. 17); позиционирование — обязанность
++   страницы, не компонента (ruling C-1). */
++.play-page .logo { text-align: center; }
++
++/* Заголовок экрана (вход/ожидание/финал) — мокапы center-fix/flow-v2/edge */
++.play-title {
++  margin: 30px 0 21px;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 30px;
++  line-height: 1.1;
++  font-weight: 400;
++}
++
++/* Вход (мокап participant-join-lobby-center-fix): золотые подписи, поля
++   --input-scene с тёмным текстом */
++.play-field {
++  display: grid;
++  gap: 7px;
++  margin-bottom: 17px;
++  color: var(--gold);
++  font-size: 14px;
++}
++.play-input {
++  width: 100%;
++  min-height: 49px;
++  padding: 11px 12px;
++  color: var(--scene-bg);
++  background: var(--input-scene);
++  border: 0;
++  border-radius: 4px;
++  font: 16px var(--font-body);
++}
++/* Литерал мокапа входа (в токенах T4 нет цвета placeholder) */
++.play-input::placeholder { color: #354b41; }
++.play-input:focus-visible {
++  outline: 3px solid var(--gold);
++  outline-offset: 2px;
++}
++
++/* Кнопка «Играть» — вариант сцены по мокапу входа (НЕ консольный .btn-primary,
++   I-9): поверхность сцены + золотой текст. Состояния hover/active/focus/disabled
++   наследует от .btn/.btn-scene (transitions.css). */
++.btn-join {
++  width: 100%;
++  min-width: 0;
++  min-height: 52px;
++  margin-top: 34px;
++  padding: 13px 22px;
++  color: var(--gold);
++  font-weight: 700;
++  font-size: 17px;
++  text-align: center;
++  border-radius: 4px;
++}
++
++/* Ошибки на тёмной сцене — плотное начертание (п. 6) */
++.play-error { color: var(--error-dark); font-weight: 700; }
++
++/* Ожидание: центрирование относительно всей высоты, логотип/заголовок не влияют
++   (п. 7, мокап center-fix: top 50% + translateY(-50%)) */
++.play-waiting {
++  position: absolute;
++  top: 50%;
++  left: 18px;
++  right: 18px;
++  transform: translateY(-50%);
++  margin: 0;
++  color: rgba(246, 237, 220, 0.82);
++  font-size: 17px;
++  line-height: 1.5;
++}
++
++/* Вопрос: верхняя строка — номер + таймер 40px (п. 12, мокап
++   timer-projector-participant); «без лимита» — таймера нет вообще */
++.play-strip {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++  margin-top: 29px;
++}
++.play-kicker {
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 16px;
++  letter-spacing: 0.08em;
++  text-transform: uppercase;
++}
++.play-timer {
++  font-family: var(--font-display);
++  font-size: 40px;
++  line-height: 1;
++  color: var(--gold);
++  font-variant-numeric: tabular-nums;
++}
++/* Нижние 30px — отступ перед вариантами (п. 7) */
++.play-question {
++  margin: 10px 0 30px;
++  font-family: var(--font-display);
++  font-size: 28px;
++  line-height: 1.13;
++  font-weight: 400;
++}
++.play-options {
++  display: grid;
++  gap: 11px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++/* Вариант на всю ширину; длинный текст переносится, кнопка растёт по высоте
++   (п. 7, мокап participant-long-content); внутренних скроллов нет */
++.play-options .btn-scene {
++  width: 100%;
++  min-width: 0;
++}
++
++/* Reveal (мокап game-states): вердикт различается значком, текстом и цветом.
++   success/danger — литералы мокапа (в токенах T4 нет success-цвета). */
++.play-verdict {
++  margin: 28px 0 4px;
++  font-family: var(--font-display);
++  font-size: 38px;
++  font-weight: 400;
++}
++.play-verdict-success { color: #8fcaa5; }
++.play-verdict-danger { color: #e5a092; }
++.play-points {
++  margin: 0 0 17px;
++  color: var(--gold);
++  font-size: 18px;
++  font-weight: 700;
++}
++/* «Правильный отвѣтъ» — плашка с золотой кромкой (мокап game-states) */
++.play-correct {
++  margin: 18px 0;
++  padding: 13px 14px;
++  background: var(--scene-surface);
++  border-left: 3px solid var(--gold);
++}
++.play-correct-label {
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 16px;
++  letter-spacing: 0.04em;
++}
++.play-correct-answer {
++  margin-top: 4px;
++  font-family: var(--font-display);
++  font-size: 28px;
++}
++
++/* Шапка табло: заголовок + моё место (п. 13, myPlace) */
++.play-standings-head {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++  margin: 19px 0 8px;
++}
++.play-standings-title {
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 21px;
++}
++.play-standings-place { color: var(--muted-scene); font-size: 14px; }
++
++/* Победители розыгрыша (только если розыгрыш был, п. 18) */
++.play-winners { margin-top: 22px; }
++.play-winners h2 {
++  margin: 0 0 8px;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 20px;
++  font-weight: 400;
++}
++.play-winners ul {
++  margin: 0;
++  padding-left: 19px;
++  font-size: 15px;
++  line-height: 1.5;
++}

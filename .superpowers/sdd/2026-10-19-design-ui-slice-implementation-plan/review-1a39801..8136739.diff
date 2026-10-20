@@ -1,0 +1,641 @@
+# Review package: 1a39801..8136739
+
+## Commits
+8136739 feat(web): контур проектора по дизайн-срезу (логотип, таймер 56px, дорожки топ-4/топ-5, финал без розыгрыша)
+
+## Files changed
+ apps/web/src/main.tsx                       |   1 +
+ apps/web/src/pages/screen/screen-page.tsx   | 159 +++++++++++++++++-----
+ apps/web/src/state/question-density.spec.ts |  32 +++++
+ apps/web/src/state/question-density.ts      |  14 ++
+ apps/web/src/styles/base.css                |  13 --
+ apps/web/src/styles/scene.css               |   2 +-
+ apps/web/src/styles/screen.css              | 202 ++++++++++++++++++++++++++++
+ 7 files changed, 372 insertions(+), 51 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 96307fc..efd0a2a 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,20 +1,21 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import { App } from './App';
+ // Визуальный фундамент (T4): порядок важен — токены → база → состояния;
+ // экраны контуров (T7+) — последними, переопределяют базу по классам.
+ import './styles/tokens.css';
+ import './styles/base.css';
+ import './styles/transitions.css';
+ import './styles/scene.css';
++import './styles/screen.css';
+ 
+ // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
+ // под MemoryRouter без привязки к DOM.
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <BrowserRouter>
+       <App />
+     </BrowserRouter>
+   </StrictMode>,
+ );
+diff --git a/apps/web/src/pages/screen/screen-page.tsx b/apps/web/src/pages/screen/screen-page.tsx
+index a19667e..7448b86 100644
+--- a/apps/web/src/pages/screen/screen-page.tsx
++++ b/apps/web/src/pages/screen/screen-page.tsx
+@@ -1,26 +1,34 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useParams } from 'react-router-dom';
+ import type { RosterEntry } from '@mymozhem/sdk';
+-import { gameFinishedPayload, questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
++import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
+ import { ApiClient } from '../../api/api-client';
+ import { ApiError } from '../../api/api-error';
+ import { joinRoom, listMembers, refreshSession } from '../../api/endpoints';
+ import { ConnectionBanner } from '../../components/connection-banner';
+-import { rosterNames } from '../../components/roster-names';
+-import { Standings } from '../../components/standings';
++import { Logo } from '../../components/logo';
++import { RaceTracks } from '../../components/race-tracks';
++import { displayNameOf, rosterNames } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { deriveRoomStatus, projectLottery, projectQuiz } from '../../state/projections';
++import { isCompactQuestion } from '../../state/question-density';
++import { formatTimer, useQuestionTimer } from '../../state/question-timer';
++import { lastRoundGains } from '../../state/race-tracks';
+ import { shouldRefetchRoster } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ 
++// Буквенные метки вариантов (золотые <b>, мокап timer-projector-participant;
++// тот же подход, что в play-page). Вариантов больше, чем букв, — без метки.
++const OPTION_LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
++
+ // anonClient (ruling 1): join/refresh — auth:false, access-токена им не нужен,
+ // поэтому провайдер всегда отдаёт null. Тот же паттерн, что в play-page.
+ const anonClient = new ApiClient({
+   getAccessToken: () => null,
+   refresh: () => Promise.resolve(),
+ });
+ 
+ // UX-маппинг кодов join (дизайн §5) — как в play: код комнаты свёрнут сервером
+ // в JOIN_DENIED (REQ-ID-013), rate-limit просит подождать, неизвестный код —
+ // общий экран «обновите».
+@@ -33,23 +41,24 @@ const joinErrorText = (e: unknown): string => {
+         return 'Комната заполнена, свободных мест нет.';
+       case 'RATE_LIMITED':
+         return 'Слишком много попыток. Подождите немного и обновите страницу.';
+       default:
+         return `Не удалось подключить экран (${e.code}). Обновите страницу.`;
+     }
+   }
+   return 'Ошибка сети. Проверьте соединение и обновите страницу.';
+ };
+ 
+-// Проектор (дизайн §4/§8): spectator-join по коду из URL, read-only — ни форм,
+-// ни кнопок, ни publish. Зритель смотрит: текущий вопрос крупно → табло после
+-// reveal → финал с итогами лотереи.
++// Проектор (дизайн §5.2, п. 8): spectator-join по коду из URL, read-only — ни
++// форм, ни кнопок, ни publish. Зритель смотрит: текущий вопрос крупно с
++// таймером → reveal с дорожками топ-4 → финал топ-5 с победителями лотереи.
++// Логотип — левый верхний угол на всех экранах (п. 17), стили — screen.css.
+ export function ScreenPage() {
+   const { code } = useParams();
+   // SessionStore здесь — только in-memory TokenProvider (ruling 2): saveGuest
+   // НЕ вызывается, потому что play-страница хранит гостевую сессию под тем же
+   // ключом localStorage, и spectator 'Экран' затёр бы её на этом устройстве.
+   // Зритель без состояния: перезагрузка проектора = новый spectator-join по коду.
+   const [session] = useState(
+     () => new SessionStore(async () => (await refreshSession(anonClient)).accessToken),
+   );
+   // Авторизованный клиент поверх SessionStore — для listMembers (auth:true).
+@@ -137,103 +146,179 @@ export function ScreenPage() {
+   const status = deriveRoomStatus(events);
+   const currentQuestion = quiz.currentQuestion;
+ 
+   // Публичная проекция appSettings (REQ-CORE-008): correctAnswers сюда
+   // структурно не доезжают, поэтому парсим только public-ключ questions.
+   const questions = useMemo(() => {
+     const parsed = quizSettingsSchema.shape.questions.safeParse(binding.appSettings.questions);
+     return parsed.success ? parsed.data : [];
+   }, [binding.appSettings]);
+ 
++  // Таймер вопроса (п. 12): durationSec — только из распарсенных настроек
++  // (дефолт 30 материализуется на parse; без raw appSettings и без «?? 30»),
++  // openedAt — серверный штамп из проекции. «Без лимита» → null → таймер не
++  // рендерится вообще. Хук вызван до ранних return (rules of hooks).
++  const question = currentQuestion !== null ? questions[currentQuestion] : undefined;
++  const durationSec = question?.durationSec ?? null;
++  const timerSec = useQuestionTimer(durationSec, quiz.openedAt);
++
++  // Табло дорожками (дизайн §7): итоги из проекции, прирост — из последнего
++  // reveal в логе (lastRoundGains), имена — через displayNameOf (fallback
++  // «Гость» внутри). Сортировка/нормировка — внутри RaceTracks.
++  const gains = lastRoundGains(events);
++  const trackEntries = Object.entries(quiz.totals).map(([actorId, total]) => ({
++    actorId,
++    name: displayNameOf(names, actorId),
++    total,
++    gain: gains[actorId] ?? 0,
++  }));
++
+   // Reveal текущего вопроса: revealed-событие позже close для того же индекса.
+   const reveal = useMemo(() => {
+     let revealIndex = -1;
+     let closeIndex = -1;
+     events.forEach((e, i) => {
+       const qi = (e.payload as { questionIndex?: unknown }).questionIndex;
+       if (qi !== currentQuestion) return;
+       if (e.type === 'quiz.question.revealed') revealIndex = i;
+       else if (e.type === 'quiz.question.closed') closeIndex = i;
+     });
+     return revealIndex > closeIndex
+       ? questionRevealedPayload.parse(events[revealIndex].payload)
+       : null;
+   }, [events, currentQuestion]);
+ 
+   if (!roomId) {
+     // До join баннер не рендерим (ruling 3): useRoomBinding(null) держит
+     // 'connecting' навсегда — это отсутствие привязки, а не обрыв.
+     return (
+-      <main>
+-        {joinError ? <p role="alert">{joinError}</p> : <p>Подключаем экран…</p>}
++      <main className="screen-page">
++        <Logo contour="scene" size="projector" />
++        {joinError ? (
++          <p role="alert" className="screen-waiting">
++            {joinError}
++          </p>
++        ) : (
++          <p className="screen-waiting">Подключаем экран…</p>
++        )}
+       </main>
+     );
+   }
+ 
+   let view;
+   if (quiz.finished || status === 'COMPLETED') {
+-    // Финал: итоговое табло (места из payload game.finished, если событие было)
+-    // + итоги лотереи (дизайн §4).
+-    const finishedEvent = [...events].reverse().find((e) => e.type === 'quiz.game.finished');
+-    const finalStandings = finishedEvent
+-      ? gameFinishedPayload.parse(finishedEvent.payload).standings
+-      : undefined;
++    // Финал (§5.2, п. 8/13/18): табло топ-5 дорожками + «ещё N» (строка — как
++    // рендерит RaceTracks, не переопределяем); победители — центрированный
++    // блок в свободной правой зоне. Без розыгрыша блок не рендерится, табло
++    // центрируется на всю зону (класс solo). Места из payload game.finished
++    // не нужны: дорожки сами сортируют desc (как финал участника, T7).
++    const hasDraws = Object.keys(lottery.draws).length > 0;
+     view = (
+       <section>
+-        <h1>Игра завершена</h1>
+-        <Standings standings={finalStandings} totals={quiz.totals} names={names} />
+-        <Winners draws={lottery.draws} names={names} />
++        <h1 className="screen-final-title">Игра завершена</h1>
++        <div className={hasDraws ? 'screen-final-grid' : 'screen-final-grid screen-final-solo'}>
++          <div>
++            <div className="screen-board-title">Итоговое табло</div>
++            <RaceTracks entries={trackEntries} contour="scene" topN={5} />
++          </div>
++          {hasDraws ? (
++            <div className="screen-winners">
++              <Winners draws={lottery.draws} names={names} />
++            </div>
++          ) : null}
++        </div>
+       </section>
+     );
+   } else if (status === 'CANCELLED') {
+-    view = <p>Комната отменена организатором.</p>;
++    view = <p className="screen-waiting">Комната отменена организатором.</p>;
+   } else if (status !== 'ACTIVE') {
+-    view = <p>Ожидаем начала — организатор ещё готовит комнату…</p>;
++    // Ожидание (п. 8): центрировано во всём кадре, логотип не влияет.
++    view = <p className="screen-waiting">Ожидаем начала — организатор ещё готовит комнату…</p>;
+   } else if (currentQuestion !== null && quiz.accepting) {
+-    // Текущий вопрос крупно (проектор): текст + варианты без кнопок — отвечают
+-    // участники со своих устройств, экран только показывает.
+-    const question = questions[currentQuestion];
++    // Вопрос (§5.2, п. 8/12): верхняя строка — «Вопросъ N из M» (Приложение A)
++    // + таймер 56px золотом справа (только при включённом лимите); отступ
++    // перед вариантами 35px; варианты — две колонки без золотых линий;
++    // длинный вопрос / более четырёх вариантов — компактная плотность
++    // (мокап projector-options-no-lines). Отвечают участники со своих
++    // устройств — экран только показывает.
++    const compact = isCompactQuestion(question?.text.length ?? 0, question?.options.length ?? 0);
+     view = (
+       <section>
+-        <h1 className="screen-question">
+-          {question ? question.text : `Вопрос ${currentQuestion + 1}`}
++        <div className="screen-strip">
++          <span className="screen-kicker">
++            {question
++              ? `Вопросъ ${currentQuestion + 1} из ${questions.length}`
++              : `Вопросъ ${currentQuestion + 1}`}
++          </span>
++          {timerSec !== null ? (
++            <span className="screen-timer">
++              {formatTimer(timerSec)}
++              <small>осталось</small>
++            </span>
++          ) : null}
++        </div>
++        <h1 className={compact ? 'screen-question screen-question-compact' : 'screen-question'}>
++          {question ? question.text : `Вопросъ ${currentQuestion + 1}`}
+         </h1>
+-        <ul className="screen-options">
+-          {(question?.options ?? []).map((option, optionIndex) => (
+-            <li key={optionIndex}>{option}</li>
+-          ))}
++        <ul className={compact ? 'screen-options screen-options-compact' : 'screen-options'}>
++          {(question?.options ?? []).map((option, optionIndex) => {
++            const letter = OPTION_LETTERS[optionIndex];
++            return (
++              <li key={optionIndex}>
++                {letter ? <b>{letter}</b> : null}
++                {option}
++              </li>
++            );
++          })}
+         </ul>
+       </section>
+     );
+   } else if (currentQuestion !== null && reveal) {
+-    // Reveal: правильный ответ (единственный публичный источник — payload
+-    // revealed; correctAnswers клиенту структурно недоступны) + табло.
++    // Reveal (§5.2, мокап tracks-scene-with-logo): «Правильный отвѣтъ»
++    // (Приложение A) слева, табло дорожками справа — топ-4 + «ещё N».
++    // Правильный ответ — только из payload revealed: correctAnswers клиенту
++    // структурно недоступны.
+     const correctOption =
+       reveal.correctIndex !== undefined
+         ? questions[currentQuestion]?.options[reveal.correctIndex]
+         : undefined;
+     view = (
+-      <section>
+-        {correctOption ? <h1 className="screen-question">Правильный ответ: {correctOption}</h1> : null}
+-        <Standings totals={quiz.totals} names={names} />
++      <section className="screen-reveal">
++        <div className="screen-answer">
++          {correctOption ? (
++            <>
++              <div className="screen-answer-label">Правильный отвѣтъ</div>
++              <h1 className="screen-answer-value">{correctOption}</h1>
++            </>
++          ) : null}
++        </div>
++        <div>
++          <div className="screen-board-title">Табло</div>
++          <RaceTracks entries={trackEntries} contour="scene" topN={4} />
++        </div>
+       </section>
+     );
+   } else if (currentQuestion !== null) {
+-    view = <p>Ответы закрыты, ждём результатов…</p>;
++    view = <p className="screen-waiting">Ответы закрыты, ждём результатов…</p>;
+   } else {
+     // ACTIVE без открытого вопроса: ждём первый вопрос; в лотерейной комнате
+     // здесь же появляются победители по мере розыгрышей.
+     view = (
+       <section>
+-        <p>Игра идёт. Ждём вопрос…</p>
+-        <Winners draws={lottery.draws} names={names} />
++        <p className="screen-note">Игра идёт. Ждём вопрос…</p>
++        {Object.keys(lottery.draws).length > 0 ? (
++          <div className="screen-winners">
++            <Winners draws={lottery.draws} names={names} />
++          </div>
++        ) : null}
+       </section>
+     );
+   }
+ 
+   return (
+-    <main>
++    <main className="screen-page">
+       <ConnectionBanner state={binding.connectionState} />
++      <Logo contour="scene" size="projector" />
+       {view}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/state/question-density.spec.ts b/apps/web/src/state/question-density.spec.ts
+new file mode 100644
+index 0000000..3caef5e
+--- /dev/null
++++ b/apps/web/src/state/question-density.spec.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest';
++import { COMPACT_TEXT_LENGTH, isCompactQuestion } from './question-density';
++
++// Компактная плотность вопроса проектора (дизайн п. 8): длинный вопрос
++// (> COMPACT_TEXT_LENGTH символов) или более четырёх вариантов.
++
++describe('isCompactQuestion', () => {
++  it('короткий вопрос, 4 варианта → обычная плотность', () => {
++    expect(isCompactQuestion(52, 4)).toBe(false);
++  });
++
++  it('более четырёх вариантов → компактная (мокап projector-long-content)', () => {
++    expect(isCompactQuestion(20, 5)).toBe(true);
++    expect(isCompactQuestion(20, 6)).toBe(true);
++  });
++
++  it('ровно 4 варианта → обычная («более четырёх» — строго)', () => {
++    expect(isCompactQuestion(20, 4)).toBe(false);
++  });
++
++  it('длинный текст (> COMPACT_TEXT_LENGTH) → компактная', () => {
++    expect(isCompactQuestion(COMPACT_TEXT_LENGTH + 1, 4)).toBe(true);
++  });
++
++  it('текст ровно на пороге → обычная', () => {
++    expect(isCompactQuestion(COMPACT_TEXT_LENGTH, 4)).toBe(false);
++  });
++
++  it('вопрос не распарсен (textLength 0, вариантов 0) → обычная', () => {
++    expect(isCompactQuestion(0, 0)).toBe(false);
++  });
++});
+diff --git a/apps/web/src/state/question-density.ts b/apps/web/src/state/question-density.ts
+new file mode 100644
+index 0000000..7e9d687
+--- /dev/null
++++ b/apps/web/src/state/question-density.ts
+@@ -0,0 +1,14 @@
++// Компактная плотность вопроса проектора (дизайн п. 8, §5.2; мокап
++// projector-long-content: «при длинном вопросе или более чем четырёх
++// вариантах включается компактная плотность») — уменьшенные кегли/отступы,
++// чтобы длинный экран не скроллился. «Длинный» мокапы числом не определяют:
++// порог COMPACT_TEXT_LENGTH — допущение имплементера T8 (между эталонным
++// коротким вопросом ~52 символа и длинным ~130), к ревью.
++
++export const COMPACT_TEXT_LENGTH = 100;
++
++// textLength — длина текста вопроса (0, если вопрос ещё не распарсен),
++// optionCount — число вариантов. Больше четырёх вариантов — всегда compact.
++export function isCompactQuestion(textLength: number, optionCount: number): boolean {
++  return optionCount > 4 || textLength > COMPACT_TEXT_LENGTH;
++}
+diff --git a/apps/web/src/styles/base.css b/apps/web/src/styles/base.css
+index 4cf505c..454cbc6 100644
+--- a/apps/web/src/styles/base.css
++++ b/apps/web/src/styles/base.css
+@@ -63,23 +63,10 @@
+ *::before,
+ *::after {
+   box-sizing: border-box;
+ }
+ 
+ body {
+   margin: 0;
+   font-family: var(--font-body);
+   color: var(--ink);
+ }
+-
+-/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
+-   с привязкой к ширине зала (vw), варианты без маркеров. Переехало из
+-   styles.css как есть — потребители живы до T8. */
+-.screen-question {
+-  font-size: clamp(2rem, 6vw, 4rem);
+-}
+-
+-.screen-options {
+-  font-size: clamp(1.25rem, 3vw, 2rem);
+-  list-style: none;
+-  padding: 0;
+-}
+diff --git a/apps/web/src/styles/scene.css b/apps/web/src/styles/scene.css
+index 82fc0f2..1af3792 100644
+--- a/apps/web/src/styles/scene.css
++++ b/apps/web/src/styles/scene.css
+@@ -1,18 +1,18 @@
+ /* Тёмная сцена — контур участника (/play), дизайн §4/§5.1, п. 6/7/12/13/17/18.
+    Значения перенесены из мокапов-эталонов: participant-join-lobby-center-fix,
+    participant-flow-layout-v2, participant-long-content, game-states (сессия 44),
+    timer-projector-participant, tracks-scene-with-logo (сессия 45); цвета —
+    токены T4. Стили логотипа живут здесь же (компонент несёт начертание/цвет/
+    кегль, позиционирование — у страницы, ruling C-1). Размещение — отдельным
+    файлом от transitions.css: там система состояний, здесь раскладка экранов
+-   (ruling C-2); проектор (T8) расширит этот же файл или добавит соседний. */
++   (ruling C-2); проектор (T8) — соседний screen.css. */
+ 
+ /* --- Логотип (ruling C-1) --- */
+ .logo {
+   font-family: var(--font-logo);
+   font-weight: 400;
+   line-height: 1.2;
+   letter-spacing: 0.02em;
+ }
+ .logo-scene { color: var(--gold); }
+ .logo-console { color: var(--console-primary); }
+diff --git a/apps/web/src/styles/screen.css b/apps/web/src/styles/screen.css
+new file mode 100644
+index 0000000..3a8245e
+--- /dev/null
++++ b/apps/web/src/styles/screen.css
+@@ -0,0 +1,202 @@
++/* Тёмная сцена — контур проектора (/screen), дизайн §5.2, п. 8/12/13/17/18.
++   Значения перенесены из мокапов-эталонов: timer-projector-participant,
++   tracks-scene-with-logo (сессия 45), projector-options-no-lines,
++   projector-final-winners-large, projector-long-content (сессия 44); цвета —
++   токены T4. Проектор read-only (п. 8): ни кнопок, ни форм, ни focus-стилей.
++   Размещение — соседним файлом к scene.css (ruling C-2): там контур
++   участника, здесь проектор; общее у них только .logo (живёт в scene.css).
++   Заменяет временные .screen-question/.screen-options из base.css (бриф T8). */
++
++/* --- Каркас (п. 8/17) --- */
++.screen-page {
++  /* position:relative — опора центрирования ожидания во всём кадре (п. 8) */
++  position: relative;
++  min-height: 100vh;
++  min-height: 100dvh;
++  /* pj-inner мокапа timer-projector-participant */
++  padding: 34px 44px;
++  background: var(--scene-bg);
++  color: var(--scene-text);
++}
++/* Логотип — левый верхний угол на всех экранах (п. 17); позиционирование —
++   обязанность страницы (ruling C-1). Отступ снизу — pj-brand мокапа
++   tracks-scene-with-logo. */
++.screen-page .logo { margin-bottom: 14px; }
++
++/* Ожидание/системные сообщения: центрирование во всём кадре (п. 8), логотип
++   не влияет (та же механика, что .play-waiting у участника, п. 7). */
++.screen-waiting {
++  position: absolute;
++  top: 50%;
++  left: 44px;
++  right: 44px;
++  transform: translateY(-50%);
++  margin: 0;
++  color: rgba(246, 237, 220, 0.82);
++  font-size: 24px;
++  line-height: 1.5;
++  text-align: center;
++}
++
++/* «Игра идёт. Ждём вопрос…» — в потоке (под ним могут быть победители
++   лотереи), мокапа этого состояния нет — минимальная крупная подача. */
++.screen-note {
++  margin: 40px 0 0;
++  font-size: 24px;
++}
++
++/* --- Вопрос (п. 8/12, мокапы timer-projector-participant и
++   projector-options-no-lines) --- */
++/* Верхняя строка: «Вопросъ N из M» слева, таймер справа (pj-top). */
++.screen-strip {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++  margin-bottom: 18px;
++}
++.screen-kicker {
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 18px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++/* Таймер 56px золотом справа вверху, tabular-nums; «без лимита» — не
++   рендерится вообще; ноль — спокойный 0:00, без краснухи (п. 12). */
++.screen-timer {
++  display: flex;
++  align-items: baseline;
++  gap: 10px;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 56px;
++  line-height: 1;
++  font-variant-numeric: tabular-nums;
++}
++.screen-timer small {
++  color: var(--muted-scene);
++  font-family: var(--font-body);
++  font-size: 14px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++/* Отступ перед вариантами 35px (п. 8) */
++.screen-question {
++  max-width: 850px;
++  margin: 0 0 35px;
++  font-family: var(--font-display);
++  font-size: 38px;
++  line-height: 1.2;
++  font-weight: 400;
++}
++.screen-options {
++  display: grid;
++  grid-template-columns: 1fr 1fr;
++  gap: 12px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++  font-size: 19px;
++}
++/* Варианты — общая поверхность, без золотых вертикальных линий (п. 8,
++   projector-options-no-lines); буквенная метка золотом (timer-мокап). */
++.screen-options li {
++  display: flex;
++  align-items: center;
++  padding: 14px 18px;
++  background: var(--scene-surface);
++  border-radius: 10px;
++  line-height: 1.25;
++}
++.screen-options li b { color: var(--gold); margin-right: 10px; }
++
++/* Компактная плотность: длинный вопрос / более четырёх вариантов (п. 8,
++   projector-options-no-lines / projector-long-content; переключение —
++   isCompactQuestion, state/question-density.ts). */
++.screen-question-compact { font-size: 34px; line-height: 1.12; }
++.screen-options-compact { gap: 10px 20px; }
++.screen-options-compact li { min-height: 48px; padding: 9px 12px; }
++
++/* --- Reveal (п. 8/13, мокап tracks-scene-with-logo): «Правильный отвѣтъ»
++   слева, табло дорожками справа (топ-4 + «ещё N» — в компоненте) --- */
++.screen-reveal {
++  display: grid;
++  grid-template-columns: 1fr 1.1fr;
++  gap: 36px;
++}
++.screen-answer-label {
++  margin-bottom: 10px;
++  color: var(--muted-scene);
++  font-size: 14px;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++.screen-answer-value {
++  margin: 0;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 40px;
++  line-height: 1.2;
++  font-weight: 400;
++}
++.screen-board-title {
++  margin-bottom: 12px;
++  color: var(--muted-scene);
++  font-size: 14px;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++
++/* Кегли дорожек проектора крупнее участника (мокап tracks-scene-with-logo:
++   имя 16px, счёт 15px, дельта 13px, полотно 9px) — читаемость с расстояния.
++   База дорожек — transitions.css, здесь только переопределение размеров. */
++.screen-page .race-tracks .track-row { padding: 5px 0 7px; }
++.screen-page .race-tracks .tr-name { font-size: 16px; }
++.screen-page .race-tracks .tr-score { font-size: 15px; }
++.screen-page .race-tracks .tr-score .delta { font-size: 13px; }
++.screen-page .race-tracks .tr-lane { height: 9px; }
++
++/* --- Финал (п. 8/13/18, мокапы tracks-scene-with-logo и
++   projector-final-winners-large): табло топ-5 дорожками слева, победители —
++   центрированный блок в свободной правой зоне --- */
++.screen-final-title {
++  margin: 15px 0 17px;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 35px;
++  font-weight: 400;
++}
++.screen-final-grid {
++  display: grid;
++  grid-template-columns: 1.2fr 1fr;
++  gap: 36px;
++}
++/* Без розыгрыша блок победителей не рендерится, табло центрируется на всю
++   зону (п. 18); ширина колонки 720px — допущение имплементера (мокап этого
++   состояния не показывает), к ревью. */
++.screen-final-solo {
++  grid-template-columns: minmax(0, 720px);
++  justify-content: center;
++}
++/* Заголовок 32px, имена 24px (бриф/п. 8 — projector-final-winners-large).
++   Стилизация со стороны страницы: разметка Winners (section/h2/ul) общая
++   с play/console и не меняется. */
++.screen-winners {
++  display: flex;
++  flex-direction: column;
++  justify-content: center;
++}
++.screen-winners h2 {
++  margin: 0 0 13px;
++  color: var(--gold);
++  font-family: var(--font-display);
++  font-size: 32px;
++  line-height: 1.15;
++  font-weight: 400;
++}
++.screen-winners ul {
++  margin: 0;
++  padding-left: 23px;
++  font-size: 24px;
++  line-height: 1.55;
++}
