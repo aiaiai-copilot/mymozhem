@@ -49,6 +49,20 @@ Task 3: **complete** (cd88edd). Minor (deferred): Ajv-харнес контра�
 
 Рекомендации ревьюера (не гейтят): T5/T9 — читать durationSec через `quizSettingsSchema.parse` на границе проекции (дефолт single-sourced в схеме), не `?? 30` по компонентам; опционально ужесточить quiz.e2e:399 с `expect.any(String)` до ISO-regex.
 
+## ФИНРЕВЬЮ БАТЧА A (сессия 48, 2026-10-20, fable, whole-branch 995f5df..f30ebff) — ЧИСТОЕ, Ready to merge: Yes
+
+Гейты перепрогнаны ревьюером СВЕЖИМИ прогонами на HEAD f30ebff: build 6/6, typecheck 10/10, lint 6/6, sdk 329/329, core 230/230, app-quiz 97/97, web 117/117, server 71/71, test:int 223/223 (testcontainers), boundary-check 0 нарушений (747 модулей), guardrails 4/4. `git status` после прогонов чист.
+
+**Триаж deferred-миноров — все 5 STAY-DEFERRED:** T1(1) — wire-строка 'core.member.joined' теперь запинана end-to-end в realtime.e2e (snapshot + live) — сильнее юнит-пина; T1(2) — природа ts-jest, GREEN рантайм-верифицирован; T2(1) — test-only инконсистентность; T2(2) — Nest дедупит инстансы модулей, нулевой эффект; T3(1) — независимо перепроверен pattern-трейс zod v4 (checks.cjs:436-441 → json-schema-processors.cjs:37-40), риск гипотетический, fix при следующем касании.
+
+**Новые Minor (2, оба «при следующем касании файла»):** (1) quiz.e2e-spec.ts:399-400 — `expect.any(String)` → ISO-regex `/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/` (defense-in-depth); (2) quiz-points.e2e-spec.ts:29 — восстановить первое предложение комментария о provenance «копия quiz.e2e helpers» (утеряно при правке).
+
+**Сильные стороны (для протокола):** EventLogModule-экстракция разрывает DI-цикл Membership↔Realtime, re-export оставляет потребителей нетронутыми, EventLogModule без socket.io (REQ-RT-006); member.joined — последний шаг join-tx, доставка строго post-commit через outbox-staging; REQ-SEC-009 на уровне схемы (негативный тест extra-key displayName); REQ-RT-009 — rebuild payload вместо spread; REQ-RT-013 сохранён (оба источника openedAt — серверные часы); baseline-правки принципиальные с комментариями; кросс-таск консистентность T1↔T2↔T3 и версионная когерентность SDK 2.1.0 подтверждены; счета гейтов леджера воспроизвелись точно.
+
+**Заметка к мерджу:** main ушёл от merge-base на один docs-only коммит (af36090, HANDOFF.md) — мердж бесконфликтный; после мерджа обновить HANDOFF.md на main (текст предшествует чистому доревью).
+
+**Батч A ПРОЦЕССНО ЗАВЕРШЁН (3/3, оба ревью чистые). Готов к мерджу по ритуалу.**
+
 ## СТОП СЕССИИ (2026-10-20 ~05:45) — environmentная нестабильность [РАЗРЕШЕНО доревью выше]
 
 Ruling (стоп): после 4 подряд смертей таск-ревьюеров T3 по единому паттерну (~25 мин жизни, output 159 байт, статус «running» навсегда; sonnet ×3 + fable ×1) редиспатчи прекращены — причина environmentная (класс watchdog/quota-смертей из опыта сессий 37–42), а не в задаче. T1/T2 прошли полный цикл чисто до ~00:30; деградация началась после полуночи. Cost if wrong: одна лишняя сессия на доревью T3 — приемлемо против бесконечного редиспатча.
