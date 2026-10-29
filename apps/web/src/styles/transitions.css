@@ -49,6 +49,9 @@
   .btn-quiet:hover:not(:disabled) { background: var(--console-strip); }
   .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
   .btn-scene:hover:not(:disabled) { background: var(--scene-surface-hover); }
+  /* Н15: консольный toggle «ещё N» — тихая текстовая кнопка, hover даёт
+     чернильный цвет и подчёркивание, чтобы элемент выглядел интерактивным. */
+  .console-tracks-toggle:hover { color: var(--ink); text-decoration: underline; }
 }
 
 /* active — мгновенно (≤60мс), работает везде, включая тач */

@@ -235,6 +235,7 @@
   color: var(--muted);
   font: 13px var(--font-body);
   cursor: pointer;
+  transition: color var(--t-hover) ease-out;
 }
 .console-tracks-toggle:focus-visible {
   outline: 3px solid var(--console-primary);

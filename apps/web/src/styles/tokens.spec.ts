@@ -162,4 +162,9 @@ describe('transitions.css — кнопочная система состояни
     const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
     expect(block).toMatch(/transition-duration:\s*0ms/);
   });
+
+  it('консольный toggle «ещё N» имеет hover-правило внутри hover-медиа (Н15)', () => {
+    const [block] = extractMediaBlock(css, '(hover: hover) and (pointer: fine)');
+    expect(block).toContain('.console-tracks-toggle:hover');
+  });
 });
