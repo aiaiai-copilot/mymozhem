@@ -168,3 +168,21 @@ describe('transitions.css — кнопочная система состояни
     expect(block).toContain('.console-tracks-toggle:hover');
   });
 });
+
+describe('scene.css — кегли логотипа', () => {
+  const css = readStyle('scene.css');
+
+  // Вердикт (б) живой приёмки: 19px в полосе комнаты крупновато, по мокапу 17px.
+  // Кегль несёт компонент (ruling C-1), поэтому страж на класс размера, а не на
+  // переопределение в console.css.
+  it('есть compact-кегль логотипа 17px для консольной полосы (вердикт (б))', () => {
+    const m = css.match(/\.logo-compact\s*\{([^}]*)\}/);
+    expect(m, 'ожидался блок .logo-compact').not.toBeNull();
+    expect(m![1]).toMatch(/font-size:\s*17px/);
+  });
+
+  it('участницкий и проекторный кегли не изменились (19px/22px)', () => {
+    expect(css).toMatch(/\.logo-participant\s*\{[^}]*font-size:\s*19px/);
+    expect(css).toMatch(/\.logo-projector\s*\{[^}]*font-size:\s*22px/);
+  });
+});

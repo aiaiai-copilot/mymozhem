@@ -18,6 +18,8 @@
 .logo-console { color: var(--console-primary); }
 .logo-participant { font-size: 19px; }
 .logo-projector { font-size: 22px; }
+/* Консольная полоса — 17px по мокапу (вердикт (б) живой приёмки: 19px крупновато). */
+.logo-compact { font-size: 17px; }
 
 /* --- Страница участника --- */
 .play-page {

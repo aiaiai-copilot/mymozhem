@@ -7,8 +7,9 @@
 interface LogoProps {
   // Сцена — золото на тёмном; консоль — primary на светлом (потребитель T9).
   contour: 'scene' | 'console';
-  // participant — 19px, projector — 22px (п. 17; потребитель projector — T8).
-  size: 'participant' | 'projector';
+  // participant — 19px, projector — 22px (п. 17; потребитель projector — T8),
+  // compact — 17px, консольная полоса (вердикт (б) живой приёмки, по мокапу).
+  size: 'participant' | 'projector' | 'compact';
 }
 
 export function Logo({ contour, size }: LogoProps) {

@@ -228,7 +228,7 @@ export function ConsolePage() {
       {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
           код. Sticky — статус виден при прокрутке секций. */}
       <header className="console-strip">
-        <Logo contour="console" size="participant" />
+        <Logo contour="console" size="compact" />
         <span
           className={`console-conn${binding.connectionState === 'live' ? '' : ' off'}`}
           role="status"
