@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
 import {
   REALTIME_MESSAGES,
@@ -31,6 +31,27 @@ class FakeSocket implements SocketLike {
     this.ackQueue.set(event, queue);
   }
 
+  // Режим «зависший ack» (находка Н1): emitWithAck возвращает никогда не
+  // settle'ящийся промис — emit фиксируется в calls, ответа нет. Settle позднего
+  // ack'а из теста — settleHang (пин «late ack после таймаута», Review Focus 1).
+  private readonly hangSettlers = new Map<
+    string,
+    Array<{ resolve: (ack: unknown) => void; reject: (err: unknown) => void }>
+  >();
+
+  programHang(event: string): void {
+    this.hangSettlers.set(event, []);
+  }
+
+  settleHang(event: string, ackOrError: unknown): void {
+    const settlers = this.hangSettlers.get(event) ?? [];
+    for (const s of settlers) {
+      if (ackOrError instanceof Error) s.reject(ackOrError);
+      else s.resolve(ackOrError);
+    }
+    this.hangSettlers.set(event, []);
+  }
+
   onConnect(cb: () => void): void {
     this.connectCbs.push(cb);
   }
@@ -45,6 +66,10 @@ class FakeSocket implements SocketLike {
   }
   emitWithAck(event: string, payload: unknown): Promise<unknown> {
     this.calls.push({ event, payload });
+    const settlers = this.hangSettlers.get(event);
+    if (settlers) {
+      return new Promise((resolve, reject) => settlers.push({ resolve, reject }));
+    }
     const ack = this.ackQueue.get(event)?.shift();
     if (ack === undefined) {
       throw new Error(`FakeSocket: нет запрограммированного ack для "${event}"`);
@@ -91,6 +116,13 @@ const SNAPSHOT: RoomSnapshot = {
 };
 
 describe('RoomConnection', () => {
+  // Fake timers включаются локально в таймаутных тестах; возврат к реальным —
+  // в afterEach, а не в finally теста: при падении/таймауте тела теста finally
+  // может не выполниться, и фейковые таймеры утекли бы в следующие тесты.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('join: ok-ack → распарсенный snapshot; на провод ушёл subscribe с roomId', async () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
@@ -202,6 +234,9 @@ describe('RoomConnection', () => {
 
   it('publish: ok-ack → resolve; error-ack → ApiError с серверным кодом', async () => {
     const socket = new FakeSocket();
+    // Fail-fast NOT_CONNECTED требует живого сокета: publish при
+    // connected=false отказывает до emit (находка Н1).
+    socket.connected = true;
     const conn = new RoomConnection(socket, ROOM_ID);
 
     socket.programAck(REALTIME_MESSAGES.PUBLISH, { ok: true });
@@ -216,6 +251,78 @@ describe('RoomConnection', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).code).toBe('ROUND_NOT_OPEN');
     expect((err as ApiError).status).toBe(0);
+  });
+
+  it('publish: мёртвый сокет → немедленный NOT_CONNECTED без emit (fail-fast, находка Н1)', async () => {
+    const socket = new FakeSocket();
+    socket.connected = false;
+    const conn = new RoomConnection(socket, ROOM_ID);
+
+    await expect(conn.publish('quiz.answer.submitted', { roundId: 'r1', choice: 2 })).rejects.toMatchObject({
+      code: 'NOT_CONNECTED',
+      status: 0,
+    });
+    // На провод ничего не ушло — отказ до emit, не по таймауту.
+    expect(socket.calls).toHaveLength(0);
+  });
+
+  it('publish: ack не пришёл за 5с → PUBLISH_TIMEOUT (зависший emitWithAck, находка Н1)', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      socket.connected = true;
+      socket.programHang(REALTIME_MESSAGES.PUBLISH);
+      const conn = new RoomConnection(socket, ROOM_ID);
+
+      const p = conn.publish('quiz.answer.submitted', { roundId: 'r1', choice: 2 });
+      const assertion = expect(p).rejects.toMatchObject({ code: 'PUBLISH_TIMEOUT', status: 0 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publish: поздний ack после таймаута — без unhandled rejection (Review Focus 1)', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      socket.connected = true;
+      socket.programHang(REALTIME_MESSAGES.PUBLISH);
+      const conn = new RoomConnection(socket, ROOM_ID);
+
+      const p = conn.publish('quiz.answer.submitted', { roundId: 'r1', choice: 2 });
+      p.catch(() => {});
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(p).rejects.toMatchObject({ code: 'PUBLISH_TIMEOUT' });
+
+      // Транспорт прислал поздний отказ ack'а после проигрыша гонки: проигравшая
+      // ветка обязана быть заглушена (.catch внутри гонки — статический пин),
+      // иначе vitest уронит прогон unhandled rejection'ом.
+      socket.settleHang(REALTIME_MESSAGES.PUBLISH, new Error('late transport failure'));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('subscribeOnce: зависший subscribe → SUBSCRIBE_TIMEOUT, join переходит в disconnected', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      socket.programHang(REALTIME_MESSAGES.SUBSCRIBE);
+      const conn = new RoomConnection(socket, ROOM_ID);
+      const states: ConnectionState[] = [];
+      conn.onStateChange((s) => states.push(s));
+
+      const p = conn.join();
+      const assertion = expect(p).rejects.toMatchObject({ code: 'SUBSCRIBE_TIMEOUT', status: 0 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+      expect(states).toEqual(['disconnected']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('успешный refresh после connect_error → немедленный кик reconnect (CONNECT_ERROR — терминальный teardown)', async () => {

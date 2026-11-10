@@ -15,6 +15,28 @@ import type { SocketLike } from './socket-like';
 
 export type ConnectionState = 'connecting' | 'live' | 'disconnected';
 
+// Ack-таймаут publish/subscribe — звонок строителя, дизайн §4: на живом
+// событии секунды дороги, но LAN/слабая сеть требует запаса. Без него
+// emitWithAck в умирающий сокет возвращает никогда не settle'ящийся промис
+// (находка Н1: команда/ответ теряются молча).
+export const REQUEST_TIMEOUT_MS = 5_000;
+
+// Гонка ack'а с таймаутом. Проигравшая ветка глушится холостым .catch: поздний
+// отказ emitWithAck после проигранного таймаута иначе дал бы unhandled
+// rejection (Review Focus 1). Поздний УСПЕШНЫЙ ack никем не читается — состояние
+// сходится через realtime/resync (решение 7: reconciliation не строим).
+function withAckTimeout(promise: Promise<unknown>, ms: number, code: string): Promise<unknown> {
+  promise.catch(() => {});
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new ApiError(code, 0));
+      }, ms);
+    }),
+  ]);
+}
+
 // Привязка сокета к одной комнате (дизайн §3): join → snapshot, live-поток →
 // ProjectedEvent'ы, reconnect → полный перефолд через свежий snapshot в onResync.
 // Всё, что приходит с провода, парсится схемами SDK: дрейф контракта — ZodError
@@ -97,16 +119,31 @@ export class RoomConnection {
   }
 
   async join(): Promise<RoomSnapshot> {
-    const snapshot = await this.subscribeOnce();
-    this.joined = true;
-    this.stateCb?.('live');
-    return snapshot;
+    try {
+      const snapshot = await this.subscribeOnce();
+      this.joined = true;
+      this.stateCb?.('live');
+      return snapshot;
+    } catch (e) {
+      // Провал join (в т.ч. SUBSCRIBE_TIMEOUT) — явный 'disconnected' наружу:
+      // иначе страница осталась бы в 'connecting' навсегда (тот же контракт,
+      // что у упавшего re-subscribe на reconnect).
+      this.stateCb?.('disconnected');
+      throw e;
+    }
   }
 
   async publish(type: string, payload: Record<string, unknown>): Promise<void> {
-    const ack: unknown = await this.socket.emitWithAck(
-      REALTIME_MESSAGES.PUBLISH,
-      publishRequestSchema.parse({ type: type as PublishRequest['type'], payload }),
+    // Fail-fast: сокет заведомо мёртв — отказ немедленно, не ждём таймаут
+    // (дизайн §3(Б)). На провод ничего не уходит.
+    if (!this.socket.isConnected()) throw new ApiError('NOT_CONNECTED', 0);
+    const ack: unknown = await withAckTimeout(
+      this.socket.emitWithAck(
+        REALTIME_MESSAGES.PUBLISH,
+        publishRequestSchema.parse({ type: type as PublishRequest['type'], payload }),
+      ),
+      REQUEST_TIMEOUT_MS,
+      'PUBLISH_TIMEOUT',
     );
     if (publishOkAckSchema.safeParse(ack).success) return;
     throw new ApiError(contractErrorPayloadSchema.parse(ack).code, 0);
@@ -127,9 +164,13 @@ export class RoomConnection {
   }
 
   private async subscribeOnce(): Promise<RoomSnapshot> {
-    const ack: unknown = await this.socket.emitWithAck(
-      REALTIME_MESSAGES.SUBSCRIBE,
-      subscribeRequestSchema.parse({ roomId: this.roomId }),
+    const ack: unknown = await withAckTimeout(
+      this.socket.emitWithAck(
+        REALTIME_MESSAGES.SUBSCRIBE,
+        subscribeRequestSchema.parse({ roomId: this.roomId }),
+      ),
+      REQUEST_TIMEOUT_MS,
+      'SUBSCRIBE_TIMEOUT',
     );
     const ok = subscribeOkAckSchema.safeParse(ack);
     if (ok.success) return ok.data.snapshot;
