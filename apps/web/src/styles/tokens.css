@@ -43,7 +43,7 @@
   /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
   --t-hover: 140ms;
   --t-press: 60ms;
-  --t-race: 300ms;
+  --t-race: 600ms;
 
   /* Шрифты: self-hosted woff2 (OFL), подключены в base.css.
      --font-logo = Oranienbaum до решения лицензии Blagovest (гейт лицензии). */
