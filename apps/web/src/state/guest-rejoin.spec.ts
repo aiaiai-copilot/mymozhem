@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/api-client';
 import { ApiError } from '../api/api-error';
-import { rejoinAsGuest, rejoinFailureAction } from './guest-rejoin';
+import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from './guest-rejoin';
 
 const makeToken = (claims: unknown): string =>
   `hdr.${btoa(JSON.stringify(claims))
@@ -71,5 +71,59 @@ describe('rejoinFailureAction', () => {
     expect(rejoinFailureAction(new TypeError('fetch failed'))).toBe('retry');
     expect(rejoinFailureAction(new ApiError('HTTP_502', 502))).toBe('retry');
     expect(rejoinFailureAction(new Error('boom'))).toBe('retry');
+  });
+});
+
+// Повтор rejoin по пробуждению/online (находка Н13, финревью батча B).
+// Фейк EventTarget: регистрация/снятие записываются, fire дёргает слушателей.
+const makeTarget = () => {
+  const listeners = new Map<string, Set<() => void>>();
+  return {
+    addEventListener: (type: string, cb: () => void) => {
+      listeners.set(type, (listeners.get(type) ?? new Set()).add(cb));
+    },
+    removeEventListener: (type: string, cb: () => void) => {
+      listeners.get(type)?.delete(cb);
+    },
+    fire: (type: string) => listeners.get(type)?.forEach((cb) => cb()),
+    size: (type: string) => listeners.get(type)?.size ?? 0,
+  };
+};
+
+describe('createRejoinRetryListeners', () => {
+  it('retry подписан на online/focus/pageshow (window) и visibilitychange (document) — 5xx при ЖИВОЙ сети догоняется пробуждением', () => {
+    // Только-online слушатель клинил страницу на «Входим…» навсегда при
+    // временном отказе без падения сети (рестарт сервера → 502, online не
+    // стреляет — дизайн §3(В): повтор при online/ПРОБУЖДЕНИИ).
+    const win = makeTarget();
+    const doc = makeTarget();
+    const retry = vi.fn();
+
+    createRejoinRetryListeners(retry, win, doc);
+
+    win.fire('focus');
+    doc.fire('visibilitychange');
+    win.fire('pageshow');
+    win.fire('online');
+    expect(retry).toHaveBeenCalledTimes(4);
+  });
+
+  it('disposer снимает всех слушателей — сработка после unmount не создаёт сироту-identity на сервере', () => {
+    // Без cleanup слушатель переживал страницу: rejoin после ухода пользователя
+    // делал реальный joinRoom = новая гостевая identity + ротация refresh-куки.
+    const win = makeTarget();
+    const doc = makeTarget();
+    const retry = vi.fn();
+
+    const dispose = createRejoinRetryListeners(retry, win, doc);
+    dispose();
+
+    win.fire('online');
+    win.fire('focus');
+    win.fire('pageshow');
+    doc.fire('visibilitychange');
+    expect(retry).not.toHaveBeenCalled();
+    expect(win.size('online')).toBe(0);
+    expect(doc.size('visibilitychange')).toBe(0);
   });
 });

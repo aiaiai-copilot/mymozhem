@@ -5,7 +5,7 @@ import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz'
 import { ApiClient } from '../../api/api-client';
 import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
-import { rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
+import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
@@ -66,22 +66,26 @@ export function PlayPage() {
   const [autoJoinError, setAutoJoinError] = useState<string | null>(null);
   const autoJoinStarted = useRef(false);
   const rejoinInFlight = useRef(false);
+  // Вооружение повтора rejoin (временный отказ): слушатели пробуждения живут,
+  // только пока retry вооружён; снимаются на успех/терминал/unmount.
+  const [rejoinRetryArmed, setRejoinRetryArmed] = useState(false);
 
   // Перезаход с новой identity (находка №5): общий путь для авто-входа §5
   // (TTL протух на загрузке) и onSessionDead (кука умерла на живой странице).
   // Гард: один перезаход в полёте — повторный onSessionDead не плодит identity.
-  // Исход возвращается вызывающему: 'retry' (сеть лежит) оставляет экран
-  // «Входим…» — авто-вход не должен снимать pending поверх retry-ветки.
-  const rejoin = useCallback(async (): Promise<'ok' | 'terminal' | 'retry'> => {
+  // pending/вооружение retry выставляются ЗДЕСЬ, а не в вызывающем: путь
+  // wake-слушателя не проходит через эффект авто-входа (финревью батча B).
+  const rejoin = useCallback(async (): Promise<void> => {
     const s = SessionStore.loadGuest();
-    if (!s || rejoinInFlight.current) return 'retry';
+    if (!s || rejoinInFlight.current) return;
     rejoinInFlight.current = true;
     try {
       const res = await rejoinAsGuest(anonClient, s);
       session.setAccessToken(res.accessToken);
       setRejoined(true);
       setRoomId(res.roomId);
-      return 'ok';
+      setAutoJoinPending(false);
+      setRejoinRetryArmed(false);
     } catch (e) {
       if (rejoinFailureAction(e) === 'terminal') {
         // Сохранённое отклонено сервером по существу (комната удалена/закрыта)
@@ -89,18 +93,30 @@ export function PlayPage() {
         SessionStore.clearGuest();
         setSaved(null);
         setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
-        return 'terminal';
+        setAutoJoinPending(false);
+        setRejoinRetryArmed(false);
+      } else {
+        // Сеть лежит (временный отказ, находка Н13): экран «Входим…», личность
+        // не трогаем (решение 4); повтор — wake-слушатели эффекта ниже.
+        setAutoJoinPending(true);
+        setRejoinRetryArmed(true);
       }
-      // Сеть лежит (временный отказ, находка Н13): ждём online, личность не
-      // трогаем (решение 4). Экран «Входим…» вместо формы; повторный провал
-      // перевешает слушатель заново (once + гард rejoinInFlight, Review Focus 6).
-      setAutoJoinPending(true);
-      window.addEventListener('online', () => void rejoin(), { once: true });
-      return 'retry';
     } finally {
       rejoinInFlight.current = false;
     }
   }, [session]);
+
+  // Повтор rejoin по пробуждению/online (находка Н13, дизайн §3(В)): слушатели
+  // живут, только пока вооружён retry — cleanup снимает их на disarm/unmount,
+  // иначе сработка после ухода со страницы создала бы сироту-identity на
+  // сервере (финревью батча B, Important 2). Не только online: 5xx при ЖИВОЙ
+  // сети (рестарт сервера) online не стреляет — догоняем по
+  // focus/visibilitychange/pageshow (Important 1); парные события дедупит гард
+  // rejoinInFlight внутри rejoin.
+  useEffect(() => {
+    if (!rejoinRetryArmed) return;
+    return createRejoinRetryListeners(() => void rejoin(), window, document);
+  }, [rejoinRetryArmed, rejoin]);
 
   // Авто-вход (дизайн §5): сначала silent refresh — refresh-кука жива → та же
   // identity и прежние очки. TTL протух → повторный join создаёт НОВУЮ identity
@@ -124,11 +140,9 @@ export function PlayPage() {
         setRoomId(resumedRoomId);
         setAutoJoinPending(false);
       } catch {
-        // Исход 'retry' (сеть лежит) оставляет «Входим…» и online-слушатель —
-        // pending здесь НЕ снимаем, иначе форма показалась бы при живой
-        // личности (находка Н13). 'ok'/'terminal' снимают pending.
-        const outcome = await rejoin();
-        if (outcome !== 'retry') setAutoJoinPending(false);
+        // pending и retry-слушатели — внутри rejoin: refresh не прошёл, ветка
+        // rejoin решает исход (решение 4 / находка Н13).
+        await rejoin();
       }
     })();
   }, [autoJoinPending, session, rejoin]);
