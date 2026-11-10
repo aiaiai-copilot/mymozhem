@@ -1,6 +1,7 @@
 import type { ApiClient } from '../api/api-client';
 import { joinRoom } from '../api/endpoints';
 import { decodeAccessClaims, type GuestSession } from './session';
+import { isTerminalSessionFailure } from './session-failure';
 
 // Автоперезаход при мёртвой сессии (находка №5): refresh-кука мертва → новый
 // join по сохранённым code/displayName = НОВАЯ identity, очки не переносятся
@@ -15,3 +16,10 @@ export async function rejoinAsGuest(
   if (!claims.roomId) throw new Error('join token without roomId');
   return { accessToken: res.accessToken, roomId: claims.roomId };
 }
+
+// Классификация провала rejoin (находка Н13, дизайн §3(В), решение 4):
+// терминален только серверный отказ по существу (ApiError 4xx — комната
+// терминальна, join отклонён) → clearGuest + форма. Сеть/5xx/таймаут — пауза:
+// личность не трогаем, повтор придёт по window.online.
+export const rejoinFailureAction = (e: unknown): 'terminal' | 'retry' =>
+  isTerminalSessionFailure(e) ? 'terminal' : 'retry';

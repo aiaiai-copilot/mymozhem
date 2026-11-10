@@ -5,7 +5,7 @@ import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz'
 import { ApiClient } from '../../api/api-client';
 import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
-import { rejoinAsGuest } from '../../state/guest-rejoin';
+import { rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
@@ -70,21 +70,33 @@ export function PlayPage() {
   // Перезаход с новой identity (находка №5): общий путь для авто-входа §5
   // (TTL протух на загрузке) и onSessionDead (кука умерла на живой странице).
   // Гард: один перезаход в полёте — повторный onSessionDead не плодит identity.
-  const rejoin = useCallback(async () => {
+  // Исход возвращается вызывающему: 'retry' (сеть лежит) оставляет экран
+  // «Входим…» — авто-вход не должен снимать pending поверх retry-ветки.
+  const rejoin = useCallback(async (): Promise<'ok' | 'terminal' | 'retry'> => {
     const s = SessionStore.loadGuest();
-    if (!s || rejoinInFlight.current) return;
+    if (!s || rejoinInFlight.current) return 'retry';
     rejoinInFlight.current = true;
     try {
       const res = await rejoinAsGuest(anonClient, s);
       session.setAccessToken(res.accessToken);
       setRejoined(true);
       setRoomId(res.roomId);
-    } catch {
-      // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
-      // его и честно показываем форму, а не вечный «Входим…».
-      SessionStore.clearGuest();
-      setSaved(null);
-      setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+      return 'ok';
+    } catch (e) {
+      if (rejoinFailureAction(e) === 'terminal') {
+        // Сохранённое отклонено сервером по существу (комната удалена/закрыта)
+        // — забываем его и честно показываем форму, а не вечный «Входим…».
+        SessionStore.clearGuest();
+        setSaved(null);
+        setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+        return 'terminal';
+      }
+      // Сеть лежит (временный отказ, находка Н13): ждём online, личность не
+      // трогаем (решение 4). Экран «Входим…» вместо формы; повторный провал
+      // перевешает слушатель заново (once + гард rejoinInFlight, Review Focus 6).
+      setAutoJoinPending(true);
+      window.addEventListener('online', () => void rejoin(), { once: true });
+      return 'retry';
     } finally {
       rejoinInFlight.current = false;
     }
@@ -110,10 +122,13 @@ export function PlayPage() {
         const resumedRoomId = token ? decodeAccessClaims(token).roomId : undefined;
         if (!resumedRoomId) throw new Error('refreshed token without roomId');
         setRoomId(resumedRoomId);
-      } catch {
-        await rejoin();
-      } finally {
         setAutoJoinPending(false);
+      } catch {
+        // Исход 'retry' (сеть лежит) оставляет «Входим…» и online-слушатель —
+        // pending здесь НЕ снимаем, иначе форма показалась бы при живой
+        // личности (находка Н13). 'ok'/'terminal' снимают pending.
+        const outcome = await rejoin();
+        if (outcome !== 'retry') setAutoJoinPending(false);
       }
     })();
   }, [autoJoinPending, session, rejoin]);

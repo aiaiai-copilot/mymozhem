@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../api/api-client';
-import { rejoinAsGuest } from './guest-rejoin';
+import { ApiError } from '../api/api-error';
+import { rejoinAsGuest, rejoinFailureAction } from './guest-rejoin';
 
 const makeToken = (claims: unknown): string =>
   `hdr.${btoa(JSON.stringify(claims))
@@ -54,5 +55,21 @@ describe('rejoinAsGuest', () => {
     );
 
     await expect(rejoinAsGuest(anon, { code: 'C', displayName: 'x' })).rejects.toThrow('roomId');
+  });
+});
+
+// Классификация провала rejoin (находка Н13, дизайн §3(В), решение 4): смерть
+// сессии — только по слову сервера; сетевой обрыв любой длины — пауза с
+// повтором по online, личность (saved guest) не трогаем.
+describe('rejoinFailureAction', () => {
+  it('серверный отказ по существу (ApiError 4xx: комната терминальна, join отклонён) → terminal', () => {
+    expect(rejoinFailureAction(new ApiError('ROOM_JOIN_DENIED', 403))).toBe('terminal');
+    expect(rejoinFailureAction(new ApiError('NOT_FOUND', 404))).toBe('terminal');
+  });
+
+  it('сетевой обрыв (TypeError), инфраструктурный 5xx и неизвестное → retry', () => {
+    expect(rejoinFailureAction(new TypeError('fetch failed'))).toBe('retry');
+    expect(rejoinFailureAction(new ApiError('HTTP_502', 502))).toBe('retry');
+    expect(rejoinFailureAction(new Error('boom'))).toBe('retry');
   });
 });
