@@ -90,6 +90,15 @@
    (бриф T6; в мокапе console-reveal-tracks fill был --console-primary —
    осознанное расхождение мокапов, берём токен темы). */
 
+/* Доезд при монтировании (Н2, живая приёмка): полосы существуют только в
+   reveal-ветке разметки и раньше появлялись сразу в финальной ширине —
+   transition было нечего перевозить. Keyframes анимируют от width: 0 к
+   инлайн-ширине элемента; transition ниже остаётся для обновлений ширины
+   на уже живом элементе. */
+@keyframes race-in {
+  from { width: 0; }
+}
+
 .race-tracks .track-row { padding: 7px 0 9px; }
 .race-tracks .tr-top {
   display: flex;
@@ -131,6 +140,7 @@
   background: var(--track-fill);
   border-radius: 5px 0 0 5px;
   height: 100%;
+  animation: race-in var(--t-race) ease-out;
   transition: width var(--t-race) ease-out;
 }
 /* Без прироста — закруглённый правый конец у fill */
@@ -139,13 +149,15 @@
   background: var(--gold);
   height: 100%;
   border-radius: 0 5px 5px 0;
+  animation: race-in var(--t-race) ease-out;
   transition: width var(--t-race) ease-out;
 }
 .race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
 
-/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации */
+/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации;
+   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4) */
 @media (prefers-reduced-motion: reduce) {
   .btn { transition-duration: 0ms !important; }
   .race-tracks .fill,
-  .race-tracks .gain { transition-duration: 0ms !important; }
+  .race-tracks .gain { transition-duration: 0ms !important; animation: none !important; }
 }

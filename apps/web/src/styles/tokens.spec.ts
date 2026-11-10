@@ -167,6 +167,29 @@ describe('transitions.css — кнопочная система состояни
     const [block] = extractMediaBlock(css, '(hover: hover) and (pointer: fine)');
     expect(block).toContain('.console-tracks-toggle:hover');
   });
+
+  // Н2 (блокер мерджа, живая приёмка): полосы дорожек существуют только в
+  // reveal-ветке и монтировались сразу в финальной ширине — transition было
+  // нечего перевозить. Доезд — mount-анимация @keyframes race-in от нулевой
+  // ширины; transition width остаётся для обновлений на живом элементе.
+  it('объявлен @keyframes race-in, стартующий с нулевой ширины (Н2)', () => {
+    expect(css).toMatch(/@keyframes\s+race-in\s*\{\s*from\s*\{\s*width:\s*0\s*;?\s*\}\s*\}/);
+  });
+
+  it('.fill и .gain доезжают от нуля при монтировании за var(--t-race) (Н2)', () => {
+    for (const sel of ['.race-tracks .fill', '.race-tracks .gain']) {
+      const m = css.match(new RegExp(`${escapeRe(sel)}\\s*\\{([^}]*)\\}`));
+      expect(m, `ожидался блок ${sel}`).not.toBeNull();
+      expect(m![1]).toMatch(/animation:\s*race-in\s+var\(--t-race\)/);
+    }
+  });
+
+  it('reduced-motion гасит доезд: полосы появляются мгновенно (2.4)', () => {
+    const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
+    expect(block).toMatch(
+      /\.race-tracks \.fill,\s*\.race-tracks \.gain\s*\{[^}]*animation:\s*none\s*!important/,
+    );
+  });
 });
 
 describe('scene.css — кегли логотипа', () => {
