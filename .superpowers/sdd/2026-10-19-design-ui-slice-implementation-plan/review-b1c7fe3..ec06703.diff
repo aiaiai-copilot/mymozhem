@@ -1,0 +1,499 @@
+# Review package: b1c7fe3..HEAD
+
+## Commits
+ec06703 feat(web): styles/ — токены, база, состояния, self-hosted шрифты (Oranienbaum/PT Sans, OFL)
+
+## Files changed
+ apps/web/index.html                                |   2 +-
+ .../public/fonts/oranienbaum-400-cyrillic.woff2    | Bin 0 -> 6652 bytes
+ apps/web/public/fonts/oranienbaum-400-latin.woff2  | Bin 0 -> 11244 bytes
+ apps/web/public/fonts/pt-sans-400-cyrillic.woff2   | Bin 0 -> 7252 bytes
+ apps/web/public/fonts/pt-sans-400-latin.woff2      | Bin 0 -> 11464 bytes
+ apps/web/public/fonts/pt-sans-700-cyrillic.woff2   | Bin 0 -> 7276 bytes
+ apps/web/public/fonts/pt-sans-700-latin.woff2      | Bin 0 -> 11624 bytes
+ apps/web/src/main.tsx                              |   5 +-
+ apps/web/src/styles.css                            |  24 ----
+ apps/web/src/styles/base.css                       |  85 ++++++++++++++
+ apps/web/src/styles/node-test-shims.d.ts           |  10 ++
+ apps/web/src/styles/tokens.css                     |  46 ++++++++
+ apps/web/src/styles/tokens.spec.ts                 | 126 +++++++++++++++++++++
+ apps/web/src/styles/transitions.css                |  83 ++++++++++++++
+ 14 files changed, 355 insertions(+), 26 deletions(-)
+
+## Diff
+diff --git a/apps/web/index.html b/apps/web/index.html
+index 507e201..99c36ce 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -1,12 +1,12 @@
+ <!doctype html>
+-<html lang="ru">
++<html lang="ru" data-theme="rybinsk">
+   <head>
+     <meta charset="UTF-8" />
+     <!-- mobile-first: экраны игроков — телефоны (дизайн §0.4) -->
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+     <title>MyMozhem</title>
+   </head>
+   <body>
+     <div id="root"></div>
+     <script type="module" src="/src/main.tsx"></script>
+   </body>
+diff --git a/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2 b/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2
+new file mode 100644
+index 0000000..119c448
+Binary files /dev/null and b/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/oranienbaum-400-latin.woff2 b/apps/web/public/fonts/oranienbaum-400-latin.woff2
+new file mode 100644
+index 0000000..481d64b
+Binary files /dev/null and b/apps/web/public/fonts/oranienbaum-400-latin.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-400-cyrillic.woff2 b/apps/web/public/fonts/pt-sans-400-cyrillic.woff2
+new file mode 100644
+index 0000000..8334e2a
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-400-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-400-latin.woff2 b/apps/web/public/fonts/pt-sans-400-latin.woff2
+new file mode 100644
+index 0000000..a93af43
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-400-latin.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-700-cyrillic.woff2 b/apps/web/public/fonts/pt-sans-700-cyrillic.woff2
+new file mode 100644
+index 0000000..fa92cef
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-700-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-700-latin.woff2 b/apps/web/public/fonts/pt-sans-700-latin.woff2
+new file mode 100644
+index 0000000..ac5324f
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-700-latin.woff2 differ
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 8a06027..849ed33 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,15 +1,18 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import { App } from './App';
+-import './styles.css';
++// Визуальный фундамент (T4): порядок важен — токены → база → состояния.
++import './styles/tokens.css';
++import './styles/base.css';
++import './styles/transitions.css';
+ 
+ // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
+ // под MemoryRouter без привязки к DOM.
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <BrowserRouter>
+       <App />
+     </BrowserRouter>
+   </StrictMode>,
+ );
+diff --git a/apps/web/src/styles.css b/apps/web/src/styles.css
+deleted file mode 100644
+index 73d1876..0000000
+--- a/apps/web/src/styles.css
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
+-   раскладке (дизайн §0.4). Дизайн-система — отдельная задача батча C. */
+-*,
+-*::before,
+-*::after {
+-  box-sizing: border-box;
+-}
+-
+-body {
+-  margin: 0;
+-  font-family: system-ui, sans-serif;
+-}
+-
+-/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
+-   с привязкой к ширине зала (vw), варианты без маркеров. */
+-.screen-question {
+-  font-size: clamp(2rem, 6vw, 4rem);
+-}
+-
+-.screen-options {
+-  font-size: clamp(1.25rem, 3vw, 2rem);
+-  list-style: none;
+-  padding: 0;
+-}
+diff --git a/apps/web/src/styles/base.css b/apps/web/src/styles/base.css
+new file mode 100644
+index 0000000..4cf505c
+--- /dev/null
++++ b/apps/web/src/styles/base.css
+@@ -0,0 +1,85 @@
++/* База UI-среза: self-hosted шрифты (OFL), reset, базовая типографика.
++   Шрифты лежат в public/fonts/ и отдаются тем же сервером — в рантайме
++   обращений к Google Fonts нет (Google — только инструмент получения woff2).
++   subset cyrillic + latin у каждого файла: кириллица — основной текст,
++   latin — цифры таймера и латиница. unicode-range скопирован из css2-ответа
++   Google Fonts. Blagovest осознанно отсутствует (гейт лицензии). */
++
++/* Oranienbaum 400 — display/логотип */
++@font-face {
++  font-family: 'Oranienbaum';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/oranienbaum-400-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'Oranienbaum';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/oranienbaum-400-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++
++/* PT Sans 400/700 — основной текст */
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/pt-sans-400-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/pt-sans-400-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 700;
++  font-display: swap;
++  src: url('/fonts/pt-sans-700-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 700;
++  font-display: swap;
++  src: url('/fonts/pt-sans-700-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++
++/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
++   раскладке (дизайн §0.4). */
++*,
++*::before,
++*::after {
++  box-sizing: border-box;
++}
++
++body {
++  margin: 0;
++  font-family: var(--font-body);
++  color: var(--ink);
++}
++
++/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
++   с привязкой к ширине зала (vw), варианты без маркеров. Переехало из
++   styles.css как есть — потребители живы до T8. */
++.screen-question {
++  font-size: clamp(2rem, 6vw, 4rem);
++}
++
++.screen-options {
++  font-size: clamp(1.25rem, 3vw, 2rem);
++  list-style: none;
++  padding: 0;
++}
+diff --git a/apps/web/src/styles/node-test-shims.d.ts b/apps/web/src/styles/node-test-shims.d.ts
+new file mode 100644
+index 0000000..0f5c99e
+--- /dev/null
++++ b/apps/web/src/styles/node-test-shims.d.ts
+@@ -0,0 +1,10 @@
++// apps/web — браузерный пакет без @types/node (tsconfig: types ["vite/client"]),
++// но *.spec.ts исполняются vitest в node-окружении (vite.config test.environment)
++// и читают CSS с диска. Объявляем нужные node-API локально; если в пакет
++// добавят @types/node — этот файл надо удалить.
++declare module 'node:fs' {
++  export function readFileSync(path: string, encoding: 'utf8'): string;
++}
++declare module 'node:url' {
++  export function fileURLToPath(url: URL): string;
++}
+diff --git a/apps/web/src/styles/tokens.css b/apps/web/src/styles/tokens.css
+new file mode 100644
+index 0000000..58dede7
+--- /dev/null
++++ b/apps/web/src/styles/tokens.css
+@@ -0,0 +1,46 @@
++/* Дизайн-токены темы «rybinsk» (дизайн §4 + принятый мокап component-states-live).
++   Точка темы: <html data-theme="rybinsk">. Токены объявлены под :root;
++   вторая тема = переопределение токенов под [data-theme=…] — готовность без
++   пресетов (дизайн п. 5): пресеты второй темы осознанно НЕ создаются. */
++:root {
++  /* Сцена — тёмный контур (проектор/экран игрока) */
++  --scene-bg: #0A252B;
++  --scene-surface: #1B3B40;
++  --scene-surface-hover: #23484D;
++  --scene-surface-active: #122E32;
++  --gold: #E6C77D;
++  --scene-text: #F6EDDC;
++  --muted-scene: #9DB8B2;
++  --error-dark: #F27668;
++  --input-scene: #A9BDB2;
++  --track-fill: #0F7B57;
++  --track-canvas-dark: #143138;
++
++  /* Консоль — светлый контур (ведущий/организатор) */
++  --console-bg: #E3F0E9;
++  --console-panel: #F4F8F3;
++  --console-strip: #D7E8DE;
++  --console-secondary: #C4D8CC;
++  --console-primary: #10514F;
++  --console-primary-hover: #17685F;
++  --console-primary-active: #0A3E3B;
++  --console-secondary-hover: #B4CDBC;
++  --console-secondary-active: #A3BFA9;
++  --ink: #12343A;
++  --muted: #5A6B66;
++  --error-light: #A92820;
++  --track-canvas-light: #D5E2DA;
++  --danger-hover: #F3DCD2;
++  --danger-active: #ECCFC4;
++
++  /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
++  --t-hover: 140ms;
++  --t-press: 60ms;
++  --t-race: 300ms;
++
++  /* Шрифты: self-hosted woff2 (OFL), подключены в base.css.
++     --font-logo = Oranienbaum до решения лицензии Blagovest (гейт лицензии). */
++  --font-logo: 'Oranienbaum', serif;
++  --font-display: 'Oranienbaum', serif;
++  --font-body: 'PT Sans', sans-serif;
++}
+diff --git a/apps/web/src/styles/tokens.spec.ts b/apps/web/src/styles/tokens.spec.ts
+new file mode 100644
+index 0000000..9e9dfb7
+--- /dev/null
++++ b/apps/web/src/styles/tokens.spec.ts
+@@ -0,0 +1,126 @@
++import { describe, expect, it } from 'vitest';
++import { readFileSync } from 'node:fs';
++import { fileURLToPath } from 'node:url';
++
++// Типы node:fs/node:url — в соседнем node-test-shims.d.ts: apps/web —
++// браузерный пакет без @types/node (tsconfig: types ["vite/client"]), но spec
++// исполняется vitest в node-окружении (vite.config test.environment).
++
++// Контракт визуального фундамента (T4): токены темы «rybinsk» и кнопочная
++// система состояний. Значения — verbatim из брифа (дизайн §4 + принятый мокап
++// component-states-live); спек ловит случайный дрейф значений.
++
++const readStyle = (name: string): string =>
++  readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8');
++
++const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++
++// Извлекает блок @media по подстроке запроса со сбалансированными скобками.
++// Возвращает [блок, css без блока] — нужно, чтобы проверить, что hover-правила
++// не существуют вне медиа-запроса (hover: hover) and (pointer: fine).
++function extractMediaBlock(css: string, query: string): [string, string] {
++  const start = css.indexOf(query);
++  expect(start, `медиа-запрос ${query} должен присутствовать`).toBeGreaterThanOrEqual(0);
++  const mediaStart = css.lastIndexOf('@media', start);
++  const openBrace = css.indexOf('{', start);
++  let depth = 0;
++  let end = -1;
++  for (let i = openBrace; i < css.length; i += 1) {
++    if (css[i] === '{') depth += 1;
++    if (css[i] === '}') {
++      depth -= 1;
++      if (depth === 0) {
++        end = i;
++        break;
++      }
++    }
++  }
++  expect(end, `медиа-запрос ${query} должен быть закрыт`).toBeGreaterThan(-1);
++  const block = css.slice(mediaStart, end + 1);
++  return [block, css.slice(0, mediaStart) + css.slice(end + 1)];
++}
++
++describe('tokens.css — токены темы rybinsk', () => {
++  const css = readStyle('tokens.css');
++
++  const exactTokens: Array<[string, string]> = [
++    // сцена (тёмный контур)
++    ['--scene-bg', '#0A252B'],
++    ['--scene-surface', '#1B3B40'],
++    ['--scene-surface-hover', '#23484D'],
++    ['--scene-surface-active', '#122E32'],
++    ['--gold', '#E6C77D'],
++    ['--scene-text', '#F6EDDC'],
++    ['--muted-scene', '#9DB8B2'],
++    ['--error-dark', '#F27668'],
++    ['--input-scene', '#A9BDB2'],
++    ['--track-fill', '#0F7B57'],
++    ['--track-canvas-dark', '#143138'],
++    // консоль (светлый контур)
++    ['--console-bg', '#E3F0E9'],
++    ['--console-panel', '#F4F8F3'],
++    ['--console-strip', '#D7E8DE'],
++    ['--console-secondary', '#C4D8CC'],
++    ['--console-primary', '#10514F'],
++    ['--console-primary-hover', '#17685F'],
++    ['--console-primary-active', '#0A3E3B'],
++    ['--console-secondary-hover', '#B4CDBC'],
++    ['--console-secondary-active', '#A3BFA9'],
++    ['--ink', '#12343A'],
++    ['--muted', '#5A6B66'],
++    ['--error-light', '#A92820'],
++    ['--track-canvas-light', '#D5E2DA'],
++    ['--danger-hover', '#F3DCD2'],
++    ['--danger-active', '#ECCFC4'],
++    // тайминги
++    ['--t-hover', '140ms'],
++    ['--t-press', '60ms'],
++    ['--t-race', '300ms'],
++  ];
++
++  it('все токены объявлены под :root с точными значениями', () => {
++    expect(css).toContain(':root');
++    for (const [name, value] of exactTokens) {
++      const re = new RegExp(`${escapeRe(name)}\\s*:\\s*${escapeRe(value)}\\s*;`);
++      expect(css, `ожидался токен ${name}: ${value};`).toMatch(re);
++    }
++  });
++
++  it('шрифтовые токены указывают на self-hosted семейства', () => {
++    const fontTokens: Array<[string, string]> = [
++      ['--font-logo', "'Oranienbaum'"],
++      ['--font-display', "'Oranienbaum'"],
++      ['--font-body', "'PT Sans'"],
++    ];
++    for (const [name, family] of fontTokens) {
++      const m = css.match(new RegExp(`${escapeRe(name)}\\s*:\\s*([^;]+);`));
++      expect(m, `ожидался токен ${name}`).not.toBeNull();
++      expect(m![1]).toContain(family);
++    }
++  });
++
++  it('точка расширения темы зафиксирована: вторая тема = переопределение под [data-theme=…]', () => {
++    expect(css).toContain('[data-theme=');
++  });
++});
++
++describe('transitions.css — кнопочная система состояний', () => {
++  const css = readStyle('transitions.css');
++
++  it('.btn объявлен без border (border: none)', () => {
++    const m = css.match(/\.btn\s*\{([^}]*)\}/);
++    expect(m, 'ожидался базовый блок .btn').not.toBeNull();
++    expect(m![1]).toMatch(/border:\s*none/);
++  });
++
++  it('hover-правила живут только под @media (hover: hover) and (pointer: fine)', () => {
++    const [block, rest] = extractMediaBlock(css, '(hover: hover) and (pointer: fine)');
++    expect(block).toContain(':hover');
++    expect(rest, 'вне hover-медиа не должно быть :hover-правил').not.toContain(':hover');
++  });
++
++  it('reduced-motion гасит переходы', () => {
++    const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
++    expect(block).toMatch(/transition-duration:\s*0ms/);
++  });
++});
+diff --git a/apps/web/src/styles/transitions.css b/apps/web/src/styles/transitions.css
+new file mode 100644
+index 0000000..b43a92c
+--- /dev/null
++++ b/apps/web/src/styles/transitions.css
+@@ -0,0 +1,83 @@
++/* Кнопочная система состояний — перенос из принятого мокапа
++   component-states-live: hover 140мс только на устройствах с настоящей мышью,
++   active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
++   смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
++   Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
++   обёртки .panel.dark), литералы hover/active danger заменены токенами
++   --danger-hover/--danger-active, шрифт — var(--font-body). */
++
++.btn {
++  border: none;
++  border-radius: 10px;
++  font-family: var(--font-body);
++  font-weight: 700;
++  font-size: 16px;
++  padding: 13px 22px;
++  cursor: pointer;
++  transition: background-color var(--t-hover) ease-out, color var(--t-hover) ease-out;
++}
++.btn-primary {
++  background: var(--console-primary);
++  color: var(--gold);
++}
++.btn-secondary {
++  background: var(--console-secondary);
++  color: var(--ink);
++}
++.btn-quiet {
++  background: none;
++  color: var(--ink);
++  padding: 13px 10px;
++  border-radius: 8px;
++}
++.btn-danger {
++  background: none;
++  color: var(--error-light);
++  padding: 13px 10px;
++  border-radius: 8px;
++}
++.btn:disabled {
++  opacity: 0.55;
++  cursor: default;
++}
++
++/* hover — только устройства с настоящей мышью; на таче hover не появится вообще */
++@media (hover: hover) and (pointer: fine) {
++  .btn-primary:hover:not(:disabled) { background: var(--console-primary-hover); }
++  .btn-secondary:hover:not(:disabled) { background: var(--console-secondary-hover); }
++  .btn-quiet:hover:not(:disabled) { background: var(--console-strip); }
++  .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
++  .btn-scene:hover:not(:disabled) { background: var(--scene-surface-hover); }
++}
++
++/* active — мгновенно (≤60мс), работает везде, включая тач */
++.btn-primary:active:not(:disabled) { background: var(--console-primary-active); transition-duration: var(--t-press); }
++.btn-secondary:active:not(:disabled) { background: var(--console-secondary-active); transition-duration: var(--t-press); }
++.btn-quiet:active:not(:disabled) { background: var(--console-secondary); transition-duration: var(--t-press); }
++.btn-danger:active:not(:disabled) { background: var(--danger-active); transition-duration: var(--t-press); }
++.btn-scene:active:not(:disabled) { background: var(--scene-surface-active); transition-duration: var(--t-press); }
++
++/* focus-visible — контур только для клавиатуры; на сцене золотой */
++.btn:focus-visible {
++  outline: 3px solid var(--console-primary);
++  outline-offset: 2px;
++}
++.btn-scene:focus-visible { outline-color: var(--gold); }
++.btn:focus:not(:focus-visible) { outline: none; }
++
++/* Вариант ответа на сцене */
++.btn-scene {
++  background: var(--scene-surface);
++  color: var(--scene-text);
++  min-width: 260px;
++  text-align: left;
++  font-weight: 400;
++  font-size: 18px;
++  padding: 16px 20px;
++}
++.btn-scene b { color: var(--gold); margin-right: 10px; }
++
++/* «Уменьшить движение» в системе гасит переходы состояний */
++@media (prefers-reduced-motion: reduce) {
++  .btn { transition-duration: 0ms !important; }
++}

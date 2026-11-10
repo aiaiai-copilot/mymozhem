@@ -1,0 +1,745 @@
+diff --git a/apps/web/src/components/winners.tsx b/apps/web/src/components/winners.tsx
+index 9cc35b4..83b35d3 100644
+--- a/apps/web/src/components/winners.tsx
++++ b/apps/web/src/components/winners.tsx
+@@ -5,16 +5,20 @@ interface WinnersProps {
+   // Проекция лотереи из лога (draw.completed): drawId → { prizeId, winnerId }.
+   draws: LotteryState['draws'];
+   names: Map<string, string>;
++  // Консольный потребитель передаёт карточный класс (бриф T11); сцены
++  // стилизованы своими обёртками (.play-winners/.screen-winners) и проп не
++  // передают — регресса сцен нет.
++  className?: string;
+ }
+ 
+ // Список победителей розыгрыша (functional-minimum). Названий призов на клиенте
+ // нет (listPrizes — контур консоли организатора), поэтому показываем prizeId.
+ // prizeId null — безпризовой розыгрыш (ADR-012 §4): строка без «приз …».
+-export function Winners({ draws, names }: WinnersProps) {
++export function Winners({ draws, names, className }: WinnersProps) {
+   const entries = Object.entries(draws);
+   if (entries.length === 0) return null;
+   return (
+-    <section>
++    <section className={className}>
+       <h2>Победители розыгрыша</h2>
+       <ul>
+         {entries.map(([drawId, draw]) => (
+diff --git a/apps/web/src/pages/host/awards-panel.tsx b/apps/web/src/pages/host/awards-panel.tsx
+index 5a41bf4..be9131f 100644
+--- a/apps/web/src/pages/host/awards-panel.tsx
++++ b/apps/web/src/pages/host/awards-panel.tsx
+@@ -34,11 +34,14 @@ interface AwardsPanelProps {
+   events: ProjectedEvent[];
+ }
+ 
+-// Панель вручения (бриф Task 15): список наград + fulfill/revoke. Кнопки живы
+-// только в статусе AWARDED — FULFILLED/REVOKED терминальны (REQ-RWD-007,
+-// сервер ответил бы REWARD_ALREADY_RESOLVED). Статус комнаты здесь сознательно
+-// НЕ гейтится: fulfill/revoke легальны при COMPLETED (REQ-RWD-009) — призы
+-// вручают после завершения события.
++// Панель вручения (бриф Task 15, стилизация — бриф T11, дизайн §5.3, мокапы
++// console-draw-winner-larger / console-landscape-editor-draw-finish): карточка
++// консоли; строки «имя · статус» с действиями справа — «Вручить» primary,
++// «Отозвать» тихая без рамки (п. 15); терминальные статусы — тихим текстом.
++// Кнопки живы только в статусе AWARDED — FULFILLED/REVOKED терминальны
++// (REQ-RWD-007, сервер ответил бы REWARD_ALREADY_RESOLVED). Статус комнаты
++// здесь сознательно НЕ гейтится: fulfill/revoke легальны при COMPLETED
++// (REQ-RWD-009) — призы вручают после завершения события.
+ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
+   const [awards, setAwards] = useState<AwardResponse[] | null>(null);
+   const [busyId, setBusyId] = useState<string | null>(null);
+@@ -83,40 +86,64 @@ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
+       .finally(() => setBusyId(null));
+   };
+ 
++  // Заголовок со счётчиком вручения — по мокапу завершения
++  // («Награды — вручить 2 из 3»); счётчик только когда вручать есть что.
++  const pending = awards?.filter((a) => a.status === 'AWARDED').length ?? 0;
++  const title =
++    awards !== null && awards.length > 0 && pending > 0
++      ? `Награды — вручить ${pending} из ${awards.length}`
++      : 'Награды';
++
+   return (
+-    <section>
+-      <h2>Вручение наград</h2>
+-      {awards === null ? <p>Загружаем награды…</p> : null}
+-      {awards !== null && awards.length === 0 ? <p>Наград пока нет.</p> : null}
++    <section className="console-card">
++      <h3 className="console-card-title">{title}</h3>
++      {awards === null ? <p className="console-empty-note">Загружаем награды…</p> : null}
++      {awards !== null && awards.length === 0 ? (
++        <p className="console-empty-note">Наград пока нет.</p>
++      ) : null}
+       {awards !== null && awards.length > 0 ? (
+-        <ul>
++        <ul className="console-award-list">
+           {awards.map((a) => (
+-            <li key={a.id}>
+-              {displayNameOf(names, a.winnerId)}
+-              {a.prizeId !== null ? ` — приз ${a.prizeId}` : ''} — {statusLabel(a.status)}{' '}
++            <li className="console-award-row" key={a.id}>
++              <span className="console-award-name">
++                {displayNameOf(names, a.winnerId)}
++                {/* Названий призов на этом контуре нет (listPrizes — панель
++                    призов), показываем честный prizeId. */}
++                {a.prizeId !== null ? ` — приз ${a.prizeId}` : ''}
++                {a.status !== 'AWARDED' ? (
++                  <span className="console-award-status"> · {statusLabel(a.status)}</span>
++                ) : null}
++              </span>
+               {a.status === 'AWARDED' ? (
+-                <>
++                <span className="console-award-actions">
+                   <button
+                     type="button"
++                    className="btn btn-primary console-mini"
+                     disabled={busyId !== null}
+                     onClick={() => resolve(a.id, 'fulfill')}
+                   >
+                     Вручить
+-                  </button>{' '}
++                  </button>
+                   <button
+                     type="button"
++                    className="btn btn-quiet console-mini"
+                     disabled={busyId !== null}
+                     onClick={() => resolve(a.id, 'revoke')}
+                   >
+                     Отозвать
+                   </button>
+-                </>
++                </span>
+               ) : null}
+             </li>
+           ))}
+         </ul>
+       ) : null}
+-      {error ? <p role="alert">{error}</p> : null}
++      {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11). */}
++      {error ? (
++        <p role="alert" className="console-error-banner console-panel-alert">
++          {error}
++        </p>
++      ) : null}
+     </section>
+   );
+ }
+diff --git a/apps/web/src/pages/host/console-page.tsx b/apps/web/src/pages/host/console-page.tsx
+index a25cb16..91c1c74 100644
+--- a/apps/web/src/pages/host/console-page.tsx
++++ b/apps/web/src/pages/host/console-page.tsx
+@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
+ import { useNavigate } from 'react-router-dom';
+ import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
+ import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
+-import { QUIZ_APP_ID } from '@mymozhem/app-quiz';
++import { gameFinishedPayload, QUIZ_APP_ID } from '@mymozhem/app-quiz';
+ import { ApiError } from '../../api/api-error';
+ import { completeRoom, listRewards } from '../../api/endpoints';
+ import { Logo } from '../../components/logo';
++import { RaceTracks } from '../../components/race-tracks';
++import { displayNameOf } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { HOST_NEW_PATH } from '../../routes';
+ import { SessionStore } from '../../state/session';
+@@ -53,8 +55,13 @@ export function ConsolePage() {
+   const [commandError, setCommandError] = useState<string | null>(null);
+   const [copied, setCopied] = useState<string | null>(null);
+   const [completing, setCompleting] = useState(false);
+-  // null — не загружены/ошибка: подсказки нет (п. 18 — только факт невручённых).
+-  const [pendingAwards, setPendingAwards] = useState<number | null>(null);
++  // Награды целиком (null — не загружены/ошибка): из них derive подсказка
++  // «Квиз окончен» (только факт невручённых, п. 18) и гейт секции наград на
++  // COMPLETED (без наград — без блока вообще, п. 18).
++  const [awards, setAwards] = useState<AwardResponse[] | null>(null);
++  // «ещё N — развернуть» итогового табло COMPLETED (I-5, образец — toggle
++  // промежуточного табло в quiz-controls).
++  const [completedExpanded, setCompletedExpanded] = useState(false);
+ 
+   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
+   // refresh и сам разведёт на console или setup.
+@@ -107,22 +114,49 @@ export function ConsolePage() {
+     [binding.events],
+   );
+ 
+-  // Невручённые награды для подсказки «Квиз окончен» — тем же путём, что
+-  // AwardsPanel (listRewards); грузим только пока экран показан. Best effort:
+-  // ошибка → null → подсказки нет, кнопка «Завершить событие» не блокируется
+-  // невручёнными наградами (REQ-RWD-009).
++  // Награды грузим на экране «Квиз окончен» (подсказка) и на COMPLETED
++  // (подзаголовок hero + гейт секции наград) — тем же путём, что AwardsPanel
++  // (listRewards). Best effort: ошибка → null → подсказки/секции нет, кнопка
++  // «Завершить событие» не блокируется невручёнными наградами (REQ-RWD-009).
++  const awardsNeeded = quizFinishedLive || feed.status === 'COMPLETED';
+   useEffect(() => {
+-    if (!roomId || !quizFinishedLive) return;
++    if (!roomId || !awardsNeeded) return;
+     let stale = false;
+     listRewards(hostClient, roomId)
+       .then((r) => {
+-        if (!stale) setPendingAwards(pendingAwardsCount(r.awards));
++        if (!stale) setAwards(r.awards);
+       })
+       .catch(() => {});
+     return () => {
+       stale = true;
+     };
+-  }, [roomId, quizFinishedLive, rewardsEventCount]);
++  }, [roomId, awardsNeeded, rewardsEventCount]);
++
++  // Невручённые награды — статус AWARDED (подсказка п. 18); null, пока список
++  // не загружен, — подсказки нет.
++  const pendingAwards = awards === null ? null : pendingAwardsCount(awards);
++
++  // Итоговое табло COMPLETED — та же сборка, что финал QuizControls: места из
++  // payload game.finished (их посчитал модуль), fallback — totals проекции.
++  // Прирост — атрибут reveal-момента, на финале дорожки без золотой дельты
++  // (та же норма, что у экрана «Квиз окончен»).
++  const completedStandings = useMemo(() => {
++    const finishedEvent = [...binding.events]
++      .reverse()
++      .find((e) => e.type === 'quiz.game.finished');
++    return finishedEvent ? gameFinishedPayload.parse(finishedEvent.payload).standings : undefined;
++  }, [binding.events]);
++  const completedEntries = useMemo(() => {
++    const rows =
++      completedStandings ??
++      Object.entries(feed.quiz.totals).map(([actorId, total]) => ({ actorId, total }));
++    return rows.map((r) => ({
++      actorId: r.actorId,
++      name: displayNameOf(feed.names, r.actorId),
++      total: r.total,
++      gain: 0,
++    }));
++  }, [completedStandings, feed.quiz.totals, feed.names]);
+ 
+   const runCommand = (type: string, payload: Record<string, unknown>) => {
+     setCommandError(null);
+@@ -154,6 +188,14 @@ export function ConsolePage() {
+       .catch(() => {});
+   };
+ 
++  // «Вернуться к началу — новое событие» (мокап console-draw-winner-larger,
++  // finish-состояние): ключи завершённой комнаты снимаем атомарно, иначе
++  // следующий заход на /host воскресит её из localStorage.
++  const backToStart = () => {
++    SessionStore.clearHostRoom();
++    navigate(HOST_NEW_PATH);
++  };
++
+   // Все хуки выше; дальше — только рендер-ветки.
+   if (!roomId) {
+     return (
+@@ -210,7 +252,62 @@ export function ConsolePage() {
+         </p>
+       ) : null}
+       {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
+-      {feed.status === 'COMPLETED' ? <p className="console-note">Событие завершено.</p> : null}
++      {feed.status === 'COMPLETED' ? (
++        /* Экран завершения (бриф T11, дизайн §5.3 «Завершение», п. 18; мокап
++           console-draw-winner-larger finish-состояние): hero → невручённые
++           награды первой секцией → итоговый забег → тихая «новое событие».
++           Пульта квиза и панелей приглашений/участников/призов здесь нет. */
++        <>
++          <section className="console-hero console-completed-hero">
++            <div className="console-moment">
++              <div className="console-fh-title">Событие завершено</div>
++              <p className="console-fh-sub">
++                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}участников:{' '}
++                {participantsCount(feed.members)}
++                {pendingAwards !== null && pendingAwards > 0 ? ' · вручите награды' : ''}
++              </p>
++            </div>
++          </section>
++          <div className="console-sections">
++            {/* Награды первыми — это то, что осталось сделать в зале; без
++                наград — без блока вообще (п. 18). fulfill/revoke легальны при
++                COMPLETED (REQ-RWD-009) — панель сознательно не гейтится
++                статусом комнаты. */}
++            {awards !== null && awards.length > 0 ? (
++              <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
++            ) : null}
++            <section className="console-card">
++              <h3 className="console-card-title">Итоговое табло</h3>
++              {completedEntries.length > 0 ? (
++                <div className="console-tracks">
++                  <RaceTracks
++                    entries={completedEntries}
++                    contour="console"
++                    topN={completedExpanded ? undefined : 4}
++                  />
++                  {completedEntries.length > 4 ? (
++                    <button
++                      type="button"
++                      className="console-tracks-toggle"
++                      onClick={() => setCompletedExpanded((v) => !v)}
++                    >
++                      {completedExpanded
++                        ? 'Свернуть'
++                        : `ещё ${completedEntries.length - 4} — развернуть`}
++                    </button>
++                  ) : null}
++                </div>
++              ) : (
++                <p className="console-muted">Очков пока нет.</p>
++              )}
++            </section>
++          </div>
++          <button type="button" className="btn btn-quiet console-finish" onClick={backToStart}>
++            Вернуться к началу — новое событие
++          </button>
++        </>
++      ) : (
++        <>
+       {/* Пульт квиза — только в quiz-комнате: в lottery-комнате его команды
+           гарантированно отклонит модуль (pin из room.activated, та же
+           дисциплина, что у кнопки «Разыграть» в PrizesPanel). */}
+@@ -274,11 +371,18 @@ export function ConsolePage() {
+           pinnedAppId={pinnedAppId}
+           disabled={terminal}
+           events={binding.events}
++          names={feed.names}
+           publish={binding.publish}
+         />
+         {/* Результат розыгрыша приезжает публичным draw.completed — та же
+-            проекция, что на /screen; консоль только триггерит draw.run. */}
+-        <Winners draws={feed.lottery.draws} names={feed.names} />
++            проекция, что на /screen; консоль только триггерит draw.run.
++            Баннер в карточке призов показывает последнего победителя, Winners —
++            полный список (бриф T11). */}
++        <Winners
++          draws={feed.lottery.draws}
++          names={feed.names}
++          className="console-card console-winners"
++        />
+         <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
+       </div>
+       {/* Тихая «Завершить событие» внизу (бриф T9, дизайн п. 10). На экране
+@@ -294,6 +398,8 @@ export function ConsolePage() {
+           Завершить событие
+         </button>
+       ) : null}
++        </>
++      )}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/pages/host/prizes-panel.spec.ts b/apps/web/src/pages/host/prizes-panel.spec.ts
+index 4b64768..ccadb21 100644
+--- a/apps/web/src/pages/host/prizes-panel.spec.ts
++++ b/apps/web/src/pages/host/prizes-panel.spec.ts
+@@ -1,8 +1,9 @@
+ import { describe, expect, it } from 'vitest';
+-import type { PrizeResponse } from '@mymozhem/sdk';
++import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
+ import {
+   DRAW_ID_GENERATION_FAILED,
+   isDrawable,
++  lastCompletedDraw,
+   startDrawAttempt,
+   startParticipantDrawAttempt,
+   tryStartDrawAttempt,
+@@ -151,3 +152,37 @@ describe('tryStartParticipantDrawAttempt', () => {
+     });
+   });
+ });
++
++// Баннер победителя (бриф T11, дизайн §5.3 «Розыгрыш»): последний
++// lottery.draw.completed лога, payload — схемой app-lottery на границе
++// (прецедент lastRoundGains в state/race-tracks.ts), не raw JSON.
++const drawEvent = (drawId: string, prizeId: string | null): ProjectedEvent => ({
++  type: 'lottery.draw.completed',
++  payload: { drawId, prizeId, winnerId: '0f8fad5b-d9cb-469f-a165-70867728950e' },
++  actorId: null,
++});
++
++describe('lastCompletedDraw', () => {
++  it('пустой лог / лог без розыгрышей → null (баннера нет)', () => {
++    expect(lastCompletedDraw([])).toBeNull();
++    expect(
++      lastCompletedDraw([
++        { type: 'quiz.question.opened', payload: { questionIndex: 0 }, actorId: null },
++      ]),
++    ).toBeNull();
++  });
++
++  it('один розыгрыш → его payload (призовый и безпризовой)', () => {
++    const withPrize = drawEvent('33333333-3333-4333-8333-333333333333', prize(1).id);
++    expect(lastCompletedDraw([withPrize])).toEqual(withPrize.payload);
++    const noPrize = drawEvent('44444444-4444-4444-8444-444444444444', null);
++    expect(lastCompletedDraw([noPrize])).toEqual(noPrize.payload);
++  });
++
++  it('несколько розыгрышей → последний в порядке лога', () => {
++    const first = drawEvent('55555555-5555-4555-8555-555555555555', prize(1).id);
++    const last = drawEvent('66666666-6666-4666-8666-666666666666', null);
++    expect(lastCompletedDraw([first, last])).toEqual(last.payload);
++    expect(lastCompletedDraw([last, first])).toEqual(first.payload);
++  });
++});
+diff --git a/apps/web/src/pages/host/prizes-panel.tsx b/apps/web/src/pages/host/prizes-panel.tsx
+index 01ed38f..526515e 100644
+--- a/apps/web/src/pages/host/prizes-panel.tsx
++++ b/apps/web/src/pages/host/prizes-panel.tsx
+@@ -1,8 +1,9 @@
+ import { useEffect, useState, type FormEvent } from 'react';
+ import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
+-import { LOTTERY_APP_ID } from '@mymozhem/app-lottery';
++import { drawCompletedPayload, LOTTERY_APP_ID } from '@mymozhem/app-lottery';
+ import { ApiError } from '../../api/api-error';
+ import { createPrize, listPrizes } from '../../api/endpoints';
++import { displayNameOf } from '../../components/roster-names';
+ import { hostClient } from './host-session';
+ 
+ // Попытка розыгрыша: drawId — клиентский uuid, ключ идемпотентности команды
+@@ -88,6 +89,23 @@ const panelErrorText = (e: unknown): string => {
+ // (rewards.service). Оба public (REWARDS_EVENTS) — visibility-дисциплина.
+ const PRIZE_REFETCH_EVENTS = new Set(['rewards.reward.awarded', 'rewards.reward.revoked']);
+ 
++// Баннер победителя (бриф T11, дизайн §5.3 «Розыгрыш»): последний
++// lottery.draw.completed из лога. Payload парсим схемой app-lottery на
++// границе (прецедент lastRoundGains в state/race-tracks.ts), не raw JSON.
++// Розыгрышей не было → null, баннер не рисуется.
++export interface CompletedDraw {
++  drawId: string;
++  prizeId: string | null;
++  winnerId: string;
++}
++export const lastCompletedDraw = (events: ProjectedEvent[]): CompletedDraw | null => {
++  let last: CompletedDraw | null = null;
++  for (const e of events) {
++    if (e.type === 'lottery.draw.completed') last = drawCompletedPayload.parse(e.payload);
++  }
++  return last;
++};
++
+ interface PrizesPanelProps {
+   roomId: string;
+   // Пин приложения из payload core.room.activated (REQ-RT-004): кнопка
+@@ -96,17 +114,25 @@ interface PrizesPanelProps {
+   // Терминальный статус комнаты: сервер не примет ни createPrize
+   // (ROOM_NOT_ACTIVE), ни draw.run в не-ACTIVE комнате — отсекаем заранее.
+   disabled: boolean;
+-  // Лог — триггер событийного рефетча остатков (см. PRIZE_REFETCH_EVENTS).
++  // Лог — триггер событийного рефетча остатков (см. PRIZE_REFETCH_EVENTS) и
++  // источник баннера победителя (lastCompletedDraw).
+   events: ProjectedEvent[];
++  // Имена — из общего useRoomFeed: draw.completed несёт только winnerId
++  // (REQ-SEC-009), имя победителя берём из membership-проекции.
++  names: Map<string, string>;
+   publish: (type: string, payload: Record<string, unknown>) => Promise<void>;
+ }
+ 
+-// Панель призов и розыгрыша (бриф Task 15): форма name+quantity → createPrize →
+-// рефетч; в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
+-// lottery.draw.run; результат приезжает draw.completed и виден в <Winners>.
+-// draw.completed сам модуль коммитит — клиент его не публикует никогда.
+-// ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw (без prizeId).
+-export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }: PrizesPanelProps) {
++// Панель призов и розыгрыша (бриф Task 15, стилизация — бриф T11, дизайн
++// §5.3 «Розыгрыш», мокап console-draw-winner-larger): карточка консоли;
++// баннер последнего победителя внутри карточки (имя 36px Oranienbaum —
++// крупнейший элемент экрана); форма name+quantity → createPrize → рефетч;
++// в lottery-комнате у приза с quantity>0 — «Разыграть» → publish
++// lottery.draw.run; результат приезжает draw.completed и виден в баннере
++// и <Winners>. draw.completed сам модуль коммитит — клиент его не публикует
++// никогда. ADR-012 §4: кнопка «Разыграть участника» — безпризовой draw
++// (без prizeId).
++export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publish }: PrizesPanelProps) {
+   const [prizes, setPrizes] = useState<PrizeResponse[] | null>(null);
+   const [name, setName] = useState('');
+   const [quantity, setQuantity] = useState('1');
+@@ -212,21 +238,81 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }:
+ 
+   const isLottery = pinnedAppId === LOTTERY_APP_ID;
+ 
++  // Баннер последнего победителя (мокап console-draw-winner-larger): внутри
++  // карточки призов, над списком. Название приза — из локального списка панели
++  // по prizeId; приз мог быть удалён из выдачи — тогда строка без названия
++  // (fallback брифа T11), безпризовой draw — тоже без названия.
++  const lastDraw = lastCompletedDraw(events);
++  const drawPrizeName =
++    lastDraw?.prizeId != null
++      ? (prizes?.find((p) => p.id === lastDraw.prizeId)?.name ?? null)
++      : null;
++
+   return (
+-    <section>
+-      <h2>Призы</h2>
+-      <form onSubmit={submitPrize}>
+-        <label>
+-          Название{' '}
++    <section className="console-card">
++      <h3 className="console-card-title">Призы</h3>
++      {lastDraw ? (
++        <div className="console-winner-banner">
++          <div className="console-wb-label">Розыгрыш завершён</div>
++          <div className="console-wb-name">{displayNameOf(names, lastDraw.winnerId)}</div>
++          {drawPrizeName !== null ? (
++            <div className="console-wb-prize">выигрывает «{drawPrizeName}»</div>
++          ) : null}
++        </div>
++      ) : null}
++      {prizes === null ? <p className="console-empty-note">Загружаем призы…</p> : null}
++      {prizes !== null && prizes.length === 0 ? (
++        <p className="console-empty-note">Призов пока нет.</p>
++      ) : null}
++      {prizes !== null && prizes.length > 0 ? (
++        <ul className="console-prize-list">
++          {prizes.map((p) => (
++            <li className="console-prize-row" key={p.id}>
++              <span className="console-prize-name">
++                {p.name}
++                <span className="console-prize-left">
++                  {' '}
++                  — осталось {p.quantity} из {p.quantityTotal}
++                </span>
++              </span>
++              {isLottery ? (
++                isDrawable(p) ? (
++                  <button
++                    type="button"
++                    className="btn btn-secondary console-mini"
++                    disabled={disabled || pendingDraw !== null}
++                    onClick={() => runDraw(p)}
++                  >
++                    Разыграть
++                  </button>
++                ) : (
++                  /* Разыгранный приз (quantity 0): вместо disabled-кнопки —
++                     тихий статус (мокап «Разыграна»; при фонде >1 — мн. ч.). */
++                  <span className="console-prize-drawn">
++                    {p.quantityTotal > 1 ? 'Разыграны' : 'Разыграна'}
++                  </span>
++                )
++              ) : null}
++            </li>
++          ))}
++        </ul>
++      ) : null}
++      {/* Поля формы переиспользуют editor-стили карточки вопроса (та же
++          консольная палитра: белое поле, заголовок-лейбл). */}
++      <form className="console-prize-form" onSubmit={submitPrize}>
++        <label className="editor-label">
++          Название
+           <input
++            className="editor-input"
+             value={name}
+             onChange={(e) => setName(e.target.value)}
+             disabled={disabled || creating}
+           />
+-        </label>{' '}
+-        <label>
+-          Количество{' '}
++        </label>
++        <label className="editor-label">
++          Количество
+           <input
++            className="editor-input console-prize-qty"
+             type="number"
+             min={1}
+             step={1}
+@@ -234,47 +320,38 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, publish }:
+             onChange={(e) => setQuantity(e.target.value)}
+             disabled={disabled || creating}
+           />
+-        </label>{' '}
+-        <button type="submit" disabled={disabled || creating}>
+-          Добавить приз
++        </label>
++        <button
++          type="submit"
++          className="btn btn-secondary console-prize-add"
++          disabled={disabled || creating}
++        >
++          + Добавить приз
+         </button>
+       </form>
+       {/* ADR-012 §4: создание приза — юридическая ответственность организатора
+           (лотереи, налоги). Текст виден всегда: клиент режим не знает, серверный
+           гейт отвечает PRIZES_DISABLED при prize_mode=off. */}
+-      <p>Призовой режим — юридическая ответственность организатора (лотереи, налоги).</p>
++      <p className="console-empty-note">
++        Призовой режим — юридическая ответственность организатора (лотереи, налоги).
++      </p>
+       {isLottery ? (
+-        <p>
+-          <button
+-            type="button"
+-            disabled={disabled || pendingDraw !== null}
+-            onClick={runParticipantDraw}
+-          >
+-            Разыграть участника
+-          </button>
+-        </p>
++        <button
++          type="button"
++          className="btn btn-secondary console-draw-participant"
++          disabled={disabled || pendingDraw !== null}
++          onClick={runParticipantDraw}
++        >
++          Разыграть участника
++        </button>
+       ) : null}
+-      {prizes === null ? <p>Загружаем призы…</p> : null}
+-      {prizes !== null && prizes.length === 0 ? <p>Призов пока нет.</p> : null}
+-      {prizes !== null && prizes.length > 0 ? (
+-        <ul>
+-          {prizes.map((p) => (
+-            <li key={p.id}>
+-              {p.name} — осталось {p.quantity} из {p.quantityTotal}{' '}
+-              {isLottery ? (
+-                <button
+-                  type="button"
+-                  disabled={disabled || !isDrawable(p) || pendingDraw !== null}
+-                  onClick={() => runDraw(p)}
+-                >
+-                  Разыграть
+-                </button>
+-              ) : null}
+-            </li>
+-          ))}
+-        </ul>
++      {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11,
++          мокап console-empty-long-errors-v2). */}
++      {error ? (
++        <p role="alert" className="console-error-banner console-panel-alert">
++          {error}
++        </p>
+       ) : null}
+-      {error ? <p role="alert">{error}</p> : null}
+     </section>
+   );
+ }
+diff --git a/apps/web/src/styles/console.css b/apps/web/src/styles/console.css
+index 62052c8..eb22d1a 100644
+--- a/apps/web/src/styles/console.css
++++ b/apps/web/src/styles/console.css
+@@ -463,3 +463,125 @@
+ 
+ .editor-scoring { margin-bottom: 12px; }
+ .editor-submit { width: 100%; }
++
++/* --- Розыгрыш, награды, завершение, пустые/длинные/ошибки (Task 11, дизайн
++   §5.3 «Розыгрыш»/«Завершение»/«Пустые/длинные/ошибки», п. 10/11/14/15/18;
++   мокапы-эталоны: console-draw-winner-larger, console-landscape-editor-draw-finish,
++   console-empty-long-errors-v2). Цвета/тайминги — только токены tokens.css;
++   литералов мокапа в этой секции нет. Кнопки — общая система .btn
++   (transitions.css): «Вручить» — primary, «Разыграть»/«+ Добавить приз» —
++   secondary, «Отозвать» — тихая без рамки (п. 15). --- */
++
++/* Баннер победителя внутри карточки призов (мокап .winner-banner): имя
++   36px Oranienbaum — крупнейший элемент экрана (§5.3 «Розыгрыш»). */
++.console-winner-banner {
++  margin: 4px 0 12px;
++  padding: 14px 16px 16px;
++  background: var(--console-strip);
++  border-radius: 8px;
++  text-align: center;
++}
++.console-wb-label {
++  color: var(--muted);
++  font-size: 12px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-wb-name {
++  margin: 2px 0;
++  font-family: var(--font-display);
++  font-size: 36px;
++  line-height: 1.15;
++  /* Длинные имена переносятся, не обрезаются (дизайн §5.3 «Пустые/длинные») */
++  overflow-wrap: anywhere;
++}
++.console-wb-prize { font-size: 15px; overflow-wrap: anywhere; }
++
++/* Строки призов/наград (мокап .row): название слева, действие справа;
++   длинные названия переносятся, кнопка не сжимается */
++.console-prize-list,
++.console-award-list { list-style: none; margin: 0 0 12px; padding: 0; }
++.console-prize-row,
++.console-award-row {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  padding: 6px 0;
++}
++.console-prize-name,
++.console-award-name { overflow-wrap: anywhere; }
++.console-prize-left,
++.console-award-status { color: var(--muted); }
++
++/* Малая кнопка строки (мокап .mini-btn): палитра общей системы .btn,
++   уменьшенный размер */
++.console-mini {
++  flex-shrink: 0;
++  padding: 6px 12px;
++  border-radius: 7px;
++  font-size: 13px;
++}
++.console-award-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
++
++/* Разыгранный приз (quantity 0): вместо disabled-кнопки — тихий статус
++   (мокап «Разыграна», бриф T11) */
++.console-prize-drawn { flex-shrink: 0; color: var(--muted); font-size: 13px; }
++
++/* Форма добавления приза: поля — переиспользование editor-стилей (белое поле,
++   заголовок-лейбл); submit — secondary во всю ширину (мокап «+ Добавить приз») */
++.console-prize-form { margin-bottom: 10px; }
++.console-prize-qty { width: 96px; }
++.console-prize-add,
++.console-draw-participant { width: 100%; }
++.console-draw-participant { margin-bottom: 10px; }
++
++/* Пустые состояния и служебные заметки панелей (мокап .empty-note) */
++.console-empty-note {
++  margin: 0 0 12px;
++  padding: 6px 0 4px;
++  color: var(--muted);
++  font-size: 14px;
++  line-height: 1.5;
++}
++
++/* Ошибки панелей (role="alert") — единый стиль с баннером обрыва связи
++   (.console-error-banner выше); модификатор убирает страничные отступы
++   внутри карточки */
++.console-panel-alert { margin: 10px 0 0; }
++
++/* Победители розыгрыша на консоли — карточка (className-проп Winners;
++   сцены стилизованы своими обёртками .play-winners/.screen-winners и не
++   затронуты). На ACTIVE — полный список всех победителей (бриф T11). */
++.console-winners h2 {
++  margin: 0 0 10px;
++  color: var(--muted);
++  font-family: var(--font-body);
++  font-size: 13px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-winners ul { list-style: none; margin: 0; padding: 0; }
++.console-winners li { padding: 5px 0; overflow-wrap: anywhere; }
++
++/* Длинные имена в дорожках консоли переносятся (мокап «Длинное»);
++   scoped под консоль — сцена имеет свои правила в transitions.css */
++.console-page .race-tracks .tr-name { overflow-wrap: anywhere; }
++
++/* Hero завершения (мокап .finish-hero): центрированная плашка */
++.console-completed-hero { text-align: center; }
++.console-completed-hero .console-fh-title { margin-bottom: 4px; }
++.console-completed-hero .console-fh-sub { margin-bottom: 0; }
++
++/* Ландшафт-правило (п. 11) для новых состояний: hero завершения — одна плашка
++   без колонки действий (мокап .fin-hero); имя победителя 32px остаётся
++   крупнейшим элементом своего экрана (мокап console-landscape-editor-draw-finish) */
++@media (orientation: landscape) and (max-height: 400px) {
++  .console-completed-hero {
++    display: block;
++    padding: 12px 16px;
++    text-align: left;
++  }
++  .console-completed-hero .console-fh-title { font-size: 22px; }
++  .console-wb-name { font-size: 32px; }
++}

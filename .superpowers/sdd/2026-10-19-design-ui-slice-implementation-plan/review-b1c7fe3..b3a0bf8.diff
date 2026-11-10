@@ -1,0 +1,975 @@
+# Review package: b1c7fe3..HEAD
+
+## Commits
+b3a0bf8 feat(web): race-tracks — логика дорожек (нормировка к лидеру, прирост из последнего reveal) + компонент RaceTracks
+b6c2a0a feat(web): question-timer — remainingSec/formatTimer/useQuestionTimer (тик 1 с, clamp 0..durationSec)
+ec06703 feat(web): styles/ — токены, база, состояния, self-hosted шрифты (Oranienbaum/PT Sans, OFL)
+
+## Files changed
+ apps/web/index.html                                |   2 +-
+ .../public/fonts/oranienbaum-400-cyrillic.woff2    | Bin 0 -> 6652 bytes
+ apps/web/public/fonts/oranienbaum-400-latin.woff2  | Bin 0 -> 11244 bytes
+ apps/web/public/fonts/pt-sans-400-cyrillic.woff2   | Bin 0 -> 7252 bytes
+ apps/web/public/fonts/pt-sans-400-latin.woff2      | Bin 0 -> 11464 bytes
+ apps/web/public/fonts/pt-sans-700-cyrillic.woff2   | Bin 0 -> 7276 bytes
+ apps/web/public/fonts/pt-sans-700-latin.woff2      | Bin 0 -> 11624 bytes
+ apps/web/src/components/race-tracks.tsx            |  68 ++++++++++
+ apps/web/src/main.tsx                              |   5 +-
+ apps/web/src/state/question-timer.spec.ts          |  50 +++++++
+ apps/web/src/state/question-timer.ts               |  49 +++++++
+ apps/web/src/state/race-tracks.spec.ts             | 144 +++++++++++++++++++++
+ apps/web/src/state/race-tracks.ts                  |  72 +++++++++++
+ apps/web/src/styles.css                            |  24 ----
+ apps/web/src/styles/base.css                       |  85 ++++++++++++
+ apps/web/src/styles/node-test-shims.d.ts           |  10 ++
+ apps/web/src/styles/tokens.css                     |  46 +++++++
+ apps/web/src/styles/tokens.spec.ts                 | 126 ++++++++++++++++++
+ apps/web/src/styles/transitions.css                | 139 ++++++++++++++++++++
+ 19 files changed, 794 insertions(+), 26 deletions(-)
+
+## Diff
+diff --git a/apps/web/index.html b/apps/web/index.html
+index 507e201..99c36ce 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -1,12 +1,12 @@
+ <!doctype html>
+-<html lang="ru">
++<html lang="ru" data-theme="rybinsk">
+   <head>
+     <meta charset="UTF-8" />
+     <!-- mobile-first: экраны игроков — телефоны (дизайн §0.4) -->
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+     <title>MyMozhem</title>
+   </head>
+   <body>
+     <div id="root"></div>
+     <script type="module" src="/src/main.tsx"></script>
+   </body>
+diff --git a/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2 b/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2
+new file mode 100644
+index 0000000..119c448
+Binary files /dev/null and b/apps/web/public/fonts/oranienbaum-400-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/oranienbaum-400-latin.woff2 b/apps/web/public/fonts/oranienbaum-400-latin.woff2
+new file mode 100644
+index 0000000..481d64b
+Binary files /dev/null and b/apps/web/public/fonts/oranienbaum-400-latin.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-400-cyrillic.woff2 b/apps/web/public/fonts/pt-sans-400-cyrillic.woff2
+new file mode 100644
+index 0000000..8334e2a
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-400-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-400-latin.woff2 b/apps/web/public/fonts/pt-sans-400-latin.woff2
+new file mode 100644
+index 0000000..a93af43
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-400-latin.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-700-cyrillic.woff2 b/apps/web/public/fonts/pt-sans-700-cyrillic.woff2
+new file mode 100644
+index 0000000..fa92cef
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-700-cyrillic.woff2 differ
+diff --git a/apps/web/public/fonts/pt-sans-700-latin.woff2 b/apps/web/public/fonts/pt-sans-700-latin.woff2
+new file mode 100644
+index 0000000..ac5324f
+Binary files /dev/null and b/apps/web/public/fonts/pt-sans-700-latin.woff2 differ
+diff --git a/apps/web/src/components/race-tracks.tsx b/apps/web/src/components/race-tracks.tsx
+new file mode 100644
+index 0000000..f69cb46
+--- /dev/null
++++ b/apps/web/src/components/race-tracks.tsx
+@@ -0,0 +1,68 @@
++import { topNWithRest, trackWidths } from '../state/race-tracks';
++
++// Дорожки «забега» — ростер с нормированными к лидеру полосами (дизайн §7).
++// Разметка — перенос из мокапа component-states-live (.track-row/.tr-top/
++// .tr-lane/.fill/.gain, tabular-nums у счёта, transition width var(--t-race)
++// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N» —
++// из мокапов tracks-scene/console-reveal-tracks. DOM-тестов нет (паттерн
++// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — T13.
++
++export interface RaceTrackEntry {
++  actorId: string;
++  // Уже разрешённое отображаемое имя (rosterNames/displayNameOf — у потребителя).
++  name: string;
++  total: number;
++  // Прирост последнего раунда (lastRoundGains из лога у потребителя).
++  gain: number;
++}
++
++interface RaceTracksProps {
++  entries: readonly RaceTrackEntry[];
++  // Своя строка: пометка «это ты» (золотая, по мокапу tracks-scene).
++  highlightId?: string;
++  // Показать верхние topN; под дорожками — «ещё N». Без topN — все.
++  topN?: number;
++  // Полотно дорожки: сцена — --track-canvas-dark, консоль — --track-canvas-light.
++  contour: 'scene' | 'console';
++}
++
++export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksProps) {
++  // Сортировка desc — обязанность отображения (как в Standings); равные очки
++  // сохраняют порядок входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
++  // списка, а не видимого топа: обрезанные дорожки не меняют масштаб.
++  const sorted = [...entries].sort((a, b) => b.total - a.total);
++  const widths = trackWidths(
++    sorted,
++    Object.fromEntries(sorted.map((e) => [e.actorId, e.gain])),
++  );
++  const { top, rest } = topNWithRest(sorted, topN ?? sorted.length);
++
++  return (
++    <div className={`race-tracks contour-${contour}`}>
++      {top.map((e) => {
++        const w = widths.get(e.actorId) ?? { fillPct: 0, gainPct: 0 };
++        return (
++          <div className="track-row" key={e.actorId}>
++            <div className="tr-top">
++              <span className="tr-name">
++                {e.name}
++                {e.actorId === highlightId && <span className="me">это ты</span>}
++              </span>
++              <span className="tr-score">{e.total}</span>
++            </div>
++            <div className="tr-lane">
++              {/* Без прироста fill получает solo — закруглённый правый конец
++                  (мокап console-reveal-tracks). */}
++              <div
++                className={w.gainPct > 0 ? 'fill' : 'fill solo'}
++                style={{ width: `${w.fillPct}%` }}
++              />
++              <div className="gain" style={{ width: `${w.gainPct}%` }} />
++            </div>
++          </div>
++        );
++      })}
++      {rest > 0 && <div className="tr-more">ещё {rest}</div>}
++    </div>
++  );
++}
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 8a06027..849ed33 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,15 +1,18 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import { App } from './App';
+-import './styles.css';
++// Визуальный фундамент (T4): порядок важен — токены → база → состояния.
++import './styles/tokens.css';
++import './styles/base.css';
++import './styles/transitions.css';
+ 
+ // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
+ // под MemoryRouter без привязки к DOM.
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <BrowserRouter>
+       <App />
+     </BrowserRouter>
+   </StrictMode>,
+ );
+diff --git a/apps/web/src/state/question-timer.spec.ts b/apps/web/src/state/question-timer.spec.ts
+new file mode 100644
+index 0000000..228518c
+--- /dev/null
++++ b/apps/web/src/state/question-timer.spec.ts
+@@ -0,0 +1,50 @@
++import { describe, expect, it } from 'vitest';
++import { formatTimer, remainingSec } from './question-timer';
++
++// Таймер вопроса (quiz v3): durationSec из настроек вопроса, openedAt — серверный
++// ISO из payload question.opened. remainingSec — чистая функция от (durationSec,
++// openedAt, nowMs): clamp(durationSec - floor(elapsed/1000), 0, durationSec).
++describe('remainingSec', () => {
++  const now = Date.parse('2026-10-20T12:00:00.000Z');
++
++  it('durationSec = null («без лимита») → null', () => {
++    expect(remainingSec(null, '2026-10-20T12:00:00.000Z', now)).toBeNull();
++  });
++
++  it('openedAt = null (вопрос не открыт) → null', () => {
++    expect(remainingSec(30, null, now)).toBeNull();
++  });
++
++  it('открыт ровно сейчас → полный durationSec', () => {
++    expect(remainingSec(30, '2026-10-20T12:00:00.000Z', now)).toBe(30);
++  });
++
++  // Review Focus 1: elapsed считается от серверного openedAt, floor после деления.
++  it('openedAt 20 с назад при durationSec 30 → 10', () => {
++    expect(remainingSec(30, '2026-10-20T11:59:40.000Z', now)).toBe(10);
++  });
++
++  it('openedAt час назад → 0 (не отрицательное)', () => {
++    expect(remainingSec(30, '2026-10-20T11:00:00.000Z', now)).toBe(0);
++  });
++
++  // Review Focus 2: часы клиента впереди сервера — openedAt «в будущем» от nowMs;
++  // clamp не даёт уйти выше durationSec.
++  it('openedAt в будущем → durationSec (не выше)', () => {
++    expect(remainingSec(30, '2026-10-20T12:00:10.000Z', now)).toBe(30);
++  });
++});
++
++describe('formatTimer', () => {
++  it('ровно 30 → "0:30"', () => {
++    expect(formatTimer(30)).toBe('0:30');
++  });
++
++  it('ноль → "0:00"', () => {
++    expect(formatTimer(0)).toBe('0:00');
++  });
++
++  it('65 → "1:05" (m:ss, секунды с ведущим нулём)', () => {
++    expect(formatTimer(65)).toBe('1:05');
++  });
++});
+diff --git a/apps/web/src/state/question-timer.ts b/apps/web/src/state/question-timer.ts
+new file mode 100644
+index 0000000..83ae1e7
+--- /dev/null
++++ b/apps/web/src/state/question-timer.ts
+@@ -0,0 +1,49 @@
++import { useEffect, useState } from 'react';
++
++// Таймер вопроса (quiz v3): durationSec (5–600|null, дефолт 30) — из настроек
++// вопроса, openedAt — серверный ISO из payload question.opened. Опорное время —
++// серверное: elapsed считается от openedAt, а не от момента получения события,
++// поэтому задержка доставки/переподключение не сдвигают отсчёт.
++
++// null duration («без лимита») или null openedAt (вопрос не открыт) → null.
++// Иначе clamp(durationSec - floor(elapsed/1000), 0, durationSec): floor ПОСЛЕ
++// деления (целые секунды); нижний clamp — таймер стоит на нуле, верхний — часы
++// клиента впереди сервера (openedAt «в будущем») не дают уйти выше durationSec.
++export function remainingSec(
++  durationSec: number | null,
++  openedAt: string | null,
++  nowMs: number,
++): number | null {
++  if (durationSec === null || openedAt === null) return null;
++  const elapsedSec = Math.floor((nowMs - Date.parse(openedAt)) / 1000);
++  return Math.min(Math.max(durationSec - elapsedSec, 0), durationSec);
++}
++
++// m:ss: 65 → "1:05", 5 → "0:05".
++export function formatTimer(sec: number): string {
++  const m = Math.floor(sec / 60);
++  const s = sec % 60;
++  return `${m}:${String(s).padStart(2, '0')}`;
++}
++
++// Тик раз в секунду от Date.now(); cleanup на размонтировании/смене аргументов.
++// Без DOM-теста (паттерн репо): чистые функции покрыты спекой, хук — typecheck.
++export function useQuestionTimer(
++  durationSec: number | null,
++  openedAt: string | null,
++): number | null {
++  const [sec, setSec] = useState<number | null>(() =>
++    remainingSec(durationSec, openedAt, Date.now()),
++  );
++
++  useEffect(() => {
++    setSec(remainingSec(durationSec, openedAt, Date.now()));
++    if (durationSec === null || openedAt === null) return;
++    const id = setInterval(() => {
++      setSec(remainingSec(durationSec, openedAt, Date.now()));
++    }, 1000);
++    return () => clearInterval(id);
++  }, [durationSec, openedAt]);
++
++  return sec;
++}
+diff --git a/apps/web/src/state/race-tracks.spec.ts b/apps/web/src/state/race-tracks.spec.ts
+new file mode 100644
+index 0000000..c51bc13
+--- /dev/null
++++ b/apps/web/src/state/race-tracks.spec.ts
+@@ -0,0 +1,144 @@
++import { describe, expect, it } from 'vitest';
++import type { ProjectedEvent } from '@mymozhem/sdk';
++import {
++  lastRoundGains,
++  myPlace,
++  topNWithRest,
++  trackWidths,
++} from './race-tracks';
++import { PLAYER_1, PLAYER_2, quizMiniGameLog } from './fixtures/quiz-log.fixture';
++
++// Логика дорожек «забега» (дизайн §7): нормировка к лидеру (=100%), прирост
++// за раунд — awarded ПОСЛЕДНЕГО quiz.question.revealed из перефолженного лога
++// (reconnect-safe), fill отделён от gain: fill = (total−gain)/leader,
++// gain = gain/leader. Все проценты — числа 0..100.
++
++describe('trackWidths', () => {
++  const entries = [
++    { actorId: 'a', total: 1500 },
++    { actorId: 'b', total: 1200 },
++    { actorId: 'c', total: 900 },
++  ];
++
++  it('нормировка к лидеру: 1500/1200/900 → 100/80/60', () => {
++    const w = trackWidths(entries, {});
++    expect(w.get('a')).toEqual({ fillPct: 100, gainPct: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 80, gainPct: 0 });
++    expect(w.get('c')).toEqual({ fillPct: 60, gainPct: 0 });
++  });
++
++  it('прирост-сегмент отделён от fill: fill = (total−gain)/leader, gain = gain/leader', () => {
++    const w = trackWidths(entries, { a: 300 });
++    // Лидер: fill = (1500−300)/1500 = 80, gain = 300/1500 = 20; сумма снова 100.
++    expect(w.get('a')).toEqual({ fillPct: 80, gainPct: 20 });
++  });
++
++  it('нулевой gain → gainPct 0, fill не урезан', () => {
++    const w = trackWidths(entries, { b: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 80, gainPct: 0 });
++  });
++
++  it('лидер 0 (все нули) → все дорожки пустые (0/0), без деления на ноль', () => {
++    const w = trackWidths(
++      [
++        { actorId: 'a', total: 0 },
++        { actorId: 'b', total: 0 },
++      ],
++      {},
++    );
++    expect(w.get('a')).toEqual({ fillPct: 0, gainPct: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 0, gainPct: 0 });
++  });
++
++  it('gain не из entries (нет записи в gains) → gainPct 0', () => {
++    const w = trackWidths([{ actorId: 'a', total: 500 }], {});
++    expect(w.get('a')).toEqual({ fillPct: 100, gainPct: 0 });
++  });
++});
++
++describe('lastRoundGains', () => {
++  it('golden-фикстура: берётся awarded ПОСЛЕДНЕГО reveal (вопрос 1, не вопрос 0)', () => {
++    // В фикстуре два reveal: вопрос 0 наградил PLAYER_1 (110), вопрос 1 — PLAYER_2 (100).
++    expect(lastRoundGains(quizMiniGameLog)).toEqual({ [PLAYER_2]: 100 });
++  });
++
++  it('два reveal подряд → побеждает второй', () => {
++    const events: ProjectedEvent[] = [
++      {
++        type: 'quiz.question.revealed',
++        payload: {
++          questionIndex: 0,
++          correctIndex: 1,
++          awarded: [{ actorId: PLAYER_1, points: 110 }],
++          totals: [{ actorId: PLAYER_1, total: 110 }],
++        },
++        actorId: null,
++      },
++      {
++        type: 'quiz.question.revealed',
++        payload: {
++          questionIndex: 1,
++          awarded: [
++            { actorId: PLAYER_1, points: 40 },
++            { actorId: PLAYER_2, points: 90 },
++          ],
++          totals: [
++            { actorId: PLAYER_1, total: 150 },
++            { actorId: PLAYER_2, total: 90 },
++          ],
++        },
++        actorId: null,
++      },
++    ];
++    expect(lastRoundGains(events)).toEqual({ [PLAYER_1]: 40, [PLAYER_2]: 90 });
++  });
++
++  it('reveal не было → пустая запись', () => {
++    const events: ProjectedEvent[] = [
++      {
++        type: 'quiz.question.opened',
++        payload: { questionIndex: 0, openedAt: '2026-10-20T12:00:00.000Z' },
++        actorId: PLAYER_1,
++      },
++    ];
++    expect(lastRoundGains(events)).toEqual({});
++    expect(lastRoundGains([])).toEqual({});
++  });
++});
++
++describe('topNWithRest', () => {
++  it('7 элементов, n=4 → top 4, rest 3', () => {
++    const { top, rest } = topNWithRest([1, 2, 3, 4, 5, 6, 7], 4);
++    expect(top).toEqual([1, 2, 3, 4]);
++    expect(rest).toBe(3);
++  });
++
++  it('n >= длины → rest 0, top — весь список', () => {
++    expect(topNWithRest([1, 2], 5)).toEqual({ top: [1, 2], rest: 0 });
++  });
++
++  it('пустой список → top [], rest 0', () => {
++    expect(topNWithRest([], 4)).toEqual({ top: [], rest: 0 });
++  });
++});
++
++describe('myPlace', () => {
++  // Уже отсортировано desc; равные очки делят место (плотный порядок).
++  const sorted = [
++    { actorId: 'a', total: 1500 },
++    { actorId: 'b', total: 1200 },
++    { actorId: 'c', total: 1200 },
++    { actorId: 'd', total: 900 },
++  ];
++
++  it('плотный порядок desc: равные делят место, следующее — +1', () => {
++    expect(myPlace(sorted, 'a')).toBe(1);
++    expect(myPlace(sorted, 'b')).toBe(2);
++    expect(myPlace(sorted, 'c')).toBe(2);
++    expect(myPlace(sorted, 'd')).toBe(3);
++  });
++
++  it('отсутствующий id → null', () => {
++    expect(myPlace(sorted, 'zzz')).toBeNull();
++  });
++});
+diff --git a/apps/web/src/state/race-tracks.ts b/apps/web/src/state/race-tracks.ts
+new file mode 100644
+index 0000000..0729d0b
+--- /dev/null
++++ b/apps/web/src/state/race-tracks.ts
+@@ -0,0 +1,72 @@
++import type { ProjectedEvent } from '@mymozhem/sdk';
++import { questionRevealedPayload } from '@mymozhem/app-quiz';
++
++// Логика дорожек «забега» (дизайн §7): чистые функции, без React.
++// Дорожка игрока = fill (итог без прироста) + gain (прирост последнего
++// раунда), оба нормированы к лидеру (=100%). Прирост выводится из лога,
++// а не приезжает отдельным состоянием — перефолд/reconnect дают тот же
++// результат (reconnect-safe).
++
++export interface TrackTotal {
++  actorId: string;
++  total: number;
++}
++
++export interface TrackWidth {
++  fillPct: number;
++  gainPct: number;
++}
++
++// Прирост за раунд — awarded ПОСЛЕДНЕГО quiz.question.revealed в логе.
++// Reveal не было → пустая запись (все дорожки без gain-сегмента).
++export function lastRoundGains(events: ProjectedEvent[]): Record<string, number> {
++  let last: Record<string, number> = {};
++  for (const e of events) {
++    if (e.type !== 'quiz.question.revealed') continue;
++    const p = questionRevealedPayload.parse(e.payload);
++    last = Object.fromEntries(p.awarded.map((a) => [a.actorId, a.points]));
++  }
++  return last;
++}
++
++// Нормировка к лидеру: fill = (total−gain)/leader, gain = gain/leader (0..100).
++// Лидер 0 (все нули, старт игры) → все 0: пустые дорожки, без деления на ноль.
++// gain > total быть не должно (прирост входит в итог), но fill не уходит
++// в минус — clamp на 0.
++export function trackWidths(
++  entries: readonly TrackTotal[],
++  gains: Readonly<Record<string, number>>,
++): Map<string, TrackWidth> {
++  const leader = Math.max(0, ...entries.map((e) => e.total));
++  const widths = new Map<string, TrackWidth>();
++  for (const e of entries) {
++    if (leader === 0) {
++      widths.set(e.actorId, { fillPct: 0, gainPct: 0 });
++      continue;
++    }
++    const gain = gains[e.actorId] ?? 0;
++    widths.set(e.actorId, {
++      fillPct: (Math.max(e.total - gain, 0) / leader) * 100,
++      gainPct: (gain / leader) * 100,
++    });
++  }
++  return widths;
++}
++
++// Верхние n + счётчик остальных («ещё N»). rest никогда не отрицателен.
++export function topNWithRest<T>(list: readonly T[], n: number): { top: T[]; rest: number } {
++  return { top: list.slice(0, n), rest: Math.max(list.length - n, 0) };
++}
++
++// Место в уже отсортированном (desc) списке: плотный порядок — равные очки
++// делят место, следующее отличающееся значение получает place+1 (1,2,2,3).
++// Актора нет в списке → null (исключён/не играл — табло его не рисует).
++export function myPlace(sortedEntries: readonly TrackTotal[], myId: string): number | null {
++  let place = 1;
++  for (let i = 0; i < sortedEntries.length; i++) {
++    const entry = sortedEntries[i];
++    if (i > 0 && entry.total < sortedEntries[i - 1].total) place++;
++    if (entry.actorId === myId) return place;
++  }
++  return null;
++}
+diff --git a/apps/web/src/styles.css b/apps/web/src/styles.css
+deleted file mode 100644
+index 73d1876..0000000
+--- a/apps/web/src/styles.css
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
+-   раскладке (дизайн §0.4). Дизайн-система — отдельная задача батча C. */
+-*,
+-*::before,
+-*::after {
+-  box-sizing: border-box;
+-}
+-
+-body {
+-  margin: 0;
+-  font-family: system-ui, sans-serif;
+-}
+-
+-/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
+-   с привязкой к ширине зала (vw), варианты без маркеров. */
+-.screen-question {
+-  font-size: clamp(2rem, 6vw, 4rem);
+-}
+-
+-.screen-options {
+-  font-size: clamp(1.25rem, 3vw, 2rem);
+-  list-style: none;
+-  padding: 0;
+-}
+diff --git a/apps/web/src/styles/base.css b/apps/web/src/styles/base.css
+new file mode 100644
+index 0000000..4cf505c
+--- /dev/null
++++ b/apps/web/src/styles/base.css
+@@ -0,0 +1,85 @@
++/* База UI-среза: self-hosted шрифты (OFL), reset, базовая типографика.
++   Шрифты лежат в public/fonts/ и отдаются тем же сервером — в рантайме
++   обращений к Google Fonts нет (Google — только инструмент получения woff2).
++   subset cyrillic + latin у каждого файла: кириллица — основной текст,
++   latin — цифры таймера и латиница. unicode-range скопирован из css2-ответа
++   Google Fonts. Blagovest осознанно отсутствует (гейт лицензии). */
++
++/* Oranienbaum 400 — display/логотип */
++@font-face {
++  font-family: 'Oranienbaum';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/oranienbaum-400-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'Oranienbaum';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/oranienbaum-400-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++
++/* PT Sans 400/700 — основной текст */
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/pt-sans-400-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 400;
++  font-display: swap;
++  src: url('/fonts/pt-sans-400-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 700;
++  font-display: swap;
++  src: url('/fonts/pt-sans-700-cyrillic.woff2') format('woff2');
++  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
++}
++@font-face {
++  font-family: 'PT Sans';
++  font-style: normal;
++  font-weight: 700;
++  font-display: swap;
++  src: url('/fonts/pt-sans-700-latin.woff2') format('woff2');
++  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
++}
++
++/* Минимальный reset UI-среза: убрать браузерные дефолты, мешающие mobile-first
++   раскладке (дизайн §0.4). */
++*,
++*::before,
++*::after {
++  box-sizing: border-box;
++}
++
++body {
++  margin: 0;
++  font-family: var(--font-body);
++  color: var(--ink);
++}
++
++/* Проектор (/screen, дизайн §4): вопрос читается с расстояния — крупный кегль
++   с привязкой к ширине зала (vw), варианты без маркеров. Переехало из
++   styles.css как есть — потребители живы до T8. */
++.screen-question {
++  font-size: clamp(2rem, 6vw, 4rem);
++}
++
++.screen-options {
++  font-size: clamp(1.25rem, 3vw, 2rem);
++  list-style: none;
++  padding: 0;
++}
+diff --git a/apps/web/src/styles/node-test-shims.d.ts b/apps/web/src/styles/node-test-shims.d.ts
+new file mode 100644
+index 0000000..0f5c99e
+--- /dev/null
++++ b/apps/web/src/styles/node-test-shims.d.ts
+@@ -0,0 +1,10 @@
++// apps/web — браузерный пакет без @types/node (tsconfig: types ["vite/client"]),
++// но *.spec.ts исполняются vitest в node-окружении (vite.config test.environment)
++// и читают CSS с диска. Объявляем нужные node-API локально; если в пакет
++// добавят @types/node — этот файл надо удалить.
++declare module 'node:fs' {
++  export function readFileSync(path: string, encoding: 'utf8'): string;
++}
++declare module 'node:url' {
++  export function fileURLToPath(url: URL): string;
++}
+diff --git a/apps/web/src/styles/tokens.css b/apps/web/src/styles/tokens.css
+new file mode 100644
+index 0000000..58dede7
+--- /dev/null
++++ b/apps/web/src/styles/tokens.css
+@@ -0,0 +1,46 @@
++/* Дизайн-токены темы «rybinsk» (дизайн §4 + принятый мокап component-states-live).
++   Точка темы: <html data-theme="rybinsk">. Токены объявлены под :root;
++   вторая тема = переопределение токенов под [data-theme=…] — готовность без
++   пресетов (дизайн п. 5): пресеты второй темы осознанно НЕ создаются. */
++:root {
++  /* Сцена — тёмный контур (проектор/экран игрока) */
++  --scene-bg: #0A252B;
++  --scene-surface: #1B3B40;
++  --scene-surface-hover: #23484D;
++  --scene-surface-active: #122E32;
++  --gold: #E6C77D;
++  --scene-text: #F6EDDC;
++  --muted-scene: #9DB8B2;
++  --error-dark: #F27668;
++  --input-scene: #A9BDB2;
++  --track-fill: #0F7B57;
++  --track-canvas-dark: #143138;
++
++  /* Консоль — светлый контур (ведущий/организатор) */
++  --console-bg: #E3F0E9;
++  --console-panel: #F4F8F3;
++  --console-strip: #D7E8DE;
++  --console-secondary: #C4D8CC;
++  --console-primary: #10514F;
++  --console-primary-hover: #17685F;
++  --console-primary-active: #0A3E3B;
++  --console-secondary-hover: #B4CDBC;
++  --console-secondary-active: #A3BFA9;
++  --ink: #12343A;
++  --muted: #5A6B66;
++  --error-light: #A92820;
++  --track-canvas-light: #D5E2DA;
++  --danger-hover: #F3DCD2;
++  --danger-active: #ECCFC4;
++
++  /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
++  --t-hover: 140ms;
++  --t-press: 60ms;
++  --t-race: 300ms;
++
++  /* Шрифты: self-hosted woff2 (OFL), подключены в base.css.
++     --font-logo = Oranienbaum до решения лицензии Blagovest (гейт лицензии). */
++  --font-logo: 'Oranienbaum', serif;
++  --font-display: 'Oranienbaum', serif;
++  --font-body: 'PT Sans', sans-serif;
++}
+diff --git a/apps/web/src/styles/tokens.spec.ts b/apps/web/src/styles/tokens.spec.ts
+new file mode 100644
+index 0000000..9e9dfb7
+--- /dev/null
++++ b/apps/web/src/styles/tokens.spec.ts
+@@ -0,0 +1,126 @@
++import { describe, expect, it } from 'vitest';
++import { readFileSync } from 'node:fs';
++import { fileURLToPath } from 'node:url';
++
++// Типы node:fs/node:url — в соседнем node-test-shims.d.ts: apps/web —
++// браузерный пакет без @types/node (tsconfig: types ["vite/client"]), но spec
++// исполняется vitest в node-окружении (vite.config test.environment).
++
++// Контракт визуального фундамента (T4): токены темы «rybinsk» и кнопочная
++// система состояний. Значения — verbatim из брифа (дизайн §4 + принятый мокап
++// component-states-live); спек ловит случайный дрейф значений.
++
++const readStyle = (name: string): string =>
++  readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8');
++
++const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++
++// Извлекает блок @media по подстроке запроса со сбалансированными скобками.
++// Возвращает [блок, css без блока] — нужно, чтобы проверить, что hover-правила
++// не существуют вне медиа-запроса (hover: hover) and (pointer: fine).
++function extractMediaBlock(css: string, query: string): [string, string] {
++  const start = css.indexOf(query);
++  expect(start, `медиа-запрос ${query} должен присутствовать`).toBeGreaterThanOrEqual(0);
++  const mediaStart = css.lastIndexOf('@media', start);
++  const openBrace = css.indexOf('{', start);
++  let depth = 0;
++  let end = -1;
++  for (let i = openBrace; i < css.length; i += 1) {
++    if (css[i] === '{') depth += 1;
++    if (css[i] === '}') {
++      depth -= 1;
++      if (depth === 0) {
++        end = i;
++        break;
++      }
++    }
++  }
++  expect(end, `медиа-запрос ${query} должен быть закрыт`).toBeGreaterThan(-1);
++  const block = css.slice(mediaStart, end + 1);
++  return [block, css.slice(0, mediaStart) + css.slice(end + 1)];
++}
++
++describe('tokens.css — токены темы rybinsk', () => {
++  const css = readStyle('tokens.css');
++
++  const exactTokens: Array<[string, string]> = [
++    // сцена (тёмный контур)
++    ['--scene-bg', '#0A252B'],
++    ['--scene-surface', '#1B3B40'],
++    ['--scene-surface-hover', '#23484D'],
++    ['--scene-surface-active', '#122E32'],
++    ['--gold', '#E6C77D'],
++    ['--scene-text', '#F6EDDC'],
++    ['--muted-scene', '#9DB8B2'],
++    ['--error-dark', '#F27668'],
++    ['--input-scene', '#A9BDB2'],
++    ['--track-fill', '#0F7B57'],
++    ['--track-canvas-dark', '#143138'],
++    // консоль (светлый контур)
++    ['--console-bg', '#E3F0E9'],
++    ['--console-panel', '#F4F8F3'],
++    ['--console-strip', '#D7E8DE'],
++    ['--console-secondary', '#C4D8CC'],
++    ['--console-primary', '#10514F'],
++    ['--console-primary-hover', '#17685F'],
++    ['--console-primary-active', '#0A3E3B'],
++    ['--console-secondary-hover', '#B4CDBC'],
++    ['--console-secondary-active', '#A3BFA9'],
++    ['--ink', '#12343A'],
++    ['--muted', '#5A6B66'],
++    ['--error-light', '#A92820'],
++    ['--track-canvas-light', '#D5E2DA'],
++    ['--danger-hover', '#F3DCD2'],
++    ['--danger-active', '#ECCFC4'],
++    // тайминги
++    ['--t-hover', '140ms'],
++    ['--t-press', '60ms'],
++    ['--t-race', '300ms'],
++  ];
++
++  it('все токены объявлены под :root с точными значениями', () => {
++    expect(css).toContain(':root');
++    for (const [name, value] of exactTokens) {
++      const re = new RegExp(`${escapeRe(name)}\\s*:\\s*${escapeRe(value)}\\s*;`);
++      expect(css, `ожидался токен ${name}: ${value};`).toMatch(re);
++    }
++  });
++
++  it('шрифтовые токены указывают на self-hosted семейства', () => {
++    const fontTokens: Array<[string, string]> = [
++      ['--font-logo', "'Oranienbaum'"],
++      ['--font-display', "'Oranienbaum'"],
++      ['--font-body', "'PT Sans'"],
++    ];
++    for (const [name, family] of fontTokens) {
++      const m = css.match(new RegExp(`${escapeRe(name)}\\s*:\\s*([^;]+);`));
++      expect(m, `ожидался токен ${name}`).not.toBeNull();
++      expect(m![1]).toContain(family);
++    }
++  });
++
++  it('точка расширения темы зафиксирована: вторая тема = переопределение под [data-theme=…]', () => {
++    expect(css).toContain('[data-theme=');
++  });
++});
++
++describe('transitions.css — кнопочная система состояний', () => {
++  const css = readStyle('transitions.css');
++
++  it('.btn объявлен без border (border: none)', () => {
++    const m = css.match(/\.btn\s*\{([^}]*)\}/);
++    expect(m, 'ожидался базовый блок .btn').not.toBeNull();
++    expect(m![1]).toMatch(/border:\s*none/);
++  });
++
++  it('hover-правила живут только под @media (hover: hover) and (pointer: fine)', () => {
++    const [block, rest] = extractMediaBlock(css, '(hover: hover) and (pointer: fine)');
++    expect(block).toContain(':hover');
++    expect(rest, 'вне hover-медиа не должно быть :hover-правил').not.toContain(':hover');
++  });
++
++  it('reduced-motion гасит переходы', () => {
++    const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
++    expect(block).toMatch(/transition-duration:\s*0ms/);
++  });
++});
+diff --git a/apps/web/src/styles/transitions.css b/apps/web/src/styles/transitions.css
+new file mode 100644
+index 0000000..ead3092
+--- /dev/null
++++ b/apps/web/src/styles/transitions.css
+@@ -0,0 +1,139 @@
++/* Система состояний и контент-анимаций — перенос из принятого мокапа
++   component-states-live: кнопки (ниже) и дорожки «забега» (в конце файла).
++   Кнопки: hover 140мс только на устройствах с настоящей мышью,
++   active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
++   смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
++   Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
++   обёртки .panel.dark), литералы hover/active danger заменены токенами
++   --danger-hover/--danger-active, шрифт — var(--font-body). */
++
++.btn {
++  border: none;
++  border-radius: 10px;
++  font-family: var(--font-body);
++  font-weight: 700;
++  font-size: 16px;
++  padding: 13px 22px;
++  cursor: pointer;
++  transition: background-color var(--t-hover) ease-out, color var(--t-hover) ease-out;
++}
++.btn-primary {
++  background: var(--console-primary);
++  color: var(--gold);
++}
++.btn-secondary {
++  background: var(--console-secondary);
++  color: var(--ink);
++}
++.btn-quiet {
++  background: none;
++  color: var(--ink);
++  padding: 13px 10px;
++  border-radius: 8px;
++}
++.btn-danger {
++  background: none;
++  color: var(--error-light);
++  padding: 13px 10px;
++  border-radius: 8px;
++}
++.btn:disabled {
++  opacity: 0.55;
++  cursor: default;
++}
++
++/* hover — только устройства с настоящей мышью; на таче hover не появится вообще */
++@media (hover: hover) and (pointer: fine) {
++  .btn-primary:hover:not(:disabled) { background: var(--console-primary-hover); }
++  .btn-secondary:hover:not(:disabled) { background: var(--console-secondary-hover); }
++  .btn-quiet:hover:not(:disabled) { background: var(--console-strip); }
++  .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
++  .btn-scene:hover:not(:disabled) { background: var(--scene-surface-hover); }
++}
++
++/* active — мгновенно (≤60мс), работает везде, включая тач */
++.btn-primary:active:not(:disabled) { background: var(--console-primary-active); transition-duration: var(--t-press); }
++.btn-secondary:active:not(:disabled) { background: var(--console-secondary-active); transition-duration: var(--t-press); }
++.btn-quiet:active:not(:disabled) { background: var(--console-secondary); transition-duration: var(--t-press); }
++.btn-danger:active:not(:disabled) { background: var(--danger-active); transition-duration: var(--t-press); }
++.btn-scene:active:not(:disabled) { background: var(--scene-surface-active); transition-duration: var(--t-press); }
++
++/* focus-visible — контур только для клавиатуры; на сцене золотой */
++.btn:focus-visible {
++  outline: 3px solid var(--console-primary);
++  outline-offset: 2px;
++}
++.btn-scene:focus-visible { outline-color: var(--gold); }
++.btn:focus:not(:focus-visible) { outline: none; }
++
++/* Вариант ответа на сцене */
++.btn-scene {
++  background: var(--scene-surface);
++  color: var(--scene-text);
++  min-width: 260px;
++  text-align: left;
++  font-weight: 400;
++  font-size: 18px;
++  padding: 16px 20px;
++}
++.btn-scene b { color: var(--gold); margin-right: 10px; }
++
++/* Дорожки «забега» — перенос из мокапов component-states-live /
++   tracks-scene-projector-participant / console-reveal-tracks. fill — итог без
++   прироста, нормированный к лидеру; gain — золотой сегмент прироста последнего
++   раунда; оба анимируются width за var(--t-race) (контент-анимация, не hover).
++   Полотно дорожки зависит от контура: сцена — --track-canvas-dark, консоль —
++   --track-canvas-light. Заливка одна на оба контура — var(--track-fill)
++   (бриф T6; в мокапе console-reveal-tracks fill был --console-primary —
++   осознанное расхождение мокапов, берём токен темы). */
++
++.race-tracks .track-row { padding: 7px 0 9px; }
++.race-tracks .tr-top {
++  display: flex;
++  justify-content: space-between;
++  align-items: baseline;
++  gap: 10px;
++  margin-bottom: 4px;
++}
++.race-tracks .tr-name { font-weight: 700; font-size: 14px; }
++.race-tracks .tr-name .me {
++  color: var(--gold);
++  font-size: 12px;
++  font-weight: 400;
++  margin-left: 6px;
++}
++.race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
++.race-tracks .tr-lane {
++  height: 10px;
++  border-radius: 5px;
++  overflow: hidden;
++  display: flex;
++}
++.race-tracks.contour-scene { color: var(--scene-text); }
++.race-tracks.contour-scene .tr-lane { background: var(--track-canvas-dark); }
++.race-tracks.contour-scene .tr-more { color: var(--muted-scene); }
++.race-tracks.contour-console { color: var(--ink); }
++.race-tracks.contour-console .tr-lane { background: var(--track-canvas-light); }
++.race-tracks.contour-console .tr-more { color: var(--muted); }
++.race-tracks .fill {
++  background: var(--track-fill);
++  border-radius: 5px 0 0 5px;
++  height: 100%;
++  transition: width var(--t-race) ease-out;
++}
++/* Без прироста — закруглённый правый конец у fill */
++.race-tracks .fill.solo { border-radius: 5px; }
++.race-tracks .gain {
++  background: var(--gold);
++  height: 100%;
++  border-radius: 0 5px 5px 0;
++  transition: width var(--t-race) ease-out;
++}
++.race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
++
++/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации */
++@media (prefers-reduced-motion: reduce) {
++  .btn { transition-duration: 0ms !important; }
++  .race-tracks .fill,
++  .race-tracks .gain { transition-duration: 0ms !important; }
++}

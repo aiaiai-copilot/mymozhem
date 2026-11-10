@@ -1,0 +1,165 @@
+# Review package: 3efda3d..d4ea739
+
+## Commits
+d4ea739 fix(web): empty-state табло на сценах play/screen («Очков пока нет.» по образцу консоли, находка финревью батча C)
+
+## Files changed
+ apps/web/src/pages/play/play-page.tsx     | 39 +++++++++++++++++++++++--------
+ apps/web/src/pages/screen/screen-page.tsx | 23 ++++++++++++++----
+ 2 files changed, 48 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/pages/play/play-page.tsx b/apps/web/src/pages/play/play-page.tsx
+index 031db64..1e57642 100644
+--- a/apps/web/src/pages/play/play-page.tsx
++++ b/apps/web/src/pages/play/play-page.tsx
+@@ -280,25 +280,35 @@ export function PlayPage() {
+     // Финал (§5.1, п. 18): итоговое полное табло дорожками + победители
+     // розыгрыша — только если розыгрыш был (явный гард; Winners и сам вернёт
+     // null на пустых draws, но условие читается здесь).
+     const hasDraws = Object.keys(lottery.draws).length > 0;
+     view = (
+       <section>
+         <h1 className="play-title">Игра завершена</h1>
+         {myId && quiz.totals[myId] !== undefined ? (
+           <p className="play-points">Ваши очки: {quiz.totals[myId]}</p>
+         ) : null}
+-        <div className="play-standings-head">
+-          <span className="play-standings-title">Итоговое табло</span>
+-          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
+-        </div>
+-        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
++        {trackEntries.length > 0 ? (
++          <>
++            <div className="play-standings-head">
++              <span className="play-standings-title">Итоговое табло</span>
++              {place !== null ? (
++                <span className="play-standings-place">{place}-е место</span>
++              ) : null}
++            </div>
++            <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
++          </>
++        ) : (
++          // Пустое табло (лотерея-only, ни одного верного ответа, досрочный
++          // finish) — fallback по образцу консоли, без висячего заголовка.
++          <p>Очков пока нет.</p>
++        )}
+         {hasDraws ? (
+           <div className="play-winners">
+             <Winners draws={lottery.draws} names={names} />
+           </div>
+         ) : null}
+       </section>
+     );
+   } else if (status === 'CANCELLED') {
+     view = <p>Комната отменена организатором.</p>;
+   } else if (status !== 'ACTIVE') {
+@@ -392,25 +402,34 @@ export function PlayPage() {
+           {verdictIcon}
+           {verdictText}
+         </h1>
+         {myPoints > 0 ? <p className="play-points">+{myPoints} очков</p> : null}
+         {correctOption ? (
+           <div className="play-correct">
+             <div className="play-correct-label">Правильный отвѣтъ</div>
+             <div className="play-correct-answer">{correctOption}</div>
+           </div>
+         ) : null}
+-        <div className="play-standings-head">
+-          <span className="play-standings-title">Табло</span>
+-          {place !== null ? <span className="play-standings-place">{place}-е место</span> : null}
+-        </div>
+-        <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
++        {trackEntries.length > 0 ? (
++          <>
++            <div className="play-standings-head">
++              <span className="play-standings-title">Табло</span>
++              {place !== null ? (
++                <span className="play-standings-place">{place}-е место</span>
++              ) : null}
++            </div>
++            <RaceTracks entries={trackEntries} highlightId={myId ?? undefined} contour="scene" />
++          </>
++        ) : (
++          // Пустое табло — fallback по образцу консоли, без висячего заголовка.
++          <p>Очков пока нет.</p>
++        )}
+       </section>
+     );
+   } else if (currentQuestion !== null) {
+     view = <p>Ответы закрыты, ждём результатов…</p>;
+   } else {
+     // ACTIVE без открытого вопроса: ждём первый вопрос; в лотерейной комнате
+     // здесь же появляются победители по мере розыгрышей.
+     view = (
+       <section>
+         <p>Игра идёт. Ждём вопрос…</p>
+diff --git a/apps/web/src/pages/screen/screen-page.tsx b/apps/web/src/pages/screen/screen-page.tsx
+index 7448b86..58fb555 100644
+--- a/apps/web/src/pages/screen/screen-page.tsx
++++ b/apps/web/src/pages/screen/screen-page.tsx
+@@ -210,22 +210,30 @@ export function ScreenPage() {
+     // рендерит RaceTracks, не переопределяем); победители — центрированный
+     // блок в свободной правой зоне. Без розыгрыша блок не рендерится, табло
+     // центрируется на всю зону (класс solo). Места из payload game.finished
+     // не нужны: дорожки сами сортируют desc (как финал участника, T7).
+     const hasDraws = Object.keys(lottery.draws).length > 0;
+     view = (
+       <section>
+         <h1 className="screen-final-title">Игра завершена</h1>
+         <div className={hasDraws ? 'screen-final-grid' : 'screen-final-grid screen-final-solo'}>
+           <div>
+-            <div className="screen-board-title">Итоговое табло</div>
+-            <RaceTracks entries={trackEntries} contour="scene" topN={5} />
++            {trackEntries.length > 0 ? (
++              <>
++                <div className="screen-board-title">Итоговое табло</div>
++                <RaceTracks entries={trackEntries} contour="scene" topN={5} />
++              </>
++            ) : (
++              // Пустое табло (лотерея-only, ни одного верного ответа, досрочный
++              // finish) — fallback по образцу консоли, без висячего заголовка.
++              <p>Очков пока нет.</p>
++            )}
+           </div>
+           {hasDraws ? (
+             <div className="screen-winners">
+               <Winners draws={lottery.draws} names={names} />
+             </div>
+           ) : null}
+         </div>
+       </section>
+     );
+   } else if (status === 'CANCELLED') {
+@@ -285,22 +293,29 @@ export function ScreenPage() {
+       <section className="screen-reveal">
+         <div className="screen-answer">
+           {correctOption ? (
+             <>
+               <div className="screen-answer-label">Правильный отвѣтъ</div>
+               <h1 className="screen-answer-value">{correctOption}</h1>
+             </>
+           ) : null}
+         </div>
+         <div>
+-          <div className="screen-board-title">Табло</div>
+-          <RaceTracks entries={trackEntries} contour="scene" topN={4} />
++          {trackEntries.length > 0 ? (
++            <>
++              <div className="screen-board-title">Табло</div>
++              <RaceTracks entries={trackEntries} contour="scene" topN={4} />
++            </>
++          ) : (
++            // Пустое табло — fallback по образцу консоли, без висячего заголовка.
++            <p>Очков пока нет.</p>
++          )}
+         </div>
+       </section>
+     );
+   } else if (currentQuestion !== null) {
+     view = <p className="screen-waiting">Ответы закрыты, ждём результатов…</p>;
+   } else {
+     // ACTIVE без открытого вопроса: ждём первый вопрос; в лотерейной комнате
+     // здесь же появляются победители по мере розыгрышей.
+     view = (
+       <section>

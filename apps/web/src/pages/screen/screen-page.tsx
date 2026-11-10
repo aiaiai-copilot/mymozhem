@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
-import { gameFinishedPayload, questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
+import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
 import { ApiClient } from '../../api/api-client';
 import { ApiError } from '../../api/api-error';
 import { joinRoom, listMembers, refreshSession } from '../../api/endpoints';
 import { ConnectionBanner } from '../../components/connection-banner';
-import { rosterNames } from '../../components/roster-names';
-import { Standings } from '../../components/standings';
+import { Logo } from '../../components/logo';
+import { RaceTracks } from '../../components/race-tracks';
+import { displayNameOf, rosterNames } from '../../components/roster-names';
 import { Winners } from '../../components/winners';
 import { deriveRoomStatus, projectLottery, projectQuiz } from '../../state/projections';
-import { shouldRefetchRoster } from '../../state/roster-refetch';
+import { isCompactQuestion } from '../../state/question-density';
+import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+import { lastRoundGains } from '../../state/race-tracks';
+import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore } from '../../state/session';
 import { useRoomBinding } from '../../state/use-room-binding';
+
+// Буквенные метки вариантов (золотые <b>, мокап timer-projector-participant;
+// тот же подход, что в play-page). Вариантов больше, чем букв, — без метки.
+const OPTION_LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
 
 // anonClient (ruling 1): join/refresh — auth:false, access-токена им не нужен,
 // поэтому провайдер всегда отдаёт null. Тот же паттерн, что в play-page.
@@ -40,9 +48,10 @@ const joinErrorText = (e: unknown): string => {
   return 'Ошибка сети. Проверьте соединение и обновите страницу.';
 };
 
-// Проектор (дизайн §4/§8): spectator-join по коду из URL, read-only — ни форм,
-// ни кнопок, ни publish. Зритель смотрит: текущий вопрос крупно → табло после
-// reveal → финал с итогами лотереи.
+// Проектор (дизайн §5.2, п. 8): spectator-join по коду из URL, read-only — ни
+// форм, ни кнопок, ни publish. Зритель смотрит: текущий вопрос крупно с
+// таймером → reveal с дорожками топ-4 → финал топ-5 с победителями лотереи.
+// Логотип — левый верхний угол на всех экранах (п. 17), стили — screen.css.
 export function ScreenPage() {
   const { code } = useParams();
   // SessionStore здесь — только in-memory TokenProvider (ruling 2): saveGuest
@@ -103,7 +112,8 @@ export function ScreenPage() {
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
 
-  // Ростер (ruling 4): join не эмитит событий — первая загрузка на subscribe…
+  // Ростер (ruling 4): первая загрузка на subscribe (гонка snapshot/replay,
+  // I-8)…
   useEffect(() => {
     if (!roomId) return;
     let stale = false;
@@ -119,14 +129,25 @@ export function ScreenPage() {
     };
   }, [roomId, client]);
 
-  // …и событийный рефетч там, где имена появляются на экране (табло/победители).
-  useEffect(() => {
-    const last = events[events.length - 1];
-    if (!roomId || !last || !shouldRefetchRoster(last.type)) return;
+  // …и событийный рефетч там, где имена появляются на экране (табло/победители),
+  // плюс live-ростер по core.member.joined: join теперь эмитит public-событие
+  // (дизайн §9). Дедуп min 2 с (Review Focus 3): join-шторм на старте события
+  // не дёргает REST пачкой; стабильные инстансы — useCallback/useMemo по
+  // дисциплине файла.
+  const refetchRoster = useCallback(() => {
+    if (!roomId) return;
     listMembers(client, roomId)
       .then((r) => setMembers(r.members))
+      // Best effort: имена дорисуются при следующем рефетче, состояние
+      // соединения и так показывает баннер.
       .catch(() => {});
-  }, [events, roomId, client]);
+  }, [roomId, client]);
+  const rosterEventRefetch = useMemo(() => createRosterEventRefetcher(refetchRoster), [refetchRoster]);
+  useEffect(() => {
+    const last = events[events.length - 1];
+    if (!last) return;
+    rosterEventRefetch(last.type);
+  }, [events, rosterEventRefetch]);
 
   const names = useMemo(() => rosterNames(members), [members]);
 
@@ -143,6 +164,25 @@ export function ScreenPage() {
     const parsed = quizSettingsSchema.shape.questions.safeParse(binding.appSettings.questions);
     return parsed.success ? parsed.data : [];
   }, [binding.appSettings]);
+
+  // Таймер вопроса (п. 12): durationSec — только из распарсенных настроек
+  // (дефолт 30 материализуется на parse; без raw appSettings и без «?? 30»),
+  // openedAt — серверный штамп из проекции. «Без лимита» → null → таймер не
+  // рендерится вообще. Хук вызван до ранних return (rules of hooks).
+  const question = currentQuestion !== null ? questions[currentQuestion] : undefined;
+  const durationSec = question?.durationSec ?? null;
+  const timerSec = useQuestionTimer(durationSec, quiz.openedAt);
+
+  // Табло дорожками (дизайн §7): итоги из проекции, прирост — из последнего
+  // reveal в логе (lastRoundGains), имена — через displayNameOf (fallback
+  // «Гость» внутри). Сортировка/нормировка — внутри RaceTracks.
+  const gains = lastRoundGains(events);
+  const trackEntries = Object.entries(quiz.totals).map(([actorId, total]) => ({
+    actorId,
+    name: displayNameOf(names, actorId),
+    total,
+    gain: gains[actorId] ?? 0,
+  }));
 
   // Reveal текущего вопроса: revealed-событие позже close для того же индекса.
   const reveal = useMemo(() => {
@@ -163,76 +203,148 @@ export function ScreenPage() {
     // До join баннер не рендерим (ruling 3): useRoomBinding(null) держит
     // 'connecting' навсегда — это отсутствие привязки, а не обрыв.
     return (
-      <main>
-        {joinError ? <p role="alert">{joinError}</p> : <p>Подключаем экран…</p>}
+      <main className="screen-page">
+        <Logo contour="scene" size="projector" />
+        {joinError ? (
+          <p role="alert" className="screen-waiting">
+            {joinError}
+          </p>
+        ) : (
+          <p className="screen-waiting">Подключаем экран…</p>
+        )}
       </main>
     );
   }
 
   let view;
   if (quiz.finished || status === 'COMPLETED') {
-    // Финал: итоговое табло (места из payload game.finished, если событие было)
-    // + итоги лотереи (дизайн §4).
-    const finishedEvent = [...events].reverse().find((e) => e.type === 'quiz.game.finished');
-    const finalStandings = finishedEvent
-      ? gameFinishedPayload.parse(finishedEvent.payload).standings
-      : undefined;
+    // Финал (§5.2, п. 8/13/18): табло топ-5 дорожками + «ещё N» (строка — как
+    // рендерит RaceTracks, не переопределяем); победители — центрированный
+    // блок в свободной правой зоне. Без розыгрыша блок не рендерится, табло
+    // центрируется на всю зону (класс solo). Места из payload game.finished
+    // не нужны: дорожки сами сортируют desc (как финал участника, T7).
+    const hasDraws = Object.keys(lottery.draws).length > 0;
     view = (
       <section>
-        <h1>Игра завершена</h1>
-        <Standings standings={finalStandings} totals={quiz.totals} names={names} />
-        <Winners draws={lottery.draws} names={names} />
+        <h1 className="screen-final-title">Игра завершена</h1>
+        <div className={hasDraws ? 'screen-final-grid' : 'screen-final-grid screen-final-solo'}>
+          <div>
+            {trackEntries.length > 0 ? (
+              <>
+                <div className="screen-board-title">Итоговое табло</div>
+                <RaceTracks entries={trackEntries} contour="scene" topN={5} />
+              </>
+            ) : (
+              // Пустое табло (лотерея-only, ни одного верного ответа, досрочный
+              // finish) — fallback по образцу консоли, без висячего заголовка.
+              <p>Очков пока нет.</p>
+            )}
+          </div>
+          {hasDraws ? (
+            <div className="screen-winners">
+              <Winners draws={lottery.draws} names={names} />
+            </div>
+          ) : null}
+        </div>
       </section>
     );
   } else if (status === 'CANCELLED') {
-    view = <p>Комната отменена организатором.</p>;
+    view = <p className="screen-waiting">Комната отменена организатором.</p>;
   } else if (status !== 'ACTIVE') {
-    view = <p>Ожидаем начала — организатор ещё готовит комнату…</p>;
+    // Ожидание (п. 8): центрировано во всём кадре, логотип не влияет.
+    view = <p className="screen-waiting">Ожидаем начала — организатор ещё готовит комнату…</p>;
   } else if (currentQuestion !== null && quiz.accepting) {
-    // Текущий вопрос крупно (проектор): текст + варианты без кнопок — отвечают
-    // участники со своих устройств, экран только показывает.
-    const question = questions[currentQuestion];
+    // Вопрос (§5.2, п. 8/12): верхняя строка — «Вопросъ N из M» (Приложение A)
+    // + таймер 56px золотом справа (только при включённом лимите); отступ
+    // перед вариантами 35px; варианты — две колонки без золотых линий;
+    // длинный вопрос / более четырёх вариантов — компактная плотность
+    // (мокап projector-options-no-lines). Отвечают участники со своих
+    // устройств — экран только показывает.
+    const compact = isCompactQuestion(question?.text.length ?? 0, question?.options.length ?? 0);
     view = (
       <section>
-        <h1 className="screen-question">
-          {question ? question.text : `Вопрос ${currentQuestion + 1}`}
+        <div className="screen-strip">
+          <span className="screen-kicker">
+            {question
+              ? `Вопросъ ${currentQuestion + 1} из ${questions.length}`
+              : `Вопросъ ${currentQuestion + 1}`}
+          </span>
+          {timerSec !== null ? (
+            <span className="screen-timer">
+              {formatTimer(timerSec)}
+              <small>осталось</small>
+            </span>
+          ) : null}
+        </div>
+        <h1 className={compact ? 'screen-question screen-question-compact' : 'screen-question'}>
+          {question ? question.text : `Вопросъ ${currentQuestion + 1}`}
         </h1>
-        <ul className="screen-options">
-          {(question?.options ?? []).map((option, optionIndex) => (
-            <li key={optionIndex}>{option}</li>
-          ))}
+        <ul className={compact ? 'screen-options screen-options-compact' : 'screen-options'}>
+          {(question?.options ?? []).map((option, optionIndex) => {
+            const letter = OPTION_LETTERS[optionIndex];
+            return (
+              <li key={optionIndex}>
+                {letter ? <b>{letter}</b> : null}
+                {option}
+              </li>
+            );
+          })}
         </ul>
       </section>
     );
   } else if (currentQuestion !== null && reveal) {
-    // Reveal: правильный ответ (единственный публичный источник — payload
-    // revealed; correctAnswers клиенту структурно недоступны) + табло.
+    // Reveal (§5.2, мокап tracks-scene-with-logo): «Правильный отвѣтъ»
+    // (Приложение A) слева, табло дорожками справа — топ-4 + «ещё N».
+    // Правильный ответ — только из payload revealed: correctAnswers клиенту
+    // структурно недоступны.
     const correctOption =
       reveal.correctIndex !== undefined
         ? questions[currentQuestion]?.options[reveal.correctIndex]
         : undefined;
     view = (
-      <section>
-        {correctOption ? <h1 className="screen-question">Правильный ответ: {correctOption}</h1> : null}
-        <Standings totals={quiz.totals} names={names} />
+      <section className="screen-reveal">
+        <div className="screen-answer">
+          {correctOption ? (
+            <>
+              <div className="screen-answer-label">Правильный отвѣтъ</div>
+              <h1 className="screen-answer-value">{correctOption}</h1>
+            </>
+          ) : null}
+        </div>
+        <div>
+          {trackEntries.length > 0 ? (
+            <>
+              <div className="screen-board-title">Табло</div>
+              <RaceTracks entries={trackEntries} contour="scene" topN={4} />
+            </>
+          ) : (
+            // Пустое табло — fallback по образцу консоли, без висячего заголовка.
+            <p>Очков пока нет.</p>
+          )}
+        </div>
       </section>
     );
   } else if (currentQuestion !== null) {
-    view = <p>Ответы закрыты, ждём результатов…</p>;
+    view = <p className="screen-waiting">Ответы закрыты, ждём результатов…</p>;
   } else {
     // ACTIVE без открытого вопроса: ждём первый вопрос; в лотерейной комнате
     // здесь же появляются победители по мере розыгрышей.
     view = (
       <section>
-        <p>Игра идёт. Ждём вопрос…</p>
-        <Winners draws={lottery.draws} names={names} />
+        <p className="screen-note">Игра идёт. Ждём вопрос…</p>
+        {Object.keys(lottery.draws).length > 0 ? (
+          <div className="screen-winners">
+            <Winners draws={lottery.draws} names={names} />
+          </div>
+        ) : null}
       </section>
     );
   }
 
   return (
-    <main>
+    <main className="screen-page">
       <ConnectionBanner state={binding.connectionState} />
+      <Logo contour="scene" size="projector" />
       {view}
     </main>
   );

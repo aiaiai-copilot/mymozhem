@@ -1,0 +1,77 @@
+# Review package: b3a0bf8..HEAD
+
+## Commits
+8bc916d fix(web): race-tracks — числовая дельта +N рядом со счётом (дизайн §7, находка финревью батча B)
+
+## Files changed
+ apps/web/src/components/race-tracks.tsx | 7 ++++++-
+ apps/web/src/styles/transitions.css     | 9 +++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/apps/web/src/components/race-tracks.tsx b/apps/web/src/components/race-tracks.tsx
+index f69cb46..feff680 100644
+--- a/apps/web/src/components/race-tracks.tsx
++++ b/apps/web/src/components/race-tracks.tsx
+@@ -41,21 +41,26 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
+     <div className={`race-tracks contour-${contour}`}>
+       {top.map((e) => {
+         const w = widths.get(e.actorId) ?? { fillPct: 0, gainPct: 0 };
+         return (
+           <div className="track-row" key={e.actorId}>
+             <div className="tr-top">
+               <span className="tr-name">
+                 {e.name}
+                 {e.actorId === highlightId && <span className="me">это ты</span>}
+               </span>
+-              <span className="tr-score">{e.total}</span>
++              <span className="tr-score">
++                {e.total}
++                {/* Дельта дублируется числом рядом со счётом (дизайн §7:
++                    без цвета всё читается). Только при gain > 0. */}
++                {e.gain > 0 && <span className="delta">+{e.gain}</span>}
++              </span>
+             </div>
+             <div className="tr-lane">
+               {/* Без прироста fill получает solo — закруглённый правый конец
+                   (мокап console-reveal-tracks). */}
+               <div
+                 className={w.gainPct > 0 ? 'fill' : 'fill solo'}
+                 style={{ width: `${w.fillPct}%` }}
+               />
+               <div className="gain" style={{ width: `${w.gainPct}%` }} />
+             </div>
+diff --git a/apps/web/src/styles/transitions.css b/apps/web/src/styles/transitions.css
+index ead3092..2e5be92 100644
+--- a/apps/web/src/styles/transitions.css
++++ b/apps/web/src/styles/transitions.css
+@@ -96,20 +96,29 @@
+   margin-bottom: 4px;
+ }
+ .race-tracks .tr-name { font-weight: 700; font-size: 14px; }
+ .race-tracks .tr-name .me {
+   color: var(--gold);
+   font-size: 12px;
+   font-weight: 400;
+   margin-left: 6px;
+ }
+ .race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
++/* Числовая дельта прироста рядом со счётом (дизайн §7; мокап
++   console-reveal-tracks). Цвет — var(--gold) в тон золотому сегменту .gain. */
++.race-tracks .tr-score .delta {
++  color: var(--gold);
++  font-weight: 700;
++  font-size: 12px;
++  font-variant-numeric: tabular-nums;
++  margin-left: 6px;
++}
+ .race-tracks .tr-lane {
+   height: 10px;
+   border-radius: 5px;
+   overflow: hidden;
+   display: flex;
+ }
+ .race-tracks.contour-scene { color: var(--scene-text); }
+ .race-tracks.contour-scene .tr-lane { background: var(--track-canvas-dark); }
+ .race-tracks.contour-scene .tr-more { color: var(--muted-scene); }
+ .race-tracks.contour-console { color: var(--ink); }

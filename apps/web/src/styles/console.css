@@ -1,0 +1,587 @@
+/* Светлый контур консоли ведущего (/host/console), дизайн §5.3, п. 10/11/14/18.
+   Значения перенесены из мокапов-эталонов: console-phone-landscape-v2,
+   console-reveal-final-button, console-quiz-finished,
+   console-empty-long-errors-v2; цвета — токены T4 (кроме отмеченных
+   литералов мокапов). Размещение — соседним файлом к scene.css/screen.css
+   (ruling C-2): там контуры участника и проектора, здесь — ведущего;
+   кнопочная система (.btn*) и дорожки (.race-tracks) — в transitions.css. */
+
+/* --- Каркас: фон, полоса комнаты, панели (п. 10/14) --- */
+.console-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding-bottom: 20px;
+  background: var(--console-bg);
+  color: var(--ink);
+}
+
+/* Полоса комнаты: логотип, связь, код; sticky — статус виден при прокрутке
+   секций (мокап console-phone-landscape-v2 .strip). */
+.console-strip {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--console-strip);
+  font-size: 14px;
+}
+.console-conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Ok-зелёный полосы связи — токен мокапа (--ok, T13). */
+  color: var(--ok);
+  font-size: 13px;
+  font-weight: 700;
+}
+.console-conn.off { color: var(--error-light); }
+.console-conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.console-room-code {
+  margin-left: auto;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+/* Баннер обрыва связи (мокап console-empty-long-errors-v2 .error-banner) */
+.console-error-banner {
+  margin: 14px 14px 0;
+  padding: 12px 16px;
+  background: var(--error-light);
+  color: var(--scene-text);
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.console-error-sub {
+  display: block;
+  margin-top: 2px;
+  font-weight: 400;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+/* Ошибка publish-команды и служебные заметки статуса */
+.console-error {
+  margin: 0 14px 12px;
+  color: var(--error-light);
+  font-weight: 700;
+}
+.console-note { margin: 14px; color: var(--muted); }
+.console-muted { color: var(--muted); }
+
+/* --- Hero: текущий момент + действия (иерархия п. 10) --- */
+.console-hero {
+  margin: 14px;
+  padding: 18px 18px 20px;
+  background: var(--console-panel);
+  border-radius: 12px;
+}
+.console-q-label {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-q-text {
+  margin-bottom: 14px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+/* Игра: таймер + live-счётчик (мокап console-phone-landscape-v2 .live-row) */
+.console-live-row {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+.console-timer {
+  font-family: var(--font-display);
+  font-size: 52px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.console-timer small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-answered { font-size: 15px; }
+.console-answered b { font-size: 22px; }
+.console-answered-bar {
+  width: 130px;
+  height: 6px;
+  margin-top: 6px;
+  background: var(--track-canvas-light);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.console-answered-bar i {
+  display: block;
+  height: 100%;
+  background: var(--console-primary);
+  border-radius: 3px;
+}
+
+/* Reveal: ответ плашкой + разбор раунда (мокап console-reveal-final-button) */
+.console-correct {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: var(--console-strip);
+  border-radius: 8px;
+}
+.console-ca-label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-ca-value {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+.console-round-stats {
+  display: flex;
+  gap: 22px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.console-round-stats b {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.1;
+}
+.console-round-stats span { color: var(--muted); font-size: 13px; }
+
+/* «Квиз окончен» (мокап console-quiz-finished) */
+.console-fh-title {
+  margin-bottom: 10px;
+  font-family: var(--font-display);
+  font-size: 26px;
+}
+.console-fh-sub {
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.console-fh-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Действия: главная кнопка во всю ширину, тихая ниже (мокап .btn) */
+.console-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.console-actions .btn { display: block; width: 100%; }
+.console-btn-note { font-weight: 400; color: var(--muted); }
+
+/* Тихие кнопки консоли приглушены (мокап .btn-quiet opacity .75);
+   :not(:disabled) — не перекрывать disabled-описание системы (.btn:disabled) */
+.console-page .btn-quiet:not(:disabled) { opacity: 0.75; font-size: 14px; }
+
+/* --- Секции: карточки панелей (мокап .section-card) --- */
+.console-sections { margin: 0 14px; }
+.console-card {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  background: var(--console-panel);
+  border-radius: 12px;
+  font-size: 14px;
+}
+.console-card-title {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 13px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-link-row { padding: 5px 0; }
+.console-copy { padding: 6px 12px; font-size: 13px; }
+
+/* «ещё N — развернуть» (I-5): интерактивный toggle заменяет статичный
+   .tr-more, который RaceTracks рисует при topN, — внутри консольной
+   обёртки статичный скрыт, чтобы не дублировать строку. */
+.console-tracks .race-tracks .tr-more { display: none; }
+.console-tracks-toggle {
+  margin-top: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: 13px var(--font-body);
+  cursor: pointer;
+  transition: color var(--t-hover) ease-out;
+}
+.console-tracks-toggle:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+
+/* Тихая «Завершить событие» внизу страницы (п. 10) */
+.console-finish { display: block; width: calc(100% - 28px); margin: 0 14px; }
+
+/* «Комната не найдена» (мокап console-empty-long-errors-v2 .lost-card) */
+.console-lost {
+  margin: 14px;
+  padding: 22px 18px;
+  background: var(--console-panel);
+  border-radius: 12px;
+  text-align: center;
+}
+.console-lost-title {
+  margin-bottom: 8px;
+  font-family: var(--font-display);
+  font-size: 24px;
+}
+.console-lost-sub {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.console-lost-btn { display: inline-block; text-decoration: none; }
+
+/* --- Ландшафт-правило (п. 11): при высоте ≤400px первый экран = статус +
+   момент + главная кнопка без прокрутки — две колонки, действия справа
+   (мокап console-phone-landscape-v2 .land-grid/.actions-col) --- */
+@media (orientation: landscape) and (max-height: 400px) {
+  .console-hero {
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    gap: 12px;
+    align-items: center;
+    margin: 12px;
+    padding: 14px 16px 16px;
+  }
+  .console-hero .console-q-text { font-size: 19px; margin-bottom: 10px; }
+  .console-live-row { margin-bottom: 0; gap: 16px; }
+  .console-timer { font-size: 44px; }
+  .console-correct { padding: 8px 12px; margin-bottom: 10px; }
+  .console-correct .console-ca-value { font-size: 19px; }
+  .console-round-stats { margin-bottom: 0; gap: 18px; }
+  .console-round-stats b { font-size: 24px; }
+  .console-fh-sub { margin-bottom: 0; }
+  .console-actions .btn-primary { font-size: 16px; padding: 13px 12px; }
+  /* Секции ниже первого экрана — в два столбца (мокап .land-below) */
+  .console-sections {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 0 12px;
+  }
+  .console-sections .console-card { margin-bottom: 0; }
+  .console-finish { width: calc(100% - 24px); margin: 12px; }
+}
+
+/* --- Setup и редактор квиза (Task 10, дизайн §5.3 «Редактор», п. 9/14;
+   мокапы-эталоны: console-editor, forms-and-system-states-v2,
+   editor-secondary-button-darker). Цвета — только токены T4; единственный
+   белый фон полей ввода — токен мокапа (--input-console, T13).
+   Кнопки — общая система .btn
+   (transitions.css): secondary #C4D8CC, primary #10514F с золотым текстом,
+   тихие без рамок (п. 15). --- */
+.setup-title {
+  margin: 18px 14px 14px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 400;
+}
+
+/* Выбор приложения — карточкой панели; радио-строки с отступом */
+.setup-appkind {
+  border: none;
+  margin: 0 14px 12px;
+  padding: 14px 16px;
+}
+.setup-appkind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 15px;
+}
+.setup-appkind-option input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--console-primary);
+}
+
+.editor-form { margin: 0 14px; }
+.editor-form fieldset { border: none; margin: 0; padding: 0; }
+/* Legend секций редактора — стиль подписей мокапа (f-label): малая,
+   плотная, uppercase, приглушённая */
+.editor-legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+/* Карточка вопроса: панель + шапка «номер · длительность» (полоса номеров
+   мокапа: темп виден до открытия вопроса) */
+.editor-q-card {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  background: var(--console-panel);
+  border-radius: 12px;
+}
+.editor-q-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.editor-q-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+}
+.editor-q-time {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.editor-input {
+  width: 100%;
+  margin-top: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--input-console);
+  color: var(--ink);
+  font: 15px var(--font-body);
+}
+.editor-input:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+
+/* Radio-группа «Правильный ответ» (п. 9): один legend, строки radio+вариант */
+.editor-options { margin-bottom: 12px; }
+.editor-options legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.editor-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.editor-opt-row input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--console-primary);
+}
+.editor-opt-row .editor-input { flex: 1; margin-top: 0; margin-bottom: 8px; }
+.editor-remove { flex-shrink: 0; padding: 6px 0; font-size: 13px; }
+
+.editor-add-option { margin-bottom: 16px; font-size: 14px; }
+
+/* «Время на ответ» (§6): число + «без лимита» в одной строке (мокап
+   .duration-row); disabled-поле при unlimited не стилизуем отдельно —
+   браузерное disabled читается, значение сохраняется в состоянии формы */
+.editor-duration-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.editor-duration-input { display: flex; align-items: center; gap: 8px; }
+.editor-duration-input input {
+  width: 76px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--input-console);
+  color: var(--ink);
+  font: 15px var(--font-body);
+  font-variant-numeric: tabular-nums;
+}
+.editor-duration-input input:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+.editor-duration-unit { color: var(--muted); font-size: 14px; }
+.editor-nolimit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  font-size: 14px;
+}
+.editor-nolimit input[type='checkbox'] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--console-primary);
+}
+
+.editor-scoring { margin-bottom: 12px; }
+.editor-submit { width: 100%; }
+
+/* --- Розыгрыш, награды, завершение, пустые/длинные/ошибки (Task 11, дизайн
+   §5.3 «Розыгрыш»/«Завершение»/«Пустые/длинные/ошибки», п. 10/11/14/15/18;
+   мокапы-эталоны: console-draw-winner-larger, console-landscape-editor-draw-finish,
+   console-empty-long-errors-v2). Цвета/тайминги — только токены tokens.css;
+   литералов мокапа в этой секции нет. Кнопки — общая система .btn
+   (transitions.css): «Вручить» — primary, «Разыграть»/«+ Добавить приз» —
+   secondary, «Отозвать» — тихая без рамки (п. 15). --- */
+
+/* Баннер победителя внутри карточки призов (мокап .winner-banner): имя
+   36px Oranienbaum — крупнейший элемент экрана (§5.3 «Розыгрыш»). */
+.console-winner-banner {
+  margin: 4px 0 12px;
+  padding: 14px 16px 16px;
+  background: var(--console-strip);
+  border-radius: 8px;
+  text-align: center;
+}
+.console-wb-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-wb-name {
+  margin: 2px 0;
+  font-family: var(--font-display);
+  font-size: 36px;
+  line-height: 1.15;
+  /* Длинные имена переносятся, не обрезаются (дизайн §5.3 «Пустые/длинные») */
+  overflow-wrap: anywhere;
+}
+.console-wb-prize { font-size: 15px; overflow-wrap: anywhere; }
+
+/* Строки призов/наград (мокап .row): название слева, действие справа;
+   длинные названия переносятся, кнопка не сжимается */
+.console-prize-list,
+.console-award-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.console-prize-row,
+.console-award-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+.console-prize-name,
+.console-award-name { overflow-wrap: anywhere; }
+.console-prize-left,
+.console-award-status { color: var(--muted); }
+
+/* Малая кнопка строки (мокап .mini-btn): палитра общей системы .btn,
+   уменьшенный размер */
+.console-mini {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+.console-award-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+/* Разыгранный приз (quantity 0): вместо disabled-кнопки — тихий статус
+   (мокап «Разыграна», бриф T11) */
+.console-prize-drawn { flex-shrink: 0; color: var(--muted); font-size: 13px; }
+
+/* Форма добавления приза: поля — переиспользование editor-стилей (белое поле,
+   заголовок-лейбл); submit — secondary во всю ширину (мокап «+ Добавить приз») */
+.console-prize-form { margin-bottom: 10px; }
+.console-prize-qty { width: 96px; }
+.console-prize-add,
+.console-draw-participant { width: 100%; }
+.console-draw-participant { margin-bottom: 10px; }
+
+/* Пустые состояния и служебные заметки панелей (мокап .empty-note) */
+.console-empty-note {
+  margin: 0 0 12px;
+  padding: 6px 0 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Ошибки панелей (role="alert") — единый стиль с баннером обрыва связи
+   (.console-error-banner выше); модификатор убирает страничные отступы
+   внутри карточки */
+.console-panel-alert { margin: 10px 0 0; }
+
+/* Победители розыгрыша на консоли — карточка (className-проп Winners;
+   сцены стилизованы своими обёртками .play-winners/.screen-winners и не
+   затронуты). На ACTIVE — полный список всех победителей (бриф T11). */
+.console-winners h2 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 13px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.console-winners ul { list-style: none; margin: 0; padding: 0; }
+.console-winners li { padding: 5px 0; overflow-wrap: anywhere; }
+
+/* Длинные имена в дорожках консоли переносятся (мокап «Длинное»);
+   scoped под консоль — сцена имеет свои правила в transitions.css */
+.console-page .race-tracks .tr-name { overflow-wrap: anywhere; }
+
+/* Hero завершения (мокап .finish-hero): центрированная плашка */
+.console-completed-hero { text-align: center; }
+.console-completed-hero .console-fh-title { margin-bottom: 4px; }
+.console-completed-hero .console-fh-sub { margin-bottom: 0; }
+
+/* Ландшафт-правило (п. 11) для новых состояний: hero завершения — одна плашка
+   без колонки действий (мокап .fin-hero); имя победителя 32px остаётся
+   крупнейшим элементом своего экрана (мокап console-landscape-editor-draw-finish) */
+@media (orientation: landscape) and (max-height: 400px) {
+  .console-completed-hero {
+    display: block;
+    padding: 12px 16px;
+    text-align: left;
+  }
+  .console-completed-hero .console-fh-title { font-size: 22px; }
+  .console-wb-name { font-size: 32px; }
+}

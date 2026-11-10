@@ -1,0 +1,53 @@
+/* Дизайн-токены темы «rybinsk» (дизайн §4 + принятый мокап component-states-live).
+   Точка темы: <html data-theme="rybinsk">. Токены объявлены под :root;
+   вторая тема = переопределение токенов под [data-theme=…] — готовность без
+   пресетов (дизайн п. 5): пресеты второй темы осознанно НЕ создаются. */
+:root {
+  /* Сцена — тёмный контур (проектор/экран игрока) */
+  --scene-bg: #0A252B;
+  --scene-surface: #1B3B40;
+  --scene-surface-hover: #23484D;
+  --scene-surface-active: #122E32;
+  --gold: #E6C77D;
+  --scene-text: #F6EDDC;
+  --muted-scene: #9DB8B2;
+  --error-dark: #F27668;
+  --input-scene: #A9BDB2;
+  --track-fill: #0F7B57;
+  --track-canvas-dark: #143138;
+  /* Литералы мокапа scene.css (T13): placeholder поля участника, verdict success/danger */
+  --placeholder-scene: #354B41;
+  --verdict-success: #8FCAA5;
+  --verdict-danger: #E5A092;
+
+  /* Консоль — светлый контур (ведущий/организатор) */
+  --console-bg: #E3F0E9;
+  --console-panel: #F4F8F3;
+  --console-strip: #D7E8DE;
+  --console-secondary: #C4D8CC;
+  --console-primary: #10514F;
+  --console-primary-hover: #17685F;
+  --console-primary-active: #0A3E3B;
+  --console-secondary-hover: #B4CDBC;
+  --console-secondary-active: #A3BFA9;
+  --ink: #12343A;
+  --muted: #5A6B66;
+  --error-light: #A92820;
+  --track-canvas-light: #D5E2DA;
+  --danger-hover: #F3DCD2;
+  --danger-active: #ECCFC4;
+  /* Литералы мокапа console.css (T13): ok-зелёный полосы связи, фон полей ввода */
+  --ok: #2F6B4F;
+  --input-console: #FFFFFF;
+
+  /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
+  --t-hover: 140ms;
+  --t-press: 60ms;
+  --t-race: 600ms;
+
+  /* Шрифты: self-hosted woff2 (OFL), подключены в base.css.
+     --font-logo = Oranienbaum до решения лицензии Blagovest (гейт лицензии). */
+  --font-logo: 'Oranienbaum', serif;
+  --font-display: 'Oranienbaum', serif;
+  --font-body: 'PT Sans', sans-serif;
+}

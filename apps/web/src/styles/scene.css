@@ -1,0 +1,214 @@
+/* Тёмная сцена — контур участника (/play), дизайн §4/§5.1, п. 6/7/12/13/17/18.
+   Значения перенесены из мокапов-эталонов: participant-join-lobby-center-fix,
+   participant-flow-layout-v2, participant-long-content, game-states (сессия 44),
+   timer-projector-participant, tracks-scene-with-logo (сессия 45); цвета —
+   токены T4. Стили логотипа живут здесь же (компонент несёт начертание/цвет/
+   кегль, позиционирование — у страницы, ruling C-1). Размещение — отдельным
+   файлом от transitions.css: там система состояний, здесь раскладка экранов
+   (ruling C-2); проектор (T8) — соседний screen.css. */
+
+/* --- Логотип (ruling C-1) --- */
+.logo {
+  font-family: var(--font-logo);
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+}
+.logo-scene { color: var(--gold); }
+.logo-console { color: var(--console-primary); }
+.logo-participant { font-size: 19px; }
+.logo-projector { font-size: 22px; }
+/* Консольная полоса — 17px по мокапу (вердикт (б) живой приёмки: 19px крупновато). */
+.logo-compact { font-size: 17px; }
+
+/* --- Страница участника --- */
+.play-page {
+  /* position:relative — опора центрирования ожидания (п. 7) */
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 21px 18px 23px;
+  background: var(--scene-bg);
+  color: var(--scene-text);
+}
+/* Логотип участника — по центру вверху (п. 17); позиционирование — обязанность
+   страницы, не компонента (ruling C-1). */
+.play-page .logo { text-align: center; }
+
+/* Заголовок экрана (вход/ожидание/финал) — мокапы center-fix/flow-v2/edge */
+.play-title {
+  margin: 30px 0 21px;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 30px;
+  line-height: 1.1;
+  font-weight: 400;
+}
+
+/* Вход (мокап participant-join-lobby-center-fix): золотые подписи, поля
+   --input-scene с тёмным текстом */
+.play-field {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 17px;
+  color: var(--gold);
+  font-size: 14px;
+}
+.play-input {
+  width: 100%;
+  min-height: 49px;
+  padding: 11px 12px;
+  color: var(--scene-bg);
+  background: var(--input-scene);
+  border: 0;
+  border-radius: 4px;
+  font: 16px var(--font-body);
+}
+/* Placeholder — токен мокапа входа (--placeholder-scene, T13) */
+.play-input::placeholder { color: var(--placeholder-scene); }
+.play-input:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 2px;
+}
+
+/* Кнопка «Играть» — вариант сцены по мокапу входа (НЕ консольный .btn-primary,
+   I-9): поверхность сцены + золотой текст. Состояния hover/active/focus/disabled
+   наследует от .btn/.btn-scene (transitions.css). */
+.btn-join {
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  margin-top: 34px;
+  padding: 13px 22px;
+  color: var(--gold);
+  font-weight: 700;
+  font-size: 17px;
+  text-align: center;
+  border-radius: 4px;
+}
+
+/* Ошибки на тёмной сцене — плотное начертание (п. 6) */
+.play-error { color: var(--error-dark); font-weight: 700; }
+
+/* Ожидание: центрирование относительно всей высоты, логотип/заголовок не влияют
+   (п. 7, мокап center-fix: top 50% + translateY(-50%)) */
+.play-waiting {
+  position: absolute;
+  top: 50%;
+  left: 18px;
+  right: 18px;
+  transform: translateY(-50%);
+  margin: 0;
+  color: rgba(246, 237, 220, 0.82);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+/* Вопрос: верхняя строка — номер + таймер 40px (п. 12, мокап
+   timer-projector-participant); «без лимита» — таймера нет вообще */
+.play-strip {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 29px;
+}
+.play-kicker {
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.play-timer {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1;
+  color: var(--gold);
+  font-variant-numeric: tabular-nums;
+}
+/* Нижние 30px — отступ перед вариантами (п. 7) */
+.play-question {
+  margin: 10px 0 30px;
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.13;
+  font-weight: 400;
+}
+.play-options {
+  display: grid;
+  gap: 11px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* Вариант на всю ширину; длинный текст переносится, кнопка растёт по высоте
+   (п. 7, мокап participant-long-content); внутренних скроллов нет */
+.play-options .btn-scene {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Reveal (мокап game-states): вердикт различается значком, текстом и цветом.
+   success/danger — токены мокапа (--verdict-success/--verdict-danger, T13). */
+.play-verdict {
+  margin: 28px 0 4px;
+  font-family: var(--font-display);
+  font-size: 38px;
+  font-weight: 400;
+}
+.play-verdict-success { color: var(--verdict-success); }
+.play-verdict-danger { color: var(--verdict-danger); }
+.play-points {
+  margin: 0 0 17px;
+  color: var(--gold);
+  font-size: 18px;
+  font-weight: 700;
+}
+/* «Правильный отвѣтъ» — плашка с золотой кромкой (мокап game-states) */
+.play-correct {
+  margin: 18px 0;
+  padding: 13px 14px;
+  background: var(--scene-surface);
+  border-left: 3px solid var(--gold);
+}
+.play-correct-label {
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+.play-correct-answer {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-size: 28px;
+}
+
+/* Шапка табло: заголовок + моё место (п. 13, myPlace) */
+.play-standings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 19px 0 8px;
+}
+.play-standings-title {
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 21px;
+}
+.play-standings-place { color: var(--muted-scene); font-size: 14px; }
+
+/* Победители розыгрыша (только если розыгрыш был, п. 18) */
+.play-winners { margin-top: 22px; }
+.play-winners h2 {
+  margin: 0 0 8px;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 400;
+}
+.play-winners ul {
+  margin: 0;
+  padding-left: 19px;
+  font-size: 15px;
+  line-height: 1.5;
+}

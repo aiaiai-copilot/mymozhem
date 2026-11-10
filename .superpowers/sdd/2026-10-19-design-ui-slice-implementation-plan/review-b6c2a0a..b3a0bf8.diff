@@ -1,0 +1,406 @@
+# Review package: b6c2a0a..HEAD
+
+## Commits
+b3a0bf8 feat(web): race-tracks — логика дорожек (нормировка к лидеру, прирост из последнего reveal) + компонент RaceTracks
+
+## Files changed
+ apps/web/src/components/race-tracks.tsx |  68 +++++++++++++++
+ apps/web/src/state/race-tracks.spec.ts  | 144 ++++++++++++++++++++++++++++++++
+ apps/web/src/state/race-tracks.ts       |  72 ++++++++++++++++
+ apps/web/src/styles/transitions.css     |  62 +++++++++++++-
+ 4 files changed, 343 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/components/race-tracks.tsx b/apps/web/src/components/race-tracks.tsx
+new file mode 100644
+index 0000000..f69cb46
+--- /dev/null
++++ b/apps/web/src/components/race-tracks.tsx
+@@ -0,0 +1,68 @@
++import { topNWithRest, trackWidths } from '../state/race-tracks';
++
++// Дорожки «забега» — ростер с нормированными к лидеру полосами (дизайн §7).
++// Разметка — перенос из мокапа component-states-live (.track-row/.tr-top/
++// .tr-lane/.fill/.gain, tabular-nums у счёта, transition width var(--t-race)
++// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N» —
++// из мокапов tracks-scene/console-reveal-tracks. DOM-тестов нет (паттерн
++// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — T13.
++
++export interface RaceTrackEntry {
++  actorId: string;
++  // Уже разрешённое отображаемое имя (rosterNames/displayNameOf — у потребителя).
++  name: string;
++  total: number;
++  // Прирост последнего раунда (lastRoundGains из лога у потребителя).
++  gain: number;
++}
++
++interface RaceTracksProps {
++  entries: readonly RaceTrackEntry[];
++  // Своя строка: пометка «это ты» (золотая, по мокапу tracks-scene).
++  highlightId?: string;
++  // Показать верхние topN; под дорожками — «ещё N». Без topN — все.
++  topN?: number;
++  // Полотно дорожки: сцена — --track-canvas-dark, консоль — --track-canvas-light.
++  contour: 'scene' | 'console';
++}
++
++export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksProps) {
++  // Сортировка desc — обязанность отображения (как в Standings); равные очки
++  // сохраняют порядок входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
++  // списка, а не видимого топа: обрезанные дорожки не меняют масштаб.
++  const sorted = [...entries].sort((a, b) => b.total - a.total);
++  const widths = trackWidths(
++    sorted,
++    Object.fromEntries(sorted.map((e) => [e.actorId, e.gain])),
++  );
++  const { top, rest } = topNWithRest(sorted, topN ?? sorted.length);
++
++  return (
++    <div className={`race-tracks contour-${contour}`}>
++      {top.map((e) => {
++        const w = widths.get(e.actorId) ?? { fillPct: 0, gainPct: 0 };
++        return (
++          <div className="track-row" key={e.actorId}>
++            <div className="tr-top">
++              <span className="tr-name">
++                {e.name}
++                {e.actorId === highlightId && <span className="me">это ты</span>}
++              </span>
++              <span className="tr-score">{e.total}</span>
++            </div>
++            <div className="tr-lane">
++              {/* Без прироста fill получает solo — закруглённый правый конец
++                  (мокап console-reveal-tracks). */}
++              <div
++                className={w.gainPct > 0 ? 'fill' : 'fill solo'}
++                style={{ width: `${w.fillPct}%` }}
++              />
++              <div className="gain" style={{ width: `${w.gainPct}%` }} />
++            </div>
++          </div>
++        );
++      })}
++      {rest > 0 && <div className="tr-more">ещё {rest}</div>}
++    </div>
++  );
++}
+diff --git a/apps/web/src/state/race-tracks.spec.ts b/apps/web/src/state/race-tracks.spec.ts
+new file mode 100644
+index 0000000..c51bc13
+--- /dev/null
++++ b/apps/web/src/state/race-tracks.spec.ts
+@@ -0,0 +1,144 @@
++import { describe, expect, it } from 'vitest';
++import type { ProjectedEvent } from '@mymozhem/sdk';
++import {
++  lastRoundGains,
++  myPlace,
++  topNWithRest,
++  trackWidths,
++} from './race-tracks';
++import { PLAYER_1, PLAYER_2, quizMiniGameLog } from './fixtures/quiz-log.fixture';
++
++// Логика дорожек «забега» (дизайн §7): нормировка к лидеру (=100%), прирост
++// за раунд — awarded ПОСЛЕДНЕГО quiz.question.revealed из перефолженного лога
++// (reconnect-safe), fill отделён от gain: fill = (total−gain)/leader,
++// gain = gain/leader. Все проценты — числа 0..100.
++
++describe('trackWidths', () => {
++  const entries = [
++    { actorId: 'a', total: 1500 },
++    { actorId: 'b', total: 1200 },
++    { actorId: 'c', total: 900 },
++  ];
++
++  it('нормировка к лидеру: 1500/1200/900 → 100/80/60', () => {
++    const w = trackWidths(entries, {});
++    expect(w.get('a')).toEqual({ fillPct: 100, gainPct: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 80, gainPct: 0 });
++    expect(w.get('c')).toEqual({ fillPct: 60, gainPct: 0 });
++  });
++
++  it('прирост-сегмент отделён от fill: fill = (total−gain)/leader, gain = gain/leader', () => {
++    const w = trackWidths(entries, { a: 300 });
++    // Лидер: fill = (1500−300)/1500 = 80, gain = 300/1500 = 20; сумма снова 100.
++    expect(w.get('a')).toEqual({ fillPct: 80, gainPct: 20 });
++  });
++
++  it('нулевой gain → gainPct 0, fill не урезан', () => {
++    const w = trackWidths(entries, { b: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 80, gainPct: 0 });
++  });
++
++  it('лидер 0 (все нули) → все дорожки пустые (0/0), без деления на ноль', () => {
++    const w = trackWidths(
++      [
++        { actorId: 'a', total: 0 },
++        { actorId: 'b', total: 0 },
++      ],
++      {},
++    );
++    expect(w.get('a')).toEqual({ fillPct: 0, gainPct: 0 });
++    expect(w.get('b')).toEqual({ fillPct: 0, gainPct: 0 });
++  });
++
++  it('gain не из entries (нет записи в gains) → gainPct 0', () => {
++    const w = trackWidths([{ actorId: 'a', total: 500 }], {});
++    expect(w.get('a')).toEqual({ fillPct: 100, gainPct: 0 });
++  });
++});
++
++describe('lastRoundGains', () => {
++  it('golden-фикстура: берётся awarded ПОСЛЕДНЕГО reveal (вопрос 1, не вопрос 0)', () => {
++    // В фикстуре два reveal: вопрос 0 наградил PLAYER_1 (110), вопрос 1 — PLAYER_2 (100).
++    expect(lastRoundGains(quizMiniGameLog)).toEqual({ [PLAYER_2]: 100 });
++  });
++
++  it('два reveal подряд → побеждает второй', () => {
++    const events: ProjectedEvent[] = [
++      {
++        type: 'quiz.question.revealed',
++        payload: {
++          questionIndex: 0,
++          correctIndex: 1,
++          awarded: [{ actorId: PLAYER_1, points: 110 }],
++          totals: [{ actorId: PLAYER_1, total: 110 }],
++        },
++        actorId: null,
++      },
++      {
++        type: 'quiz.question.revealed',
++        payload: {
++          questionIndex: 1,
++          awarded: [
++            { actorId: PLAYER_1, points: 40 },
++            { actorId: PLAYER_2, points: 90 },
++          ],
++          totals: [
++            { actorId: PLAYER_1, total: 150 },
++            { actorId: PLAYER_2, total: 90 },
++          ],
++        },
++        actorId: null,
++      },
++    ];
++    expect(lastRoundGains(events)).toEqual({ [PLAYER_1]: 40, [PLAYER_2]: 90 });
++  });
++
++  it('reveal не было → пустая запись', () => {
++    const events: ProjectedEvent[] = [
++      {
++        type: 'quiz.question.opened',
++        payload: { questionIndex: 0, openedAt: '2026-10-20T12:00:00.000Z' },
++        actorId: PLAYER_1,
++      },
++    ];
++    expect(lastRoundGains(events)).toEqual({});
++    expect(lastRoundGains([])).toEqual({});
++  });
++});
++
++describe('topNWithRest', () => {
++  it('7 элементов, n=4 → top 4, rest 3', () => {
++    const { top, rest } = topNWithRest([1, 2, 3, 4, 5, 6, 7], 4);
++    expect(top).toEqual([1, 2, 3, 4]);
++    expect(rest).toBe(3);
++  });
++
++  it('n >= длины → rest 0, top — весь список', () => {
++    expect(topNWithRest([1, 2], 5)).toEqual({ top: [1, 2], rest: 0 });
++  });
++
++  it('пустой список → top [], rest 0', () => {
++    expect(topNWithRest([], 4)).toEqual({ top: [], rest: 0 });
++  });
++});
++
++describe('myPlace', () => {
++  // Уже отсортировано desc; равные очки делят место (плотный порядок).
++  const sorted = [
++    { actorId: 'a', total: 1500 },
++    { actorId: 'b', total: 1200 },
++    { actorId: 'c', total: 1200 },
++    { actorId: 'd', total: 900 },
++  ];
++
++  it('плотный порядок desc: равные делят место, следующее — +1', () => {
++    expect(myPlace(sorted, 'a')).toBe(1);
++    expect(myPlace(sorted, 'b')).toBe(2);
++    expect(myPlace(sorted, 'c')).toBe(2);
++    expect(myPlace(sorted, 'd')).toBe(3);
++  });
++
++  it('отсутствующий id → null', () => {
++    expect(myPlace(sorted, 'zzz')).toBeNull();
++  });
++});
+diff --git a/apps/web/src/state/race-tracks.ts b/apps/web/src/state/race-tracks.ts
+new file mode 100644
+index 0000000..0729d0b
+--- /dev/null
++++ b/apps/web/src/state/race-tracks.ts
+@@ -0,0 +1,72 @@
++import type { ProjectedEvent } from '@mymozhem/sdk';
++import { questionRevealedPayload } from '@mymozhem/app-quiz';
++
++// Логика дорожек «забега» (дизайн §7): чистые функции, без React.
++// Дорожка игрока = fill (итог без прироста) + gain (прирост последнего
++// раунда), оба нормированы к лидеру (=100%). Прирост выводится из лога,
++// а не приезжает отдельным состоянием — перефолд/reconnect дают тот же
++// результат (reconnect-safe).
++
++export interface TrackTotal {
++  actorId: string;
++  total: number;
++}
++
++export interface TrackWidth {
++  fillPct: number;
++  gainPct: number;
++}
++
++// Прирост за раунд — awarded ПОСЛЕДНЕГО quiz.question.revealed в логе.
++// Reveal не было → пустая запись (все дорожки без gain-сегмента).
++export function lastRoundGains(events: ProjectedEvent[]): Record<string, number> {
++  let last: Record<string, number> = {};
++  for (const e of events) {
++    if (e.type !== 'quiz.question.revealed') continue;
++    const p = questionRevealedPayload.parse(e.payload);
++    last = Object.fromEntries(p.awarded.map((a) => [a.actorId, a.points]));
++  }
++  return last;
++}
++
++// Нормировка к лидеру: fill = (total−gain)/leader, gain = gain/leader (0..100).
++// Лидер 0 (все нули, старт игры) → все 0: пустые дорожки, без деления на ноль.
++// gain > total быть не должно (прирост входит в итог), но fill не уходит
++// в минус — clamp на 0.
++export function trackWidths(
++  entries: readonly TrackTotal[],
++  gains: Readonly<Record<string, number>>,
++): Map<string, TrackWidth> {
++  const leader = Math.max(0, ...entries.map((e) => e.total));
++  const widths = new Map<string, TrackWidth>();
++  for (const e of entries) {
++    if (leader === 0) {
++      widths.set(e.actorId, { fillPct: 0, gainPct: 0 });
++      continue;
++    }
++    const gain = gains[e.actorId] ?? 0;
++    widths.set(e.actorId, {
++      fillPct: (Math.max(e.total - gain, 0) / leader) * 100,
++      gainPct: (gain / leader) * 100,
++    });
++  }
++  return widths;
++}
++
++// Верхние n + счётчик остальных («ещё N»). rest никогда не отрицателен.
++export function topNWithRest<T>(list: readonly T[], n: number): { top: T[]; rest: number } {
++  return { top: list.slice(0, n), rest: Math.max(list.length - n, 0) };
++}
++
++// Место в уже отсортированном (desc) списке: плотный порядок — равные очки
++// делят место, следующее отличающееся значение получает place+1 (1,2,2,3).
++// Актора нет в списке → null (исключён/не играл — табло его не рисует).
++export function myPlace(sortedEntries: readonly TrackTotal[], myId: string): number | null {
++  let place = 1;
++  for (let i = 0; i < sortedEntries.length; i++) {
++    const entry = sortedEntries[i];
++    if (i > 0 && entry.total < sortedEntries[i - 1].total) place++;
++    if (entry.actorId === myId) return place;
++  }
++  return null;
++}
+diff --git a/apps/web/src/styles/transitions.css b/apps/web/src/styles/transitions.css
+index b43a92c..ead3092 100644
+--- a/apps/web/src/styles/transitions.css
++++ b/apps/web/src/styles/transitions.css
+@@ -1,12 +1,13 @@
+-/* Кнопочная система состояний — перенос из принятого мокапа
+-   component-states-live: hover 140мс только на устройствах с настоящей мышью,
++/* Система состояний и контент-анимаций — перенос из принятого мокапа
++   component-states-live: кнопки (ниже) и дорожки «забега» (в конце файла).
++   Кнопки: hover 140мс только на устройствах с настоящей мышью,
+    active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
+    смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
+    Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
+    обёртки .panel.dark), литералы hover/active danger заменены токенами
+    --danger-hover/--danger-active, шрифт — var(--font-body). */
+ 
+ .btn {
+   border: none;
+   border-radius: 10px;
+   font-family: var(--font-body);
+@@ -70,14 +71,69 @@
+   background: var(--scene-surface);
+   color: var(--scene-text);
+   min-width: 260px;
+   text-align: left;
+   font-weight: 400;
+   font-size: 18px;
+   padding: 16px 20px;
+ }
+ .btn-scene b { color: var(--gold); margin-right: 10px; }
+ 
+-/* «Уменьшить движение» в системе гасит переходы состояний */
++/* Дорожки «забега» — перенос из мокапов component-states-live /
++   tracks-scene-projector-participant / console-reveal-tracks. fill — итог без
++   прироста, нормированный к лидеру; gain — золотой сегмент прироста последнего
++   раунда; оба анимируются width за var(--t-race) (контент-анимация, не hover).
++   Полотно дорожки зависит от контура: сцена — --track-canvas-dark, консоль —
++   --track-canvas-light. Заливка одна на оба контура — var(--track-fill)
++   (бриф T6; в мокапе console-reveal-tracks fill был --console-primary —
++   осознанное расхождение мокапов, берём токен темы). */
++
++.race-tracks .track-row { padding: 7px 0 9px; }
++.race-tracks .tr-top {
++  display: flex;
++  justify-content: space-between;
++  align-items: baseline;
++  gap: 10px;
++  margin-bottom: 4px;
++}
++.race-tracks .tr-name { font-weight: 700; font-size: 14px; }
++.race-tracks .tr-name .me {
++  color: var(--gold);
++  font-size: 12px;
++  font-weight: 400;
++  margin-left: 6px;
++}
++.race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
++.race-tracks .tr-lane {
++  height: 10px;
++  border-radius: 5px;
++  overflow: hidden;
++  display: flex;
++}
++.race-tracks.contour-scene { color: var(--scene-text); }
++.race-tracks.contour-scene .tr-lane { background: var(--track-canvas-dark); }
++.race-tracks.contour-scene .tr-more { color: var(--muted-scene); }
++.race-tracks.contour-console { color: var(--ink); }
++.race-tracks.contour-console .tr-lane { background: var(--track-canvas-light); }
++.race-tracks.contour-console .tr-more { color: var(--muted); }
++.race-tracks .fill {
++  background: var(--track-fill);
++  border-radius: 5px 0 0 5px;
++  height: 100%;
++  transition: width var(--t-race) ease-out;
++}
++/* Без прироста — закруглённый правый конец у fill */
++.race-tracks .fill.solo { border-radius: 5px; }
++.race-tracks .gain {
++  background: var(--gold);
++  height: 100%;
++  border-radius: 0 5px 5px 0;
++  transition: width var(--t-race) ease-out;
++}
++.race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
++
++/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации */
+ @media (prefers-reduced-motion: reduce) {
+   .btn { transition-duration: 0ms !important; }
++  .race-tracks .fill,
++  .race-tracks .gain { transition-duration: 0ms !important; }
+ }

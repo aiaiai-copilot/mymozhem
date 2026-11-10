@@ -1,0 +1,1394 @@
+# Review package: 8136739..3efda3d
+
+## Commits
+3efda3d feat(web): консоль — каркас «пульт ведущего», игра/reveal с дорожками и таймером, экран «Квиз окончен»
+
+## Files changed
+ apps/web/src/components/race-tracks.tsx        |   4 +-
+ apps/web/src/components/standings.tsx          |  49 ---
+ apps/web/src/main.tsx                          |   1 +
+ apps/web/src/pages/host/console-page.spec.ts   |  52 +++-
+ apps/web/src/pages/host/console-page.tsx       | 224 ++++++++++----
+ apps/web/src/pages/host/open-question-label.ts |   9 +
+ apps/web/src/pages/host/quiz-controls.spec.ts  |  14 +
+ apps/web/src/pages/host/quiz-controls.tsx      | 403 ++++++++++++++++++++-----
+ apps/web/src/styles/console.css                | 299 ++++++++++++++++++
+ 9 files changed, 864 insertions(+), 191 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/components/race-tracks.tsx b/apps/web/src/components/race-tracks.tsx
+index feff680..3482140 100644
+--- a/apps/web/src/components/race-tracks.tsx
++++ b/apps/web/src/components/race-tracks.tsx
+@@ -20,22 +20,22 @@ interface RaceTracksProps {
+   entries: readonly RaceTrackEntry[];
+   // Своя строка: пометка «это ты» (золотая, по мокапу tracks-scene).
+   highlightId?: string;
+   // Показать верхние topN; под дорожками — «ещё N». Без topN — все.
+   topN?: number;
+   // Полотно дорожки: сцена — --track-canvas-dark, консоль — --track-canvas-light.
+   contour: 'scene' | 'console';
+ }
+ 
+ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksProps) {
+-  // Сортировка desc — обязанность отображения (как в Standings); равные очки
+-  // сохраняют порядок входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
++  // Сортировка desc — обязанность отображения; равные очки сохраняют порядок
++  // входа (sort стабилен). Нормировка — к лидеру ПОЛНОГО
+   // списка, а не видимого топа: обрезанные дорожки не меняют масштаб.
+   const sorted = [...entries].sort((a, b) => b.total - a.total);
+   const widths = trackWidths(
+     sorted,
+     Object.fromEntries(sorted.map((e) => [e.actorId, e.gain])),
+   );
+   const { top, rest } = topNWithRest(sorted, topN ?? sorted.length);
+ 
+   return (
+     <div className={`race-tracks contour-${contour}`}>
+diff --git a/apps/web/src/components/standings.tsx b/apps/web/src/components/standings.tsx
+deleted file mode 100644
+index b3f2d35..0000000
+--- a/apps/web/src/components/standings.tsx
++++ /dev/null
+@@ -1,49 +0,0 @@
+-import type { z } from 'zod';
+-import type { gameFinishedPayload } from '@mymozhem/app-quiz';
+-import { displayNameOf } from './roster-names';
+-
+-// Итоговое табло финала (game.finished) уже несёт места — доверяем им, а не
+-// пересортировываем: правила раздела мест — забота app-модуля.
+-type FinalStandings = z.infer<typeof gameFinishedPayload>['standings'];
+-
+-interface StandingsProps {
+-  names: Map<string, string>;
+-  // Промежуточное табло: очки из проекции QuizState (reveal), сортировка desc здесь.
+-  totals?: Readonly<Record<string, number>>;
+-  // Финальное табло: standings из payload game.finished (места посчитаны сервером).
+-  standings?: FinalStandings;
+-}
+-
+-// Табло имя+очки (functional-minimum, дизайн §0.4). Плотный ранг не нужен —
+-// это отображение, а не подсчёт; при равных очках порядок произволен.
+-export function Standings({ names, totals, standings }: StandingsProps) {
+-  const rows: readonly { actorId: string; total: number }[] =
+-    standings ??
+-    Object.entries(totals ?? {})
+-      .map(([actorId, total]) => ({ actorId, total }))
+-      .sort((a, b) => b.total - a.total);
+-
+-  if (rows.length === 0) {
+-    return <p>Очков пока нет.</p>;
+-  }
+-  return (
+-    <table>
+-      <thead>
+-        <tr>
+-          <th>#</th>
+-          <th>Игрок</th>
+-          <th>Очки</th>
+-        </tr>
+-      </thead>
+-      <tbody>
+-        {rows.map((row, i) => (
+-          <tr key={row.actorId}>
+-            <td>{i + 1}</td>
+-            <td>{displayNameOf(names, row.actorId)}</td>
+-            <td>{row.total}</td>
+-          </tr>
+-        ))}
+-      </tbody>
+-    </table>
+-  );
+-}
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index efd0a2a..cb86ee7 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -2,20 +2,21 @@ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import { App } from './App';
+ // Визуальный фундамент (T4): порядок важен — токены → база → состояния;
+ // экраны контуров (T7+) — последними, переопределяют базу по классам.
+ import './styles/tokens.css';
+ import './styles/base.css';
+ import './styles/transitions.css';
+ import './styles/scene.css';
+ import './styles/screen.css';
++import './styles/console.css';
+ 
+ // SPA-монтирование; маршруты живут в App, чтобы тесты могли рендерить их
+ // под MemoryRouter без привязки к DOM.
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <BrowserRouter>
+       <App />
+     </BrowserRouter>
+   </StrictMode>,
+ );
+diff --git a/apps/web/src/pages/host/console-page.spec.ts b/apps/web/src/pages/host/console-page.spec.ts
+index 567f139..acbce3d 100644
+--- a/apps/web/src/pages/host/console-page.spec.ts
++++ b/apps/web/src/pages/host/console-page.spec.ts
+@@ -1,19 +1,69 @@
+ import { describe, expect, it } from 'vitest';
+-import { isStaleRoomJoinError } from './console-page';
++import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
++import { isStaleRoomJoinError, participantsCount, pendingAwardsCount } from './console-page';
+ 
+ // Стейл-roomId (находка №3): комната из прошлой БД → join отказывает
+ // ACTOR_NOT_MEMBER; консоль обязана показать «комната не найдена», а не
+ // вечный «Нет соединения». NOT_FOUND — на случай будущего REST-восстановления
+ // комнаты; сетевые отказы (null) сюда не попадают.
+ describe('isStaleRoomJoinError', () => {
+   it('ACTOR_NOT_MEMBER и NOT_FOUND → true', () => {
+     expect(isStaleRoomJoinError('ACTOR_NOT_MEMBER')).toBe(true);
+     expect(isStaleRoomJoinError('NOT_FOUND')).toBe(true);
+   });
+ 
+   it('прочие коды и null (сеть) → false', () => {
+     expect(isStaleRoomJoinError('ROOM_NOT_ACTIVE')).toBe(false);
+     expect(isStaleRoomJoinError('SESSION_INVALID')).toBe(false);
+     expect(isStaleRoomJoinError(null)).toBe(false);
+   });
+ });
++
++const member = (role: RosterEntry['role']): RosterEntry => ({
++  identityId: '0f8fad5b-d9cb-469f-a165-70867728950e',
++  displayName: 'Ёж-88',
++  role,
++});
++
++// Знаменатель разбора «не успели» в reveal (бриф T9): считаем только
++// участников — организатор/наблюдатель в квиз не играют.
++describe('participantsCount', () => {
++  it('считает только role participant', () => {
++    const members: RosterEntry[] = [
++      member('organizer'),
++      member('participant'),
++      member('spectator'),
++      member('participant'),
++    ];
++    expect(participantsCount(members)).toBe(2);
++  });
++
++  it('пустой ростер → 0', () => {
++    expect(participantsCount([])).toBe(0);
++  });
++});
++
++const award = (status: AwardResponse['status']): AwardResponse => ({
++  id: '0f8fad5b-d9cb-469f-a165-70867728950e',
++  roomId: '11111111-1111-4111-8111-111111111111',
++  prizeId: null,
++  winnerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
++  status,
++  sourceAppId: 'quiz',
++  createdAt: '2026-10-20T10:00:00.000Z',
++  fulfilledAt: null,
++  revokedAt: null,
++});
++
++// Подсказка экрана «Квиз окончен» (бриф T9, дизайн п. 18): невручённые =
++// статус AWARDED; вручённые/отозванные подсказку не порождают.
++describe('pendingAwardsCount', () => {
++  it('считает только AWARDED', () => {
++    const awards: AwardResponse[] = [award('AWARDED'), award('FULFILLED'), award('REVOKED'), award('AWARDED')];
++    expect(pendingAwardsCount(awards)).toBe(2);
++  });
++
++  it('нет наград → 0 (подсказки нет)', () => {
++    expect(pendingAwardsCount([])).toBe(0);
++  });
++});
+diff --git a/apps/web/src/pages/host/console-page.tsx b/apps/web/src/pages/host/console-page.tsx
+index 1084734..a25cb16 100644
+--- a/apps/web/src/pages/host/console-page.tsx
++++ b/apps/web/src/pages/host/console-page.tsx
+@@ -1,17 +1,18 @@
+ import { useEffect, useMemo, useState } from 'react';
+ import { useNavigate } from 'react-router-dom';
+ import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
++import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
+ import { QUIZ_APP_ID } from '@mymozhem/app-quiz';
+ import { ApiError } from '../../api/api-error';
+-import { completeRoom } from '../../api/endpoints';
+-import { ConnectionBanner } from '../../components/connection-banner';
++import { completeRoom, listRewards } from '../../api/endpoints';
++import { Logo } from '../../components/logo';
+ import { Winners } from '../../components/winners';
+ import { HOST_NEW_PATH } from '../../routes';
+ import { SessionStore } from '../../state/session';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { useRoomFeed } from '../../state/use-room-feed';
+ import { AwardsPanel } from './awards-panel';
+ import { hostClient, hostSession } from './host-session';
+ import { MembersPanel } from './members-panel';
+ import { PrizesPanel } from './prizes-panel';
+ import { QuizControls } from './quiz-controls';
+@@ -22,31 +23,45 @@ import { QuizControls } from './quiz-controls';
+ const commandErrorText = (e: unknown): string => {
+   if (e instanceof ApiError) return `Команда не выполнена (${e.code}).`;
+   return 'Ошибка сети. Команда не выполнена.';
+ };
+ 
+ // Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
+ // ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
+ export const isStaleRoomJoinError = (code: string | null): boolean =>
+   code === 'ACTOR_NOT_MEMBER' || code === 'NOT_FOUND';
+ 
+-// Консоль ведущего (бриф Task 14): код комнаты крупно + копируемые ссылки,
+-// баннер соединения, пульт квиза по проекции лога. Переиспользует hostSession/
+-// hostClient Task 13 — второй SessionStore на host-флоу не заводим.
++// Знаменатель разбора «не успели» и «N из M ответили» (бриф T9): играют
++// только participant — организатор и наблюдатели в счётчик не входят.
++export const participantsCount = (members: RosterEntry[]): number =>
++  members.filter((m) => m.role === 'participant').length;
++
++// Невручённые награды — статус AWARDED (FULFILLED/REVOKED терминальны,
++// REQ-RWD-007). Подсказка экрана «Квиз окончен» — только при них (п. 18).
++export const pendingAwardsCount = (awards: AwardResponse[]): number =>
++  awards.filter((a) => a.status === 'AWARDED').length;
++
++// Консоль ведущего (бриф T9, дизайн §5.3): каркас «пульт ведущего» —
++// полоса комнаты (логотип, связь, код) → hero текущего момента с главной
++// кнопкой (QuizControls) → секции (приглашения, панели) → тихая
++// «Завершить событие» внизу. Переиспользует hostSession/hostClient
++// Task 13 — второй SessionStore на host-флоу не заводим.
+ export function ConsolePage() {
+   const navigate = useNavigate();
+   // roomId/code — из localStorage, меняться за жизнь страницы не могут.
+   const [roomId] = useState<string | null>(() => SessionStore.loadHostRoomId());
+   const [roomCode] = useState<string | null>(() => SessionStore.loadHostRoomCode());
+   const [commandError, setCommandError] = useState<string | null>(null);
+   const [copied, setCopied] = useState<string | null>(null);
+   const [completing, setCompleting] = useState(false);
++  // null — не загружены/ошибка: подсказки нет (п. 18 — только факт невручённых).
++  const [pendingAwards, setPendingAwards] = useState<number | null>(null);
+ 
+   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
+   // refresh и сам разведёт на console или setup.
+   useEffect(() => {
+     if (!roomId || !hostSession.getAccessToken()) navigate('/host', { replace: true });
+   }, [roomId, navigate]);
+ 
+   const binding = useRoomBinding(roomId, hostSession);
+   const feed = useRoomFeed(roomId, hostClient, binding.events);
+ 
+@@ -73,20 +88,49 @@ export function ConsolePage() {
+         appId = CORE_EVENTS['room.activated'].schema.parse(e.payload).appId;
+       }
+     }
+     return appId;
+   }, [binding.events]);
+ 
+   // Терминальный статус: deriveRoomStatus уже отразил completed/cancelled из
+   // лога; панели в терминале глушим (сервер и так отказал бы, но зря не даём).
+   const terminal = feed.status === 'COMPLETED' || feed.status === 'CANCELLED';
+ 
++  // Экран «Квиз окончен» живёт при quiz.finished && ACTIVE (бриф T9 Step 5).
++  const quizFinishedLive = feed.quiz.finished && feed.status === 'ACTIVE';
++
++  // Рефетч-триггер наград: публичные rewards.* (awarded/fulfilled/revoked —
++  // REQ-SEC-009, payload только id). Счётчик событий, а не последнее событие:
++  // переход quizFinishedLive с quiz.game.finished последним тоже должен
++  // загрузить список.
++  const rewardsEventCount = useMemo(
++    () => binding.events.filter((e) => e.type.startsWith('rewards.')).length,
++    [binding.events],
++  );
++
++  // Невручённые награды для подсказки «Квиз окончен» — тем же путём, что
++  // AwardsPanel (listRewards); грузим только пока экран показан. Best effort:
++  // ошибка → null → подсказки нет, кнопка «Завершить событие» не блокируется
++  // невручёнными наградами (REQ-RWD-009).
++  useEffect(() => {
++    if (!roomId || !quizFinishedLive) return;
++    let stale = false;
++    listRewards(hostClient, roomId)
++      .then((r) => {
++        if (!stale) setPendingAwards(pendingAwardsCount(r.awards));
++      })
++      .catch(() => {});
++    return () => {
++      stale = true;
++    };
++  }, [roomId, quizFinishedLive, rewardsEventCount]);
++
+   const runCommand = (type: string, payload: Record<string, unknown>) => {
+     setCommandError(null);
+     void binding
+       .publish(type, payload)
+       .catch((e: unknown) => setCommandError(commandErrorText(e)));
+   };
+ 
+   // «Завершить событие» (бриф Task 15): confirm() — переход терминален и
+   // необратим (REQ-RT-005), случайный клик не должен гасить событие. Статус
+   // COMPLETED приедет core.room.completed в лог — deriveRoomStatus поднимет его
+@@ -106,100 +150,150 @@ export function ConsolePage() {
+     // просто не подтверждаем — текст ссылки остаётся виден рядом с кнопкой.
+     void navigator.clipboard
+       ?.writeText(`${window.location.origin}${path}`)
+       .then(() => setCopied(key))
+       .catch(() => {});
+   };
+ 
+   // Все хуки выше; дальше — только рендер-ветки.
+   if (!roomId) {
+     return (
+-      <main>
+-        <p>Переход…</p>
++      <main className="console-page">
++        <p className="console-note">Переход…</p>
+       </main>
+     );
+   }
+ 
++  // «Комната не найдена» — карточка по мокапу console-empty-long-errors-v2.
+   if (roomGone) {
+     return (
+-      <main>
+-        <h1>Комната не найдена</h1>
+-        <p>Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.</p>
+-        <p>
+-          <a href={HOST_NEW_PATH}>К настройке комнаты</a>
+-        </p>
++      <main className="console-page">
++        <div className="console-lost">
++          <div className="console-lost-title">Комната не найдена</div>
++          <p className="console-lost-sub">
++            Сохранённая комната больше не существует (стенд был пересоздан). Создайте новую.
++          </p>
++          <a className="btn btn-primary console-lost-btn" href={HOST_NEW_PATH}>
++            К настройке комнаты
++          </a>
++        </div>
+       </main>
+     );
+   }
+ 
+   return (
+-    <main>
+-      <ConnectionBanner state={binding.connectionState} />
+-      <h1>Консоль ведущего</h1>
+-      {roomCode ? (
+-        <section>
+-          {/* Не router-Link: one-shot join в play/screen не перезапускается на
+-              смену :code внутри SPA — ссылки именно для копирования наружу. */}
+-          <p className="room-code">
+-            Код комнаты: <strong>{roomCode}</strong>
+-          </p>
+-          <ul>
+-            <li>
+-              Игроки: <code>{`${window.location.origin}/play/${roomCode}`}</code>{' '}
+-              <button type="button" onClick={() => copyLink('play', `/play/${roomCode}`)}>
+-                Копировать
+-              </button>
+-            </li>
+-            <li>
+-              Экран: <code>{`${window.location.origin}/screen/${roomCode}`}</code>{' '}
+-              <button type="button" onClick={() => copyLink('screen', `/screen/${roomCode}`)}>
+-                Копировать
+-              </button>
+-            </li>
+-          </ul>
+-          {copied ? <p role="status">Скопировано.</p> : null}
+-        </section>
+-      ) : null}
+-      {feed.status === 'CANCELLED' ? <p>Комната отменена.</p> : null}
+-      {feed.status === 'COMPLETED' ? <p>Событие завершено.</p> : null}
+-      {feed.status === 'ACTIVE' ? (
+-        <p>
+-          <button type="button" disabled={completing} onClick={completeEvent}>
+-            Завершить событие
+-          </button>
++    <main className="console-page">
++      {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
++          код. Sticky — статус виден при прокрутке секций. */}
++      <header className="console-strip">
++        <Logo contour="console" size="participant" />
++        <span
++          className={`console-conn${binding.connectionState === 'live' ? '' : ' off'}`}
++          role="status"
++        >
++          <span className="console-conn-dot" />
++          {binding.connectionState === 'live'
++            ? 'на связи'
++            : binding.connectionState === 'connecting'
++              ? 'подключение…'
++              : 'нет связи'}
++        </span>
++        {roomCode ? <span className="console-room-code">{roomCode}</span> : null}
++      </header>
++      {/* Баннер обрыва — по мокапу console-empty-long-errors-v2; reconnect
++          самолечится перефолдом, но ведущий обязан видеть обрыв явно. */}
++      {binding.connectionState === 'disconnected' ? (
++        <p role="status" className="console-error-banner">
++          Нет соединения — переподключаемся…
++          <span className="console-error-sub">
++            Таймер и счётчики могут отставать. Ничего нажимать не нужно.
++          </span>
+         </p>
+       ) : null}
++      {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
++      {feed.status === 'COMPLETED' ? <p className="console-note">Событие завершено.</p> : null}
+       {/* Пульт квиза — только в quiz-комнате: в lottery-комнате его команды
+           гарантированно отклонит модуль (pin из room.activated, та же
+           дисциплина, что у кнопки «Разыграть» в PrizesPanel). */}
+       {pinnedAppId === QUIZ_APP_ID ? (
+         <QuizControls
+           events={binding.events}
+           quiz={feed.quiz}
+           names={feed.names}
+           appSettings={binding.appSettings}
+           disabled={terminal}
++          participants={participantsCount(feed.members)}
++          pendingAwards={pendingAwards}
++          completing={completing}
++          onCompleteEvent={completeEvent}
+           onCommand={runCommand}
+           commandError={commandError}
+         />
+       ) : null}
+-      <MembersPanel
+-        roomId={roomId}
+-        members={feed.members}
+-        names={feed.names}
+-        disabled={terminal}
+-        onChanged={feed.refetchMembers}
+-      />
+-      <PrizesPanel
+-        roomId={roomId}
+-        pinnedAppId={pinnedAppId}
+-        disabled={terminal}
+-        events={binding.events}
+-        publish={binding.publish}
+-      />
+-      {/* Результат розыгрыша приезжает публичным draw.completed — та же
+-          проекция, что на /screen; консоль только триггерит draw.run. */}
+-      <Winners draws={feed.lottery.draws} names={feed.names} />
+-      <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
++      <div className="console-sections">
++        {roomCode ? (
++          <section className="console-card">
++            <h3 className="console-card-title">Приглашения</h3>
++            {/* Не router-Link: one-shot join в play/screen не перезапускается на
++                смену :code внутри SPA — ссылки именно для копирования наружу. */}
++            <div className="console-link-row">
++              Игроки: <code>{`${window.location.origin}/play/${roomCode}`}</code>{' '}
++              <button
++                type="button"
++                className="btn btn-secondary console-copy"
++                onClick={() => copyLink('play', `/play/${roomCode}`)}
++              >
++                Копировать
++              </button>
++            </div>
++            <div className="console-link-row">
++              Экран: <code>{`${window.location.origin}/screen/${roomCode}`}</code>{' '}
++              <button
++                type="button"
++                className="btn btn-secondary console-copy"
++                onClick={() => copyLink('screen', `/screen/${roomCode}`)}
++              >
++                Копировать
++              </button>
++            </div>
++            {copied ? (
++              <p role="status" className="console-muted">
++                Скопировано.
++              </p>
++            ) : null}
++          </section>
++        ) : null}
++        <MembersPanel
++          roomId={roomId}
++          members={feed.members}
++          names={feed.names}
++          disabled={terminal}
++          onChanged={feed.refetchMembers}
++        />
++        <PrizesPanel
++          roomId={roomId}
++          pinnedAppId={pinnedAppId}
++          disabled={terminal}
++          events={binding.events}
++          publish={binding.publish}
++        />
++        {/* Результат розыгрыша приезжает публичным draw.completed — та же
++            проекция, что на /screen; консоль только триггерит draw.run. */}
++        <Winners draws={feed.lottery.draws} names={feed.names} />
++        <AwardsPanel roomId={roomId} names={feed.names} events={binding.events} />
++      </div>
++      {/* Тихая «Завершить событие» внизу (бриф T9, дизайн п. 10). На экране
++          «Квиз окончен» её роль играет главная кнопка hero — дубль не нужен.
++          Не блокируется невручёнными наградами (REQ-RWD-009). */}
++      {feed.status === 'ACTIVE' && !feed.quiz.finished ? (
++        <button
++          type="button"
++          className="btn btn-quiet console-finish"
++          disabled={completing}
++          onClick={completeEvent}
++        >
++          Завершить событие
++        </button>
++      ) : null}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/pages/host/open-question-label.ts b/apps/web/src/pages/host/open-question-label.ts
+new file mode 100644
+index 0000000..dd08183
+--- /dev/null
++++ b/apps/web/src/pages/host/open-question-label.ts
+@@ -0,0 +1,9 @@
++// Подпись главной кнопки reveal (бриф T9, Review Focus 4): номер 1-based для
++// ведущего (payload команды остаётся 0-based — перевод только в подписи).
++// Длительность «(N с)» — только при числовом durationSec; «без лимита»
++// (null) кнопку не утяжеляет. Отдельный модуль, а не quiz-controls.tsx:
++// чистая функция рядом со страницей — прецедент host-gate-flow.ts.
++export const openQuestionLabel = (index: number, durationSec: number | null): string =>
++  durationSec === null
++    ? `Открыть вопрос ${index + 1}`
++    : `Открыть вопрос ${index + 1} (${durationSec} с)`;
+diff --git a/apps/web/src/pages/host/quiz-controls.spec.ts b/apps/web/src/pages/host/quiz-controls.spec.ts
+index 6ede08b..e87719d 100644
+--- a/apps/web/src/pages/host/quiz-controls.spec.ts
++++ b/apps/web/src/pages/host/quiz-controls.spec.ts
+@@ -1,13 +1,14 @@
+ import { describe, expect, it } from 'vitest';
+ import type { ProjectedEvent } from '@mymozhem/sdk';
+ import { initialQuizState } from '@mymozhem/app-quiz';
++import { openQuestionLabel } from './open-question-label';
+ import { answersCount, nextQuestionIndex } from './quiz-controls';
+ 
+ const HOST = '11111111-1111-4111-8111-111111111111';
+ const PLAYER_1 = '0f8fad5b-d9cb-469f-a165-70867728950e';
+ const PLAYER_2 = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+ 
+ // Счётчик ответов консоли строится ТОЛЬКО по публичным quiz.answer.accepted:
+ // answer.submitted — module-private (манифест app-quiz) и до клиента не доезжает,
+ // поэтому любая логика на нём была бы мёртвой.
+ describe('answersCount', () => {
+@@ -43,20 +44,33 @@ describe('answersCount', () => {
+       { type: 'quiz.answer.accepted', payload: { questionIndex: 0, actorId: PLAYER_2 }, actorId: null },
+     ];
+     expect(answersCount(events, 0)).toBe(1);
+   });
+ 
+   it('нет accepted — 0', () => {
+     expect(answersCount([], 0)).toBe(0);
+   });
+ });
+ 
++// Подпись главной кнопки reveal (бриф T9, Review Focus 4): номер 1-based для
++// ведущего; длительность «(N с)» — только при числовом durationSec, «без
++// лимита» (null) кнопку не утяжеляет.
++describe('openQuestionLabel', () => {
++  it('числовая длительность → «(30 с)» в скобках', () => {
++    expect(openQuestionLabel(2, 30)).toBe('Открыть вопрос 3 (30 с)');
++  });
++
++  it('null («без лимита») → без суффикса', () => {
++    expect(openQuestionLabel(2, null)).toBe('Открыть вопрос 3');
++  });
++});
++
+ // N следующего вопроса: до первого open — 0, дальше currentQuestion + 1
+ // (бриф Task 14; это же payload questionIndex команды quiz.question.opened).
+ describe('nextQuestionIndex', () => {
+   it('вопрос ещё не открывался (currentQuestion === null) → 0', () => {
+     expect(nextQuestionIndex(initialQuizState())).toBe(0);
+   });
+ 
+   it('текущий вопрос 0 → следующий 1', () => {
+     expect(nextQuestionIndex({ ...initialQuizState(), currentQuestion: 0 })).toBe(1);
+   });
+diff --git a/apps/web/src/pages/host/quiz-controls.tsx b/apps/web/src/pages/host/quiz-controls.tsx
+index deaa650..00045ff 100644
+--- a/apps/web/src/pages/host/quiz-controls.tsx
++++ b/apps/web/src/pages/host/quiz-controls.tsx
+@@ -1,149 +1,404 @@
+-import { useMemo } from 'react';
++import { useEffect, useMemo, useState } from 'react';
+ import type { ProjectedEvent } from '@mymozhem/sdk';
+-import { gameFinishedPayload, quizSettingsSchema, type QuizState } from '@mymozhem/app-quiz';
+-import { Standings } from '../../components/standings';
++import {
++  gameFinishedPayload,
++  questionClosedPayload,
++  questionRevealedPayload,
++  quizSettingsSchema,
++  type QuizState,
++} from '@mymozhem/app-quiz';
++import { RaceTracks } from '../../components/race-tracks';
++import { displayNameOf } from '../../components/roster-names';
+ import { projectAnsweredActors } from '../../state/projections';
++import { lastRoundGains } from '../../state/race-tracks';
++import { formatTimer, useQuestionTimer } from '../../state/question-timer';
++import { openQuestionLabel } from './open-question-label';
+ 
+ // N следующего вопроса (бриф Task 14): до первого open — 0, дальше
+ // currentQuestion + 1. То же значение уходит в payload quiz.question.opened.
+ export const nextQuestionIndex = (quiz: QuizState): number =>
+   quiz.currentQuestion === null ? 0 : quiz.currentQuestion + 1;
+ 
+ // Счётчик ответов — distinct actorId среди ПУБЛИЧНЫХ quiz.answer.accepted
+ // текущего вопроса. quiz.answer.submitted — module-private (манифест app-quiz),
+ // до клиента он не доезжает, поэтому строить счётчик на нём нельзя; fold тот
+ // же, что у projectAnsweredActors — переиспользуем его, а не дублируем цикл.
+ export const answersCount = (events: ProjectedEvent[], questionIndex: number): number =>
+   projectAnsweredActors(events, questionIndex).size;
+ 
+ interface QuizControlsProps {
+   events: ProjectedEvent[];
+   quiz: QuizState;
+   names: Map<string, string>;
+   // Публичная проекция appSettings из snapshot (REQ-CORE-008): нужна для
+-  // длины колоды — кнопку «Открыть вопрос» глушим, когда вопросы кончились.
++  // длины колоды и текстов вопросов — кнопку «Открыть вопрос» глушим, когда
++  // вопросы кончились.
+   appSettings: Record<string, unknown>;
+   // Терминальный статус комнаты: сервер отклонит любую команду в не-ACTIVE
+   // комнате — отсекаем заранее (та же дисциплина, что у Members/Prizes).
+   disabled: boolean;
++  // Число участников ростера (role participant) — знаменатель «не успели»
++  // и «N из M ответили»; считает страница (participantsCount).
++  participants: number;
++  // Невручённые награды для подсказки «Квиз окончен»; null — ещё не загружены
++  // (подсказки нет, дизайн п. 18).
++  pendingAwards: number | null;
++  // «Завершить событие» — главная кнопка экрана «Квиз окончен» (дизайн §5.3);
++  // сама команда (completeRoom + confirm) живёт на странице.
++  completing: boolean;
++  onCompleteEvent: () => void;
+   // Команды ведущего (clientInitiated по манифесту): quiz.question.opened /
+   // quiz.question.closed / quiz.game.finish. Ошибку publish показывает страница.
+   onCommand: (type: string, payload: Record<string, unknown>) => void;
+   commandError: string | null;
+ }
+ 
+-// Пульт ведущего квиза (бриф Task 14): open/close/finish + счётчик ответов +
+-// табло. Кнопок reveal нет — question.revealed и game.finished коммитит модуль
+-// после close/finish, консоль только потребляет публичные события.
++// Пульт ведущего квиза (бриф T9, дизайн §5.3 «пульт ведущего»): иерархия
++// «статус → текущий момент → следующее действие». Hero = момент + действия;
++// ростер reveal — дорожками (RaceTracks, contour console) с приростом из
++// lastRoundGains. Кнопок reveal нет — question.revealed и game.finished
++// коммитит модуль после close/finish, консоль только потребляет публичные
++// события. Разметка/значения — мокапы console-phone-landscape-v2,
++// console-reveal-final-button, console-quiz-finished.
+ export function QuizControls({
+   events,
+   quiz,
+   names,
+   appSettings,
+   disabled,
++  participants,
++  pendingAwards,
++  completing,
++  onCompleteEvent,
+   onCommand,
+   commandError,
+ }: QuizControlsProps) {
+   const current = quiz.currentQuestion;
+   const next = nextQuestionIndex(quiz);
+ 
+-  // Длина колоды — из публичной проекции appSettings: тот же safeParse по ключу
+-  // questions, что на play-page (correctAnswers сюда структурно не доезжают).
++  // «ещё N — развернуть» (I-5): toggle полного ростера — локальное состояние;
++  // между раундами (смена currentQuestion) схлопывается к топ-4.
++  const [expanded, setExpanded] = useState(false);
++  useEffect(() => {
++    setExpanded(false);
++  }, [current]);
++
++  // Длина колоды и тексты — из публичной проекции appSettings: тот же
++  // safeParse по ключу questions, что на play-page (correctAnswers сюда
++  // структурно не доезжают). durationSec материализуется дефолтом схемы (30).
+   // Хук до early return ниже — хуки безусловны.
+   const questions = useMemo(() => {
+     const parsed = quizSettingsSchema.shape.questions.safeParse(appSettings.questions);
+     return parsed.success ? parsed.data : [];
+   }, [appSettings]);
+   // Колоды хватило: следующего вопроса нет — open глушим, модуль всё равно
+   // отклонил бы индекс вне диапазона.
+   const deckExhausted = next >= questions.length;
+ 
+   // Reveal текущего вопроса: revealed-событие позже close для того же индекса
+-  // (тот же критерий, что в play/screen).
+-  const revealed = useMemo(() => {
+-    let revealIndex = -1;
+-    let closeIndex = -1;
+-    events.forEach((e, i) => {
+-      const qi = (e.payload as { questionIndex?: unknown }).questionIndex;
+-      if (qi !== current) return;
+-      if (e.type === 'quiz.question.revealed') revealIndex = i;
+-      else if (e.type === 'quiz.question.closed') closeIndex = i;
+-    });
+-    return revealIndex > closeIndex;
++  // (тот же критерий, что в play/screen). Payload несёт correctIndex и
++  // awarded — разбор «верно/неверно/не успели» и плашка ответа.
++  const revealPayload = useMemo(() => {
++    let revealIdx = -1;
++    let closeIdx = -1;
++    for (let i = 0; i < events.length; i++) {
++      const e = events[i];
++      if (e.type === 'quiz.question.revealed') {
++        if (questionRevealedPayload.parse(e.payload).questionIndex === current) revealIdx = i;
++      } else if (e.type === 'quiz.question.closed') {
++        if (questionClosedPayload.parse(e.payload).questionIndex === current) closeIdx = i;
++      }
++    }
++    if (revealIdx <= closeIdx) return null;
++    return questionRevealedPayload.parse(events[revealIdx].payload);
+   }, [events, current]);
++  const revealed = revealPayload !== null;
+ 
+   const answered = useMemo(
+     () => (current !== null ? answersCount(events, current) : 0),
+     [events, current],
+   );
+ 
++  // Длительности — только schema-parse выше (дефолт 30 материализован схемой),
++  // без raw JSON и без «?? 30»: вопроса нет в колоде → null → таймера/суффикса
++  // нет вовсе.
++  const durationSec = current !== null ? (questions[current]?.durationSec ?? null) : null;
++  const nextDurationSec = questions[next]?.durationSec ?? null;
++  // Таймер — только в приёме ответов (дизайн §6); «без лимита» (null) → null.
++  const timer = useQuestionTimer(quiz.accepting ? durationSec : null, quiz.openedAt);
++
++  // Прирост последнего раунда — из перефолженного лога (дизайн §7),
++  // reconnect-safe; имена — displayNameOf с fallback «Гость» внутри.
++  const gains = useMemo(() => lastRoundGains(events), [events]);
++  const trackEntries = useMemo(
++    () =>
++      Object.entries(quiz.totals).map(([actorId, total]) => ({
++        actorId,
++        name: displayNameOf(names, actorId),
++        total,
++        gain: gains[actorId] ?? 0,
++      })),
++    [quiz.totals, names, gains],
++  );
++
+   // Финальное табло: места из payload game.finished (их посчитал модуль),
+-  // промежуточное — totals проекции.
++  // fallback — totals проекции. На экране «Квиз окончен» дорожки без
++  // золотой дельты (мокап console-quiz-finished): прирост — атрибут
++  // reveal-момента, не финала.
+   const finalStandings = useMemo(() => {
+     const finishedEvent = [...events].reverse().find((e) => e.type === 'quiz.game.finished');
+     return finishedEvent ? gameFinishedPayload.parse(finishedEvent.payload).standings : undefined;
+   }, [events]);
++  const finalEntries = useMemo(() => {
++    const rows =
++      finalStandings ?? Object.entries(quiz.totals).map(([actorId, total]) => ({ actorId, total }));
++    return rows.map((r) => ({
++      actorId: r.actorId,
++      name: displayNameOf(names, r.actorId),
++      total: r.total,
++      gain: 0,
++    }));
++  }, [finalStandings, quiz.totals, names]);
++
++  // confirm(): game.finish необратим на сервере (модуль коммитит
++  // game.finished) — случайный клик не должен гасить квиз; та же
++  // дисциплина, что у «Завершить событие» на console-page.
++  const finishQuiz = () => {
++    if (window.confirm('Завершить квиз? Это действие необратимо.')) {
++      onCommand('quiz.game.finish', {});
++    }
++  };
+ 
++  // «Квиз окончен» (бриф T9 Step 5, дизайн п. 10/§5.3): событие живо, квиз
++  // окончен. Главная кнопка — «Завершить событие»; подсказка невручённых
++  // наград — только если они есть (п. 18); кнопка ими НЕ блокируется
++  // (REQ-RWD-009: вручение легально и после завершения).
+   if (quiz.finished) {
++    const played = current !== null ? current + 1 : 0;
++    const allPlayed = questions.length > 0 && played >= questions.length;
+     return (
+-      <section>
+-        <h2>Квиз завершён</h2>
+-        <Standings standings={finalStandings} totals={quiz.totals} names={names} />
+-      </section>
++      <>
++        <section className="console-hero">
++          <div className="console-moment">
++            <div className="console-q-label">Квиз окончен</div>
++            <div className="console-fh-title">
++              {allPlayed
++                ? `Все ${questions.length} вопросов сыграны`
++                : `Сыграно вопросов: ${played} из ${questions.length}`}
++            </div>
++            {pendingAwards !== null && pendingAwards > 0 ? (
++              <p className="console-fh-sub">
++                Осталось вручить наград: {pendingAwards}. Когда всё раздано — завершите событие.
++              </p>
++            ) : null}
++          </div>
++          {/* В терминале (событие уже завершено/отменено) действий нет —
++              статус показывает заметка страницы. */}
++          {!disabled ? (
++            <div className="console-actions">
++              <button
++                type="button"
++                className="btn btn-primary"
++                disabled={completing}
++                onClick={onCompleteEvent}
++              >
++                Завершить событие
++              </button>
++              <p className="console-fh-note">Комната останется доступной до завершения.</p>
++            </div>
++          ) : null}
++        </section>
++        {commandError ? (
++          <p role="alert" className="console-error">
++            {commandError}
++          </p>
++        ) : null}
++        <section className="console-card">
++          <h3 className="console-card-title">Итоговое табло</h3>
++          {finalEntries.length > 0 ? (
++            <div className="console-tracks">
++              <RaceTracks entries={finalEntries} contour="console" topN={expanded ? undefined : 4} />
++              {finalEntries.length > 4 ? (
++                <button
++                  type="button"
++                  className="console-tracks-toggle"
++                  onClick={() => setExpanded((v) => !v)}
++                >
++                  {expanded ? 'Свернуть' : `ещё ${finalEntries.length - 4} — развернуть`}
++                </button>
++              ) : null}
++            </div>
++          ) : (
++            <p className="console-muted">Очков пока нет.</p>
++          )}
++        </section>
++      </>
+     );
+   }
+ 
++  // Разбор раунда (мокап console-reveal-final-button): верно = awarded
++  // reveal-события; неверно = ответили, но не попали; не успели = участники
++  // минус ответившие. Clamp на 0 — отображение не уходит в минус, даже если
++  // ростер отстаёт от лога.
++  const correctCount = revealPayload?.awarded.length ?? 0;
++  const wrongCount = Math.max(answered - correctCount, 0);
++  const missedCount = Math.max(participants - answered, 0);
++  const questionText = current !== null ? (questions[current]?.text ?? null) : null;
++  // correctIndex опционален на проводе (вопрос без сконфигурированного ответа) —
++  // тогда плашки «Правильный ответ» нет вовсе.
++  const correctIndex = revealPayload?.correctIndex;
++  const correctText =
++    current !== null && correctIndex !== undefined
++      ? (questions[current]?.options[correctIndex] ?? null)
++      : null;
++
+   return (
+-    <section>
+-      <h2>Ведение квиза</h2>
+-      {current !== null ? (
+-        <p>
+-          {quiz.accepting
+-            ? `Идёт вопрос ${current + 1} — приём ответов открыт.`
+-            : `Вопрос ${current + 1} закрыт.`}{' '}
+-          Ответов: {answered}
++    <>
++      <section className="console-hero">
++        <div className="console-moment">
++          {current === null ? (
++            <>
++              <div className="console-q-label">Квиз не начат</div>
++              <p className="console-fh-sub">
++                В колоде {questions.length} вопросов. Игроки видят экран ожидания.
++              </p>
++            </>
++          ) : (
++            <>
++              <div className="console-q-label">
++                Вопрос {current + 1} из {questions.length} — {quiz.accepting ? 'открыт' : 'закрыт'}
++              </div>
++              {questionText ? <div className="console-q-text">{questionText}</div> : null}
++              {quiz.accepting ? (
++                <div className="console-live-row">
++                  {timer !== null ? (
++                    <div className="console-timer">
++                      {formatTimer(timer)}
++                      <small>осталось</small>
++                    </div>
++                  ) : null}
++                  <div className="console-answered">
++                    <b>{answered}</b> из {participants} ответили
++                    <div className="console-answered-bar">
++                      <i
++                        style={{
++                          width: `${participants > 0 ? Math.min((answered / participants) * 100, 100) : 0}%`,
++                        }}
++                      />
++                    </div>
++                  </div>
++                </div>
++              ) : null}
++              {revealed ? (
++                <>
++                  {correctText !== null ? (
++                    <div className="console-correct">
++                      <span className="console-ca-label">Правильный ответ</span>
++                      <span className="console-ca-value">{correctText}</span>
++                    </div>
++                  ) : null}
++                  <div className="console-round-stats">
++                    <div>
++                      <b>{correctCount}</b>
++                      <span>верно</span>
++                    </div>
++                    <div>
++                      <b>{wrongCount}</b>
++                      <span>неверно</span>
++                    </div>
++                    <div>
++                      <b>{missedCount}</b>
++                      <span>не успели</span>
++                    </div>
++                  </div>
++                </>
++              ) : null}
++            </>
++          )}
++        </div>
++        <div className="console-actions">
++          {quiz.accepting && current !== null ? (
++            <>
++              <button
++                type="button"
++                className="btn btn-primary"
++                disabled={disabled}
++                onClick={() => onCommand('quiz.question.closed', { questionIndex: current })}
++              >
++                Закрыть вопрос
++              </button>
++              {/* disabled с причиной текстом рядом (дизайн п. 15): второй open
++                  до close модуль отклонит, но и нажать его зря не даём. */}
++              <button type="button" className="btn btn-secondary" disabled>
++                {openQuestionLabel(next, nextDurationSec)}{' '}
++                <span className="console-btn-note">— сначала закройте текущий</span>
++              </button>
++            </>
++          ) : deckExhausted && current !== null ? (
++            /* Колода кончилась: по иерархии «следующее действие» остаётся
++               одно — завершить квиз, он и становится главной кнопкой. */
++            <button
++              type="button"
++              className="btn btn-primary"
++              disabled={disabled}
++              onClick={finishQuiz}
++            >
++              Завершить квиз
++            </button>
++          ) : (
++            <>
++              {/* Подпись 1-based для ведущего (openQuestionLabel), payload
++                  остаётся 0-based (questionIndex: next) — так ждёт модуль. */}
++              <button
++                type="button"
++                className="btn btn-primary"
++                disabled={disabled || deckExhausted}
++                onClick={() => onCommand('quiz.question.opened', { questionIndex: next })}
++              >
++                {openQuestionLabel(next, nextDurationSec)}
++              </button>
++              {current !== null ? (
++                <button
++                  type="button"
++                  className="btn btn-quiet"
++                  disabled={disabled}
++                  onClick={finishQuiz}
++                >
++                  Завершить квиз досрочно
++                </button>
++              ) : null}
++            </>
++          )}
++        </div>
++      </section>
++      {commandError ? (
++        <p role="alert" className="console-error">
++          {commandError}
+         </p>
+       ) : null}
+-      <p>
+-        {/* disabled, пока accepting: второй open до close модуль отклонит,
+-            но и не даём ведущему нажать его зря; deckExhausted — вопросы
+-            кончились. Подпись 1-based для ведущего (как статус-строка выше),
+-            а payload остаётся 0-based (questionIndex: next) — так ждёт модуль. */}
+-        <button
+-          type="button"
+-          disabled={disabled || quiz.accepting || deckExhausted}
+-          onClick={() => onCommand('quiz.question.opened', { questionIndex: next })}
+-        >
+-          Открыть вопрос {next + 1}
+-        </button>{' '}
+-        <button
+-          type="button"
+-          disabled={disabled || !quiz.accepting || current === null}
+-          onClick={() => {
+-            if (current !== null) onCommand('quiz.question.closed', { questionIndex: current });
+-          }}
+-        >
+-          Закрыть вопрос
+-        </button>{' '}
+-        {/* confirm(): game.finish необратим на сервере (модуль коммитит
+-            game.finished) — случайный клик не должен гасить квиз; та же
+-            дисциплина, что у «Завершить событие» на console-page. */}
+-        <button
+-          type="button"
+-          disabled={disabled}
+-          onClick={() => {
+-            if (window.confirm('Завершить квиз? Это действие необратимо.')) {
+-              onCommand('quiz.game.finish', {});
+-            }
+-          }}
+-        >
+-          Завершить квиз
+-        </button>
+-      </p>
+-      {commandError ? <p role="alert">{commandError}</p> : null}
+-      {/* После reveal — промежуточное табло: именно тогда у ведущего есть что
+-          прокомментировать вслух; totals приехали в payload revealed. */}
+-      {current !== null && revealed ? <Standings totals={quiz.totals} names={names} /> : null}
+-    </section>
++      {/* После reveal — промежуточное табло дорожками: именно тогда у ведущего
++          есть что прокомментировать вслух; totals приехали в payload revealed. */}
++      {current !== null && revealed ? (
++        <section className="console-card">
++          <h3 className="console-card-title">Участники — {participants}</h3>
++          {trackEntries.length > 0 ? (
++            <div className="console-tracks">
++              <RaceTracks entries={trackEntries} contour="console" topN={expanded ? undefined : 4} />
++              {trackEntries.length > 4 ? (
++                <button
++                  type="button"
++                  className="console-tracks-toggle"
++                  onClick={() => setExpanded((v) => !v)}
++                >
++                  {expanded ? 'Свернуть' : `ещё ${trackEntries.length - 4} — развернуть`}
++                </button>
++              ) : null}
++            </div>
++          ) : (
++            <p className="console-muted">Очков пока нет.</p>
++          )}
++        </section>
++      ) : null}
++    </>
+   );
+ }
+diff --git a/apps/web/src/styles/console.css b/apps/web/src/styles/console.css
+new file mode 100644
+index 0000000..ee52227
+--- /dev/null
++++ b/apps/web/src/styles/console.css
+@@ -0,0 +1,299 @@
++/* Светлый контур консоли ведущего (/host/console), дизайн §5.3, п. 10/11/14/18.
++   Значения перенесены из мокапов-эталонов: console-phone-landscape-v2,
++   console-reveal-final-button, console-quiz-finished,
++   console-empty-long-errors-v2; цвета — токены T4 (кроме отмеченных
++   литералов мокапов). Размещение — соседним файлом к scene.css/screen.css
++   (ruling C-2): там контуры участника и проектора, здесь — ведущего;
++   кнопочная система (.btn*) и дорожки (.race-tracks) — в transitions.css. */
++
++/* --- Каркас: фон, полоса комнаты, панели (п. 10/14) --- */
++.console-page {
++  min-height: 100vh;
++  min-height: 100dvh;
++  padding-bottom: 20px;
++  background: var(--console-bg);
++  color: var(--ink);
++}
++
++/* Полоса комнаты: логотип, связь, код; sticky — статус виден при прокрутке
++   секций (мокап console-phone-landscape-v2 .strip). */
++.console-strip {
++  position: sticky;
++  top: 0;
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  padding: 10px 16px;
++  background: var(--console-strip);
++  font-size: 14px;
++}
++.console-conn {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  /* Литерал мокапа (--ok #2F6B4F): в токенах T4 ok-зелёного нет
++     (прецедент литерала — .play-input::placeholder в scene.css). */
++  color: #2f6b4f;
++  font-size: 13px;
++  font-weight: 700;
++}
++.console-conn.off { color: var(--error-light); }
++.console-conn-dot {
++  width: 9px;
++  height: 9px;
++  border-radius: 50%;
++  background: currentColor;
++}
++.console-room-code {
++  margin-left: auto;
++  font-weight: 700;
++  letter-spacing: 0.06em;
++}
++
++/* Баннер обрыва связи (мокап console-empty-long-errors-v2 .error-banner) */
++.console-error-banner {
++  margin: 14px 14px 0;
++  padding: 12px 16px;
++  background: var(--error-light);
++  color: var(--scene-text);
++  border-radius: 10px;
++  font-size: 14px;
++  font-weight: 700;
++  line-height: 1.4;
++}
++.console-error-sub {
++  display: block;
++  margin-top: 2px;
++  font-weight: 400;
++  font-size: 13px;
++  opacity: 0.9;
++}
++
++/* Ошибка publish-команды и служебные заметки статуса */
++.console-error {
++  margin: 0 14px 12px;
++  color: var(--error-light);
++  font-weight: 700;
++}
++.console-note { margin: 14px; color: var(--muted); }
++.console-muted { color: var(--muted); }
++
++/* --- Hero: текущий момент + действия (иерархия п. 10) --- */
++.console-hero {
++  margin: 14px;
++  padding: 18px 18px 20px;
++  background: var(--console-panel);
++  border-radius: 12px;
++}
++.console-q-label {
++  margin-bottom: 4px;
++  color: var(--muted);
++  font-size: 13px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-q-text {
++  margin-bottom: 14px;
++  font-family: var(--font-display);
++  font-size: 22px;
++  line-height: 1.25;
++}
++
++/* Игра: таймер + live-счётчик (мокап console-phone-landscape-v2 .live-row) */
++.console-live-row {
++  display: flex;
++  align-items: baseline;
++  gap: 18px;
++  margin-bottom: 16px;
++}
++.console-timer {
++  font-family: var(--font-display);
++  font-size: 52px;
++  line-height: 1;
++  font-variant-numeric: tabular-nums;
++}
++.console-timer small {
++  display: block;
++  margin-top: 4px;
++  color: var(--muted);
++  font-family: var(--font-body);
++  font-size: 12px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-answered { font-size: 15px; }
++.console-answered b { font-size: 22px; }
++.console-answered-bar {
++  width: 130px;
++  height: 6px;
++  margin-top: 6px;
++  background: var(--track-canvas-light);
++  border-radius: 3px;
++  overflow: hidden;
++}
++.console-answered-bar i {
++  display: block;
++  height: 100%;
++  background: var(--console-primary);
++  border-radius: 3px;
++}
++
++/* Reveal: ответ плашкой + разбор раунда (мокап console-reveal-final-button) */
++.console-correct {
++  margin-bottom: 14px;
++  padding: 10px 14px;
++  background: var(--console-strip);
++  border-radius: 8px;
++}
++.console-ca-label {
++  display: block;
++  color: var(--muted);
++  font-size: 12px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-ca-value {
++  display: block;
++  font-family: var(--font-display);
++  font-size: 22px;
++}
++.console-round-stats {
++  display: flex;
++  gap: 22px;
++  margin-bottom: 16px;
++  font-size: 14px;
++}
++.console-round-stats b {
++  display: block;
++  font-family: var(--font-display);
++  font-size: 30px;
++  font-weight: 400;
++  line-height: 1.1;
++}
++.console-round-stats span { color: var(--muted); font-size: 13px; }
++
++/* «Квиз окончен» (мокап console-quiz-finished) */
++.console-fh-title {
++  margin-bottom: 10px;
++  font-family: var(--font-display);
++  font-size: 26px;
++}
++.console-fh-sub {
++  margin-bottom: 16px;
++  color: var(--muted);
++  font-size: 14px;
++  line-height: 1.45;
++}
++.console-fh-note {
++  margin: 0;
++  color: var(--muted);
++  font-size: 13px;
++  text-align: center;
++}
++
++/* Действия: главная кнопка во всю ширину, тихая ниже (мокап .btn) */
++.console-actions {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++}
++.console-actions .btn { display: block; width: 100%; }
++.console-btn-note { font-weight: 400; color: var(--muted); }
++
++/* Тихие кнопки консоли приглушены (мокап .btn-quiet opacity .75);
++   :not(:disabled) — не перекрывать disabled-описание системы (.btn:disabled) */
++.console-page .btn-quiet:not(:disabled) { opacity: 0.75; font-size: 14px; }
++
++/* --- Секции: карточки панелей (мокап .section-card) --- */
++.console-sections { margin: 0 14px; }
++.console-card {
++  margin-bottom: 12px;
++  padding: 14px 16px;
++  background: var(--console-panel);
++  border-radius: 12px;
++  font-size: 14px;
++}
++.console-card-title {
++  margin: 0 0 10px;
++  color: var(--muted);
++  font-family: var(--font-body);
++  font-size: 13px;
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++}
++.console-link-row { padding: 5px 0; }
++.console-copy { padding: 6px 12px; font-size: 13px; }
++
++/* «ещё N — развернуть» (I-5): интерактивный toggle заменяет статичный
++   .tr-more, который RaceTracks рисует при topN, — внутри консольной
++   обёртки статичный скрыт, чтобы не дублировать строку. */
++.console-tracks .race-tracks .tr-more { display: none; }
++.console-tracks-toggle {
++  margin-top: 6px;
++  padding: 0;
++  background: none;
++  border: none;
++  color: var(--muted);
++  font: 13px var(--font-body);
++  cursor: pointer;
++}
++.console-tracks-toggle:focus-visible {
++  outline: 3px solid var(--console-primary);
++  outline-offset: 2px;
++}
++
++/* Тихая «Завершить событие» внизу страницы (п. 10) */
++.console-finish { display: block; width: calc(100% - 28px); margin: 0 14px; }
++
++/* «Комната не найдена» (мокап console-empty-long-errors-v2 .lost-card) */
++.console-lost {
++  margin: 14px;
++  padding: 22px 18px;
++  background: var(--console-panel);
++  border-radius: 12px;
++  text-align: center;
++}
++.console-lost-title {
++  margin-bottom: 8px;
++  font-family: var(--font-display);
++  font-size: 24px;
++}
++.console-lost-sub {
++  margin: 0 0 16px;
++  color: var(--muted);
++  font-size: 14px;
++  line-height: 1.5;
++}
++.console-lost-btn { display: inline-block; text-decoration: none; }
++
++/* --- Ландшафт-правило (п. 11): при высоте ≤400px первый экран = статус +
++   момент + главная кнопка без прокрутки — две колонки, действия справа
++   (мокап console-phone-landscape-v2 .land-grid/.actions-col) --- */
++@media (orientation: landscape) and (max-height: 400px) {
++  .console-hero {
++    display: grid;
++    grid-template-columns: 1fr 220px;
++    gap: 12px;
++    align-items: center;
++    margin: 12px;
++    padding: 14px 16px 16px;
++  }
++  .console-hero .console-q-text { font-size: 19px; margin-bottom: 10px; }
++  .console-live-row { margin-bottom: 0; gap: 16px; }
++  .console-timer { font-size: 44px; }
++  .console-correct { padding: 8px 12px; margin-bottom: 10px; }
++  .console-correct .console-ca-value { font-size: 19px; }
++  .console-round-stats { margin-bottom: 0; gap: 18px; }
++  .console-round-stats b { font-size: 24px; }
++  .console-fh-sub { margin-bottom: 0; }
++  .console-actions .btn-primary { font-size: 16px; padding: 13px 12px; }
++  /* Секции ниже первого экрана — в два столбца (мокап .land-below) */
++  .console-sections {
++    display: grid;
++    grid-template-columns: 1fr 1fr;
++    gap: 12px;
++    margin: 0 12px;
++  }
++  .console-sections .console-card { margin-bottom: 0; }
++  .console-finish { width: calc(100% - 24px); margin: 12px; }
++}

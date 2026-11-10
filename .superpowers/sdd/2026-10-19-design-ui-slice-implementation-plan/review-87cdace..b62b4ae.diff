@@ -1,0 +1,12 @@
+diff --git a/apps/web/src/pages/host/quiz-editor.tsx b/apps/web/src/pages/host/quiz-editor.tsx
+index cf46e04..2ed253e 100644
+--- a/apps/web/src/pages/host/quiz-editor.tsx
++++ b/apps/web/src/pages/host/quiz-editor.tsx
+@@ -201,6 +201,7 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+                   min={5}
+                   max={600}
+                   step={1}
++                  aria-label="Время на ответ, секунд"
+                   value={q.durationSec}
+                   disabled={q.unlimited}
+                   onChange={(e) => updateQuestion(qIndex, { durationSec: e.target.value })}

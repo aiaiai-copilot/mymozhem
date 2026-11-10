@@ -1,0 +1,1162 @@
+diff --git a/apps/web/e2e/smoke.spec.ts b/apps/web/e2e/smoke.spec.ts
+index 65f6357..e119130 100644
+--- a/apps/web/e2e/smoke.spec.ts
++++ b/apps/web/e2e/smoke.spec.ts
+@@ -9,13 +9,28 @@ if (!SETUP_TOKEN) {
+   throw new Error('ORGANIZER_SETUP_TOKEN is required for smoke (same value as the compose stand)');
+ }
+ 
+-// Единый smoke UI-среза (Task 16): организатор ведёт квиз, участник отвечает
+-// верно и видит reveal-вердикт, экран показывает вопрос. Три browser-context'а
+-// в одном test — общий код комнаты и строгая последовательность шагов.
++// Длинный вопрос второго раунда (Review Focus 5): 200+ символов — на проекторе
++// обязан помещаться целиком (компактная плотность, мокап projector-options-no-lines).
++const LONG_QUESTION =
++  'Известно, что первое письменное упоминание о Рыбной слободе — будущем Рыбинске — ' +
++  'встречается в летописных источниках XII века, а городской статус поселение получило ' +
++  'значительно позже. Назовите год, который чаще всего называют датой первого ' +
++  'упоминания поселения на этом месте.';
++
++// Единый smoke UI-среза (Task 16, переписан под дизайн-срез T13): организатор
++// ведёт квиз из двух вопросов, участник отвечает верно и видит reveal-вердикт,
++// экран показывает вопросы; попутно — таймер (m:ss), reload без сброса таймера,
++// live-ростер консоли, ландшафтный вьюпорт консоли, финал без розыгрыша,
++// self-hosted шрифты и a11y-роли дорожек. Browser-context'ы в одном test —
++// общий код комнаты и строгая последовательность шагов.
+ test('smoke: host → play → screen против compose-стенда', async ({ browser }) => {
+   // Шаг 1. Организатор: лендинг → «Войти по токену организатора» → /host/login
+   // → setup-токен → bootstrap (refresh-куку ставит сервер) → гейт → setup.
+   const host = await (await browser.newContext()).newPage();
++  // Верификация self-hosted шрифтов (T13, carry рендер-проверки subset'ов):
++  // собираем все обращения страницы — среди хостов не должно быть Google Fonts.
++  const hostRequestUrls: string[] = [];
++  host.on('request', (req) => hostRequestUrls.push(req.url()));
+   await host.goto('/');
+   await host.getByRole('link', { name: 'Войти по токену организатора' }).click();
+   await host.waitForURL('**/host/login');
+@@ -25,23 +40,36 @@ test('smoke: host → play → screen против compose-стенда', async
+   await host.waitForURL('**/host/new');
+   await expect(host.getByRole('heading', { name: 'Настройка комнаты' })).toBeVisible();
+ 
+-  // Редактор квиза: 1 вопрос, 2 варианта; correctIndex=0 — дефолт формы
+-  // (первое радио «Правильный» отмечено), значит «Париж» — верный ответ.
+-  await host.getByLabel('Текст вопроса').fill('Столица Франции?');
+-  await host.getByPlaceholder('Вариант 1').fill('Париж');
+-  await host.getByPlaceholder('Вариант 2').fill('Лион');
++  // Редактор квиза: два вопроса. Первый — короткий, correctIndex=0 — дефолт
++  // формы (первое радио «Правильный» отмечено), значит «Париж» — верный ответ.
++  // Поля адресуем внутри карточки вопроса (.editor-q-card): после второго
++  // вопроса подписи/placeholder'ы в форме не уникальны.
++  const q1 = host.locator('.editor-q-card').nth(0);
++  await q1.getByLabel('Текст вопроса').fill('Столица Франции?');
++  await q1.getByPlaceholder('Вариант 1').fill('Париж');
++  await q1.getByPlaceholder('Вариант 2').fill('Лион');
++  await host.getByRole('button', { name: '+ Добавить вопрос' }).click();
++  // Второй — длинный (200+ символов, 3 варианта): проверка Review Focus 5 ниже.
++  const q2 = host.locator('.editor-q-card').nth(1);
++  await q2.getByLabel('Текст вопроса').fill(LONG_QUESTION);
++  await q2.getByPlaceholder('Вариант 1').fill('1137');
++  await q2.getByPlaceholder('Вариант 2').fill('1777');
++  await q2.getByRole('button', { name: '+ Добавить вариант' }).click();
++  await q2.getByPlaceholder('Вариант 3').fill('1676');
+   await host.getByRole('button', { name: 'Сохранить и запустить' }).click();
+   await host.waitForURL('**/host/console');
+-  await expect(host.getByRole('heading', { name: 'Консоль ведущего' })).toBeVisible();
+-  await expect(host.getByText('Код комнаты:')).toBeVisible();
+-  const roomCode = (await host.locator('.room-code strong').innerText()).trim();
++  // Якорь консоли (T13): h1 «Консоль ведущего» в разметке нет — полоса комнаты
++  // (console-strip) с голым кодом (.console-room-code, без <strong>).
++  await expect(host.locator('.console-strip')).toBeVisible();
++  const roomCode = (await host.locator('.console-room-code').innerText()).trim();
+   expect(roomCode.length).toBeGreaterThanOrEqual(6);
+ 
+   // Шаг 2. Участник: новый context → /play/<code> → join → лобби активной игры
+-  // (комната уже ACTIVE — setup завершился activate до консоли).
++  // (комната уже ACTIVE — setup завершился activate до консоли). Написание
++  // заголовка — дореформенное «Входъ» (Приложение A дизайна), сохранить.
+   const player = await (await browser.newContext()).newPage();
+   await player.goto(`/play/${roomCode}`);
+-  await expect(player.getByRole('heading', { name: 'Вход в игру' })).toBeVisible();
++  await expect(player.getByRole('heading', { name: 'Входъ в игру' })).toBeVisible();
+   await player.getByLabel('Ваше имя (необязательно)').fill('Маша');
+   await player.getByRole('button', { name: 'Играть' }).click();
+   await expect(player.getByText('Игра идёт. Ждём вопрос…')).toBeVisible();
+@@ -51,33 +79,106 @@ test('smoke: host → play → screen против compose-стенда', async
+   await screen.goto(`/screen/${roomCode}`);
+   await expect(screen.getByText('Игра идёт. Ждём вопрос…')).toBeVisible();
+ 
+-  // Шаг 4. Организатор открывает вопрос: у участника — варианты, на экране —
+-  // вопрос крупно (h1.screen-question — проекторная раскладка дизайна §4).
++  // Шаг 4. Организатор открывает вопрос 1: у участника — варианты и таймер,
++  // на экране — вопрос крупно (h1.screen-question — проекторная раскладка
++  // дизайна §4) и таймер золотом. Таймер — формат m:ss (T7/T8).
+   await host.getByRole('button', { name: 'Открыть вопрос 1' }).click();
+   await expect(screen.locator('h1.screen-question')).toHaveText('Столица Франции?');
+-  const correctOption = player.getByRole('button', { name: 'Париж', exact: true });
++  await expect(player.locator('.play-timer')).toHaveText(/^\d+:\d{2}$/);
++  await expect(screen.locator('.screen-timer')).toContainText(/\d+:\d{2}/);
++  // Кнопки вариантов несут буквенную метку (<b>А</b>…, мокап component-states-live),
++  // поэтому доступное имя — «АПариж», а не «Париж»: адресуем по тексту.
++  const correctOption = player.locator('.play-options button').filter({ hasText: 'Париж' });
+   await expect(correctOption).toBeVisible();
+-  await expect(player.getByRole('button', { name: 'Лион', exact: true })).toBeVisible();
++  await expect(player.locator('.play-options button').filter({ hasText: 'Лион' })).toBeVisible();
++
++  // Шаг 4а. Ландшафтный вьюпорт консоли (телефон ведущего горизонтально,
++  // мокап console-phone-landscape-v2): главная кнопка момента видна без скролла.
++  await host.setViewportSize({ width: 700, height: 360 });
++  await expect(host.getByRole('button', { name: 'Закрыть вопрос' })).toBeInViewport();
++
++  // Шаг 4б. Reload участника mid-question (Review Focus 1): гость перезаходит
++  // автоматически, таймер НЕ сбрасывается на полный — отсчёт идёт от серверного
++  // openedAt. Ждём ~2.5 с после открытия, перезагружаем, ждём таймер и
++  // требуем строго меньше 30 сек (0:00–0:28; auto-wait переживает транзиенты
++  // «Входим…» и возможные 0:29/0:30 первого кадра).
++  await player.waitForTimeout(2500);
++  await player.reload();
++  await expect(player.locator('.play-timer')).toHaveText(/^0:(0\d|1\d|2[0-8])$/);
+ 
+   // Шаг 5. Участник отвечает верно → мгновенный ack «Ответ принят.».
+   await correctOption.click();
+   await expect(player.getByText('Ответ принят.')).toBeVisible();
+ 
++  // Шаг 5а. Второй участник заходит в живую комнату: консоль видит его имя
++  // БЕЗ перезагрузки — core.member.joined → событийный рефетч ростера
++  // (дедуп-окно 2 с пережидает auto-wait expect'а).
++  const player2 = await (await browser.newContext()).newPage();
++  await player2.goto(`/play/${roomCode}`);
++  await player2.getByLabel('Ваше имя (необязательно)').fill('Петя');
++  await player2.getByRole('button', { name: 'Играть' }).click();
++  await expect(host.getByText('Петя (игрок)')).toBeVisible();
++
+   // Шаг 6. Организатор закрывает вопрос → reveal: вердикт участника «Верно!»
+   // (обязательный ассерт финревью батча 4 — класс дефекта «ловится только
+-  // живым прогоном»), очки из payload revealed, табло с именем; экран показывает
+-  // правильный ответ. Баллы детерминированы: единственный верный ответ → base=100.
++  // живым прогоном»), очки из payload revealed, табло дорожками с a11y-ролями
++  // (T13: list/listitem, у listitem нет name-from-content — фильтр по тексту);
++  // у ответившего полоса .tr-lane .fill ненулевой ширины; экран показывает
++  // «Правильный отвѣтъ» плашкой. Баллы детерминированы: единственный верный
++  // ответ → base=100.
+   await host.getByRole('button', { name: 'Закрыть вопрос' }).click();
+   await expect(player.getByRole('heading', { name: 'Верно!' })).toBeVisible();
+   await expect(player.getByText('+100 очков')).toBeVisible();
+-  await expect(player.getByRole('cell', { name: 'Маша' })).toBeVisible();
+-  await expect(screen.getByText('Правильный ответ: Париж')).toBeVisible();
++  await expect(player.getByRole('list').filter({ hasText: 'Маша' })).toBeVisible();
++  await expect(player.getByRole('listitem').filter({ hasText: 'Маша' })).toBeVisible();
++  // Полоса ответившего ненулевой ширины: fill — это «total минус прирост»
++  // (trackWidths), поэтому после первого же верного ответа вся полоса — gain;
++  // сумма сегментов > 0 — инвариант «дорожка ответившего видна».
++  const mashaLane = player
++    .getByRole('listitem')
++    .filter({ hasText: 'Маша' })
++    .locator('.tr-lane');
++  const fillW = (await mashaLane.locator('.fill').boundingBox())?.width ?? 0;
++  const gainW = (await mashaLane.locator('.gain').boundingBox())?.width ?? 0;
++  expect(fillW + gainW, 'дорожка ответившего должна быть ненулевой ширины').toBeGreaterThan(0);
++  await expect(screen.getByText('Правильный отвѣтъ')).toBeVisible();
++  await expect(screen.locator('.screen-answer-value')).toHaveText('Париж');
+ 
+-  // Шаг 7. Финал квиза: confirm() принимаем dialog-handler'ом (Playwright по
+-  // умолчанию диалоги отклоняет — без handler'а команда не ушла бы).
++  // Шаг 6а. Второй вопрос — длинный: на проекторе виден целиком, без клиппинга
++  // (Review Focus 5): весь h1 во вьюпорте и без скрытого переполнения.
++  await host.getByRole('button', { name: 'Открыть вопрос 2' }).click();
++  const longH1 = screen.locator('h1.screen-question');
++  await expect(longH1).toHaveText(LONG_QUESTION);
++  await expect(longH1).toBeInViewport({ ratio: 1 });
++  const clipped = await longH1.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
++  expect(clipped, 'длинный вопрос не должен клиппиться на проекторе').toBe(false);
++
++  // Шаг 6б. Закрываем второй вопрос без ответов: вердикт участника —
++  // «Вы не успели ответить.», очки не меняются.
++  await host.getByRole('button', { name: 'Закрыть вопрос' }).click();
++  await expect(player.getByRole('heading', { name: 'Вы не успели ответить.' })).toBeVisible();
++
++  // Шаг 7. Финал квиза (колода вычерпана — главная кнопка «Завершить квиз»):
++  // confirm() принимаем dialog-handler'ом (Playwright по умолчанию диалоги
++  // отклоняет — без handler'а команда не ушла бы). Розыгрыша не было → блок
++  // победителей на проекторе отсутствует вовсе (п. 18 дизайна).
+   host.once('dialog', (dialog) => void dialog.accept());
+   await host.getByRole('button', { name: 'Завершить квиз' }).click();
+   await expect(player.getByRole('heading', { name: 'Игра завершена' })).toBeVisible();
+   await expect(player.getByText('Ваши очки: 100')).toBeVisible();
+   await expect(screen.getByRole('heading', { name: 'Игра завершена' })).toBeVisible();
++  await expect(screen.locator('.screen-winners')).toHaveCount(0);
++
++  // Шаг 8. Self-hosted шрифты (T13): ни одного обращения к Google Fonts за всю
++  // сессию страницы; семейства реально загружены (font-display: swap — ждём
++  // document.fonts.ready перед check).
++  expect(
++    hostRequestUrls.filter((url) => /fonts\.(googleapis|gstatic)\.com/.test(url)),
++    'обращений к Google Fonts быть не должно (woff2 self-hosted)',
++  ).toEqual([]);
++  const fontsLoaded = await host.evaluate(async () => {
++    await document.fonts.ready;
++    return [document.fonts.check('16px Oranienbaum'), document.fonts.check('16px "PT Sans"')];
++  });
++  expect(fontsLoaded).toEqual([true, true]);
+ });
+diff --git a/apps/web/src/components/race-tracks.tsx b/apps/web/src/components/race-tracks.tsx
+index 3482140..922f5c3 100644
+--- a/apps/web/src/components/race-tracks.tsx
++++ b/apps/web/src/components/race-tracks.tsx
+@@ -1,11 +1,14 @@
++import { pluralRu } from '../state/plural-ru';
+ import { topNWithRest, trackWidths } from '../state/race-tracks';
+ 
+ // Дорожки «забега» — ростер с нормированными к лидеру полосами (дизайн §7).
+ // Разметка — перенос из мокапа component-states-live (.track-row/.tr-top/
+ // .tr-lane/.fill/.gain, tabular-nums у счёта, transition width var(--t-race)
+-// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N» —
+-// из мокапов tracks-scene/console-reveal-tracks. DOM-тестов нет (паттерн
+-// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — T13.
++// в styles/transitions.css). Пометка своей строки («это ты») и «ещё N участников»
++// — из мокапов tracks-scene/console-reveal-tracks («+» и суффикс «· полное
++// табло…» мокапа проектора сознательно не переносим — минимум T6). A11y (T13):
++// контейнер — role="list", строка — role="listitem". DOM-тестов нет (паттерн
++// репо): чистая логика покрыта state/race-tracks.spec.ts, разметка — smoke T13.
+ 
+ export interface RaceTrackEntry {
+   actorId: string;
+@@ -38,11 +41,11 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
+   const { top, rest } = topNWithRest(sorted, topN ?? sorted.length);
+ 
+   return (
+-    <div className={`race-tracks contour-${contour}`}>
++    <div className={`race-tracks contour-${contour}`} role="list">
+       {top.map((e) => {
+         const w = widths.get(e.actorId) ?? { fillPct: 0, gainPct: 0 };
+         return (
+-          <div className="track-row" key={e.actorId}>
++          <div className="track-row" role="listitem" key={e.actorId}>
+             <div className="tr-top">
+               <span className="tr-name">
+                 {e.name}
+@@ -67,7 +70,11 @@ export function RaceTracks({ entries, highlightId, topN, contour }: RaceTracksPr
+           </div>
+         );
+       })}
+-      {rest > 0 && <div className="tr-more">ещё {rest}</div>}
++      {rest > 0 && (
++        <div className="tr-more" role="presentation">
++          ещё {rest} {pluralRu(rest, 'участник', 'участника', 'участников')}
++        </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/apps/web/src/pages/host/console-page.tsx b/apps/web/src/pages/host/console-page.tsx
+index 91c1c74..d080e67 100644
+--- a/apps/web/src/pages/host/console-page.tsx
++++ b/apps/web/src/pages/host/console-page.tsx
+@@ -11,6 +11,7 @@ import { displayNameOf } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { HOST_NEW_PATH } from '../../routes';
+ import { SessionStore } from '../../state/session';
++import { pluralRu } from '../../state/plural-ru';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { useRoomFeed } from '../../state/use-room-feed';
+ import { AwardsPanel } from './awards-panel';
+@@ -262,7 +263,8 @@ export function ConsolePage() {
+             <div className="console-moment">
+               <div className="console-fh-title">Событие завершено</div>
+               <p className="console-fh-sub">
+-                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}участников:{' '}
++                {pinnedAppId === QUIZ_APP_ID ? 'Квиз окончен · ' : ''}
++                {pluralRu(participantsCount(feed.members), 'участник', 'участника', 'участников')}:{' '}
+                 {participantsCount(feed.members)}
+                 {pendingAwards !== null && pendingAwards > 0 ? ' · вручите награды' : ''}
+               </p>
+@@ -293,7 +295,7 @@ export function ConsolePage() {
+                     >
+                       {completedExpanded
+                         ? 'Свернуть'
+-                        : `ещё ${completedEntries.length - 4} — развернуть`}
++                        : `ещё ${completedEntries.length - 4} ${pluralRu(completedEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
+                     </button>
+                   ) : null}
+                 </div>
+diff --git a/apps/web/src/pages/host/prizes-panel.spec.ts b/apps/web/src/pages/host/prizes-panel.spec.ts
+index ccadb21..81c4d10 100644
+--- a/apps/web/src/pages/host/prizes-panel.spec.ts
++++ b/apps/web/src/pages/host/prizes-panel.spec.ts
+@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
+ import type { PrizeResponse, ProjectedEvent } from '@mymozhem/sdk';
+ import {
+   DRAW_ID_GENERATION_FAILED,
++  drawPrizeName,
+   isDrawable,
+   lastCompletedDraw,
+   startDrawAttempt,
+   startParticipantDrawAttempt,
+   tryStartDrawAttempt,
+   tryStartParticipantDrawAttempt,
++  type CompletedDraw,
+   type DrawAttempt,
+ } from './prizes-panel';
+ 
+@@ -186,3 +188,34 @@ describe('lastCompletedDraw', () => {
+     expect(lastCompletedDraw([last, first])).toEqual(first.payload);
+   });
+ });
++
++// Название приза в баннере победителя (T13, извлечение из рендера панели):
++// find по локальному списку панели. Три ветки: приз найден → имя; prizeId есть,
++// но приз удалён из списка → null (строка без названия — fallback брифа T11);
++// безпризовой draw (prizeId null) → null.
++describe('drawPrizeName', () => {
++  const draw = (prizeId: string | null): CompletedDraw => ({
++    drawId: '33333333-3333-4333-8333-333333333333',
++    prizeId,
++    winnerId: '0f8fad5b-d9cb-469f-a165-70867728950e',
++  });
++
++  it('приз найден в списке панели → его название', () => {
++    const p = prize(1);
++    expect(drawPrizeName(draw(p.id), [p])).toBe('Кубок');
++  });
++
++  it('prizeId есть, но приз удалён из списка → null (баннер без названия)', () => {
++    expect(drawPrizeName(draw(prize(1).id), [])).toBeNull();
++    // Список ещё не загружен (null) — тот же fallback.
++    expect(drawPrizeName(draw(prize(1).id), null)).toBeNull();
++  });
++
++  it('безпризовой draw (prizeId null) → null', () => {
++    expect(drawPrizeName(draw(null), [prize(1)])).toBeNull();
++  });
++
++  it('розыгрышей не было (draw null) → null', () => {
++    expect(drawPrizeName(null, [prize(1)])).toBeNull();
++  });
++});
+diff --git a/apps/web/src/pages/host/prizes-panel.tsx b/apps/web/src/pages/host/prizes-panel.tsx
+index 526515e..f3252d0 100644
+--- a/apps/web/src/pages/host/prizes-panel.tsx
++++ b/apps/web/src/pages/host/prizes-panel.tsx
+@@ -106,6 +106,16 @@ export const lastCompletedDraw = (events: ProjectedEvent[]): CompletedDraw | nul
+   return last;
+ };
+ 
++// Название приза для баннера победителя (T13, извлечение из рендера): find по
++// локальному списку панели. Приз мог быть удалён из выдачи или список ещё не
++// загружен → null (строка без названия, fallback брифа T11); безпризовой draw
++// (prizeId null) и отсутствие розыгрышей → тоже null.
++export const drawPrizeName = (
++  draw: CompletedDraw | null,
++  prizes: PrizeResponse[] | null,
++): string | null =>
++  draw?.prizeId != null ? (prizes?.find((p) => p.id === draw.prizeId)?.name ?? null) : null;
++
+ interface PrizesPanelProps {
+   roomId: string;
+   // Пин приложения из payload core.room.activated (REQ-RT-004): кнопка
+@@ -243,10 +253,7 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
+   // по prizeId; приз мог быть удалён из выдачи — тогда строка без названия
+   // (fallback брифа T11), безпризовой draw — тоже без названия.
+   const lastDraw = lastCompletedDraw(events);
+-  const drawPrizeName =
+-    lastDraw?.prizeId != null
+-      ? (prizes?.find((p) => p.id === lastDraw.prizeId)?.name ?? null)
+-      : null;
++  const lastDrawPrizeName = drawPrizeName(lastDraw, prizes);
+ 
+   return (
+     <section className="console-card">
+@@ -255,8 +262,8 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
+         <div className="console-winner-banner">
+           <div className="console-wb-label">Розыгрыш завершён</div>
+           <div className="console-wb-name">{displayNameOf(names, lastDraw.winnerId)}</div>
+-          {drawPrizeName !== null ? (
+-            <div className="console-wb-prize">выигрывает «{drawPrizeName}»</div>
++          {lastDrawPrizeName !== null ? (
++            <div className="console-wb-prize">выигрывает «{lastDrawPrizeName}»</div>
+           ) : null}
+         </div>
+       ) : null}
+diff --git a/apps/web/src/pages/host/quiz-controls.tsx b/apps/web/src/pages/host/quiz-controls.tsx
+index 00045ff..4a65fdf 100644
+--- a/apps/web/src/pages/host/quiz-controls.tsx
++++ b/apps/web/src/pages/host/quiz-controls.tsx
+@@ -10,6 +10,7 @@ import {
+ import { RaceTracks } from '../../components/race-tracks';
+ import { displayNameOf } from '../../components/roster-names';
+ import { projectAnsweredActors } from '../../state/projections';
++import { pluralRu } from '../../state/plural-ru';
+ import { lastRoundGains } from '../../state/race-tracks';
+ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+ import { openQuestionLabel } from './open-question-label';
+@@ -183,7 +184,7 @@ export function QuizControls({
+             <div className="console-q-label">Квиз окончен</div>
+             <div className="console-fh-title">
+               {allPlayed
+-                ? `Все ${questions.length} вопросов сыграны`
++                ? `Все вопросы сыграны (${questions.length})`
+                 : `Сыграно вопросов: ${played} из ${questions.length}`}
+             </div>
+             {pendingAwards !== null && pendingAwards > 0 ? (
+@@ -224,7 +225,9 @@ export function QuizControls({
+                   className="console-tracks-toggle"
+                   onClick={() => setExpanded((v) => !v)}
+                 >
+-                  {expanded ? 'Свернуть' : `ещё ${finalEntries.length - 4} — развернуть`}
++                  {expanded
++                    ? 'Свернуть'
++                    : `ещё ${finalEntries.length - 4} ${pluralRu(finalEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
+                 </button>
+               ) : null}
+             </div>
+@@ -260,7 +263,9 @@ export function QuizControls({
+             <>
+               <div className="console-q-label">Квиз не начат</div>
+               <p className="console-fh-sub">
+-                В колоде {questions.length} вопросов. Игроки видят экран ожидания.
++                В колоде {questions.length}{' '}
++                {pluralRu(questions.length, 'вопрос', 'вопроса', 'вопросов')}. Игроки видят экран
++                ожидания.
+               </p>
+             </>
+           ) : (
+@@ -390,7 +395,9 @@ export function QuizControls({
+                   className="console-tracks-toggle"
+                   onClick={() => setExpanded((v) => !v)}
+                 >
+-                  {expanded ? 'Свернуть' : `ещё ${trackEntries.length - 4} — развернуть`}
++                  {expanded
++                    ? 'Свернуть'
++                    : `ещё ${trackEntries.length - 4} ${pluralRu(trackEntries.length - 4, 'участник', 'участника', 'участников')} — развернуть`}
+                 </button>
+               ) : null}
+             </div>
+diff --git a/apps/web/src/state/plural-ru.spec.ts b/apps/web/src/state/plural-ru.spec.ts
+new file mode 100644
+index 0000000..2105b06
+--- /dev/null
++++ b/apps/web/src/state/plural-ru.spec.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest';
++import { pluralRu } from './plural-ru';
++
++// Русская плюрализация счётных строк (T13): выбор формы по последним цифрам —
++// 1/21/101 → one, 2–4/22–24 → few, 5–20/11–14/25/0 → many. Хелпер возвращает
++// ТОЛЬКО форму слова, число в строку не вставляет (сборка — у потребителя).
++describe('pluralRu', () => {
++  const forms: [string, string, string] = ['участник', 'участника', 'участников'];
++  const pick = (n: number) => pluralRu(n, ...forms);
++
++  it('1 и составные на 1 (кроме 11) → one', () => {
++    expect(pick(1)).toBe('участник');
++    expect(pick(21)).toBe('участник');
++    expect(pick(101)).toBe('участник');
++  });
++
++  it('2–4 и составные на 2–4 (кроме 12–14) → few', () => {
++    expect(pick(2)).toBe('участника');
++    expect(pick(4)).toBe('участника');
++    expect(pick(22)).toBe('участника');
++  });
++
++  it('5–20, 11–14, составные на 5–9/0 и ноль → many', () => {
++    expect(pick(5)).toBe('участников');
++    expect(pick(11)).toBe('участников'); // НЕ few: 11 — исключение
++    expect(pick(14)).toBe('участников');
++    expect(pick(20)).toBe('участников');
++    expect(pick(25)).toBe('участников');
++    expect(pick(111)).toBe('участников');
++    expect(pick(0)).toBe('участников');
++  });
++});
+diff --git a/apps/web/src/state/plural-ru.ts b/apps/web/src/state/plural-ru.ts
+new file mode 100644
+index 0000000..fee51a1
+--- /dev/null
++++ b/apps/web/src/state/plural-ru.ts
+@@ -0,0 +1,13 @@
++// Русская плюрализация счётных строк (T13): выбор формы по последним цифрам
++// числа — 1/21/101 → one, 2–4/22–24 → few, 5–20/11–14/25/0 → many. Возвращает
++// ТОЛЬКО форму слова: число в строку не вставляется, сборка («ещё N участников»)
++// — у потребителя, потому что порядок «число/слово» и обрамление разные
++// (label:count у hero консоли, «ещё N …» у дорожек).
++export function pluralRu(n: number, one: string, few: string, many: string): string {
++  const mod100 = Math.abs(n) % 100;
++  if (mod100 >= 11 && mod100 <= 14) return many;
++  const mod10 = mod100 % 10;
++  if (mod10 === 1) return one;
++  if (mod10 >= 2 && mod10 <= 4) return few;
++  return many;
++}
+diff --git a/apps/web/src/styles/console.css b/apps/web/src/styles/console.css
+index eb22d1a..ad8df5e 100644
+--- a/apps/web/src/styles/console.css
++++ b/apps/web/src/styles/console.css
+@@ -31,9 +31,8 @@
+   display: flex;
+   align-items: center;
+   gap: 6px;
+-  /* Литерал мокапа (--ok #2F6B4F): в токенах T4 ok-зелёного нет
+-     (прецедент литерала — .play-input::placeholder в scene.css). */
+-  color: #2f6b4f;
++  /* Ok-зелёный полосы связи — токен мокапа (--ok, T13). */
++  color: var(--ok);
+   font-size: 13px;
+   font-weight: 700;
+ }
+@@ -301,8 +300,8 @@
+ /* --- Setup и редактор квиза (Task 10, дизайн §5.3 «Редактор», п. 9/14;
+    мокапы-эталоны: console-editor, forms-and-system-states-v2,
+    editor-secondary-button-darker). Цвета — только токены T4; единственный
+-   литерал — белый фон полей ввода (--input-bg мокапа #FFFFFF, прецедент
+-   литерала — .console-conn выше). Кнопки — общая система .btn
++   белый фон полей ввода — токен мокапа (--input-console, T13).
++   Кнопки — общая система .btn
+    (transitions.css): secondary #C4D8CC, primary #10514F с золотым текстом,
+    тихие без рамок (п. 15). --- */
+ .setup-title {
+@@ -386,7 +385,7 @@
+   padding: 10px 12px;
+   border: none;
+   border-radius: 8px;
+-  background: #fff;
++  background: var(--input-console);
+   color: var(--ink);
+   font: 15px var(--font-body);
+ }
+@@ -438,7 +437,7 @@
+   padding: 10px 12px;
+   border: none;
+   border-radius: 8px;
+-  background: #fff;
++  background: var(--input-console);
+   color: var(--ink);
+   font: 15px var(--font-body);
+   font-variant-numeric: tabular-nums;
+diff --git a/apps/web/src/styles/scene.css b/apps/web/src/styles/scene.css
+index 1af3792..f95b1da 100644
+--- a/apps/web/src/styles/scene.css
++++ b/apps/web/src/styles/scene.css
+@@ -62,8 +62,8 @@
+   border-radius: 4px;
+   font: 16px var(--font-body);
+ }
+-/* Литерал мокапа входа (в токенах T4 нет цвета placeholder) */
+-.play-input::placeholder { color: #354b41; }
++/* Placeholder — токен мокапа входа (--placeholder-scene, T13) */
++.play-input::placeholder { color: var(--placeholder-scene); }
+ .play-input:focus-visible {
+   outline: 3px solid var(--gold);
+   outline-offset: 2px;
+@@ -147,15 +147,15 @@
+ }
+ 
+ /* Reveal (мокап game-states): вердикт различается значком, текстом и цветом.
+-   success/danger — литералы мокапа (в токенах T4 нет success-цвета). */
++   success/danger — токены мокапа (--verdict-success/--verdict-danger, T13). */
+ .play-verdict {
+   margin: 28px 0 4px;
+   font-family: var(--font-display);
+   font-size: 38px;
+   font-weight: 400;
+ }
+-.play-verdict-success { color: #8fcaa5; }
+-.play-verdict-danger { color: #e5a092; }
++.play-verdict-success { color: var(--verdict-success); }
++.play-verdict-danger { color: var(--verdict-danger); }
+ .play-points {
+   margin: 0 0 17px;
+   color: var(--gold);
+diff --git a/apps/web/src/styles/tokens.css b/apps/web/src/styles/tokens.css
+index 58dede7..d20918d 100644
+--- a/apps/web/src/styles/tokens.css
++++ b/apps/web/src/styles/tokens.css
+@@ -15,6 +15,10 @@
+   --input-scene: #A9BDB2;
+   --track-fill: #0F7B57;
+   --track-canvas-dark: #143138;
++  /* Литералы мокапа scene.css (T13): placeholder поля участника, verdict success/danger */
++  --placeholder-scene: #354B41;
++  --verdict-success: #8FCAA5;
++  --verdict-danger: #E5A092;
+ 
+   /* Консоль — светлый контур (ведущий/организатор) */
+   --console-bg: #E3F0E9;
+@@ -32,6 +36,9 @@
+   --track-canvas-light: #D5E2DA;
+   --danger-hover: #F3DCD2;
+   --danger-active: #ECCFC4;
++  /* Литералы мокапа console.css (T13): ok-зелёный полосы связи, фон полей ввода */
++  --ok: #2F6B4F;
++  --input-console: #FFFFFF;
+ 
+   /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
+   --t-hover: 140ms;
+diff --git a/apps/web/src/styles/tokens.spec.ts b/apps/web/src/styles/tokens.spec.ts
+index 9e9dfb7..f7c05c2 100644
+--- a/apps/web/src/styles/tokens.spec.ts
++++ b/apps/web/src/styles/tokens.spec.ts
+@@ -72,6 +72,13 @@ describe('tokens.css — токены темы rybinsk', () => {
+     ['--track-canvas-light', '#D5E2DA'],
+     ['--danger-hover', '#F3DCD2'],
+     ['--danger-active', '#ECCFC4'],
++    // мокапные литералы, поднятые в токены (T13): placeholder поля входа и
++    // verdict-цвета сцены, ok-зелёный и белый фон полей консоли
++    ['--placeholder-scene', '#354B41'],
++    ['--verdict-success', '#8FCAA5'],
++    ['--verdict-danger', '#E5A092'],
++    ['--ok', '#2F6B4F'],
++    ['--input-console', '#FFFFFF'],
+     // тайминги
+     ['--t-hover', '140ms'],
+     ['--t-press', '60ms'],
+@@ -102,6 +109,38 @@ describe('tokens.css — токены темы rybinsk', () => {
+   it('точка расширения темы зафиксирована: вторая тема = переопределение под [data-theme=…]', () => {
+     expect(css).toContain('[data-theme=');
+   });
++
++  it('точка темы включена: index.html несёт data-theme="rybinsk"', () => {
++    // Carry батча B: спек касается tokens.css — заодно пиним точку темы.
++    const html = readFileSync(
++      fileURLToPath(new URL('../../index.html', import.meta.url)),
++      'utf8',
++    );
++    expect(html).toContain('data-theme="rybinsk"');
++  });
++});
++
++describe('мокапные литералы подняты в токены (T13)', () => {
++  // Литералы, которые жили инлайн в scene.css/console.css («в токенах T4 нет…»):
++  // после подъёма файлы обязаны ссылаться на var(--…), а не держать hex.
++  const liftedLiterals: Array<{ file: string; hex: string }> = [
++    { file: 'scene.css', hex: '#354b41' }, // placeholder поля участника
++    { file: 'scene.css', hex: '#8fcaa5' }, // verdict success
++    { file: 'scene.css', hex: '#e5a092' }, // verdict danger
++    { file: 'console.css', hex: '#2f6b4f' }, // ok-зелёный полосы связи
++    { file: 'console.css', hex: '#fff' }, // фон полей ввода
++  ];
++
++  it('scene.css/console.css не содержат поднятые hex-литералы (регистронезависимо)', () => {
++    const files = new Map<string, string>();
++    for (const { file, hex } of liftedLiterals) {
++      const css = files.get(file) ?? readStyle(file);
++      files.set(file, css);
++      // Граница слова после короткого hex: «#fff» не должно матчить «#ffffff».
++      const re = new RegExp(`${escapeRe(hex)}(?![0-9a-f])`, 'i');
++      expect(css, `${file} не должен содержать литерал ${hex}`).not.toMatch(re);
++    }
++  });
+ });
+ 
+ describe('transitions.css — кнопочная система состояний', () => {
+diff --git a/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md b/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md
+new file mode 100644
+index 0000000..2d08a01
+--- /dev/null
++++ b/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md
+@@ -0,0 +1,506 @@
++# Чеклист приёмки дизайн/UI-среза (ручной прогон на устройствах)
++
++**Дата:** 2026-10-20 (файл назван по дате дизайн-документа — план, Task 14)
++**Назначение:** живая приёмка дизайн/UI-среза перед мерджем среза в `main`. Каждая строка — наблюдаемый результат (что именно должно быть видно/услышано), не «проверить, что работает». Прогоняется против локального/LAN-стенда, **НЕ против production**.
++**Основания:** дизайн `2026-10-19-design-ui-slice-design.md` (§3–§8 — что сверять глазами, §11 — приёмка, §12 — 8 критериев, §13 — допущения); план `2026-10-19-design-ui-slice-implementation-plan.md` (Task 14, Приложение A — дореформенный словарь); образец формата — `2026-09-23-ui-slice-smoke-checklist.md`.
++**Мокапы-эталоны:** локальные, в git не попадают (лицензии). Ссылки в чеклисте — на канонический список дизайн-документа (раздел «Канонические мокапы»), не на абсолютные пути. При расхождении важнее текст дизайн-документа, а не мокап (правило HANDOFF).
++**Автоматика на страже (не дублируем руками):** unit-сьют web — 175/175 (24 файла, прогон 2026-10-20 на HEAD ветки); playwright smoke (`apps/web/e2e/smoke.spec.ts`, 1/1 против compose-стенда) покрывает: формат таймера `m:ss` на участнике и проекторе, reload участника без сброса таймера (шаг 4б), live-ростер консоли без перезагрузки (шаг 5а), ландшафтный вьюпорт консоли 700×360 с главной кнопкой во вьюпорте (шаг 4а), дорожки с a11y-ролями и ненулевой шириной у ответившего (шаг 6), финал без розыгрыша — блок победителей отсутствует на проекторе (шаг 7), длинный вопрос без клиппинга на проекторе (шаг 6а), self-hosted woff2 — ноль обращений к Google Fonts + `document.fonts.check` (шаг 8). Ручные строки ниже проверяют то, что машине недоступно: вид, читаемость, ощущения, сценарии вне smoke.
++
++---
++
++## 0. Стенд и подготовка
++
++### 0.1. Compose-стенд поднят
++
++`JWT_SECRET=<секрет стенда> ORGANIZER_SETUP_TOKEN=<токен стенда, ≥32 байта> docker compose up -d --build` из корня репозитория (web-статика раздаётся тем же контейнером, same-origin; compose-директива `:?` — без обеих переменных стенд не стартует).
++
++**Критерий прохождения:** `curl -s http://localhost:3000/health/live` → 200; лендинг открывается в браузере.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 0.2. LAN-вариант для телефонов
++
++Телефоны ходят на `http://<ip-машины>` в общей Wi-Fi сети. Два допустимых подъёма:
++
++- **Bare-run (норма события, образец — §0.4 smoke-чеклиста):** в контейнере только БД (`docker compose up postgres`), сервер на хосте: `pnpm build` из корня, затем `DATABASE_URL=postgresql://mymozhem:mymozhem@localhost:5432/mymozhem JWT_SECRET=... ORGANIZER_SETUP_TOKEN=... PRIZE_MODE=off COOKIE_SECURE=false WEB_STATIC_DIR=<корень репозитория>/apps/web/dist pnpm --filter @mymozhem/server start`. `WEB_STATIC_DIR` — хостовый путь к собранному SPA, т. е. после `pnpm build` (compose задаёт контейнерный `/app/apps/web/dist`; без переменной сервер статику не отдаёт — `static-web.ts` выходит рано). **ВНИМАНИЕ: compose по умолчанию НЕ публикует порт 5432 на хост** — для bare-run добавить `docker-compose.override.yml` с пробросом 5432 (см. комментарий в `docker-compose.yml`). Web отдаётся тем же сервером (WEB_STATIC_DIR) — один origin на LAN-IP.
++- **Compose + публикация портов** — допустим для UI-приёмки (docker NAT скрывает реальные IP, но эта приёмка не тестирует exclusion/rate-limit; блокеры репетиции здесь не кусаются).
++
++**COOKIE_SECURE=false — ТОЛЬКИ для plain-HTTP LAN** (иначе телефоны не примут refresh-куку и сессия будет с 15-минутным потолком).
++**Известное ограничение LAN:** розыгрыш по `http://<ip>` недоступен (`crypto.randomUUID` — secure-context-only): блок 10 (финал с розыгрышем) прогонять консолью с `localhost` машины стенда, сцены при этом могут оставаться на LAN-устройствах.
++
++**Критерий прохождения:** телефон открывает `http://<ip>:3000`, лендинг рендерится; участник с телефона заходит в комнату (join не отклонён, сессия живёт дольше 15 мин при COOKIE_SECURE=false).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 0.3. Read-only psql к БД стенда
++
++`docker compose exec postgres psql -U mymozhem -d mymozhem` (user/db — `mymozhem`). Приём: сверка ростера/лога с ожиданиями, строка 7.2 (payload `core.member.joined` без displayName).
++
++**Критерий прохождения:** psql-сессия открывается, `SELECT count(*) FROM realtime."LogEvent";` отвечает.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 0.4. Мониторинг серверного лога во время прогона
++
++Второй терминал: `docker compose logs -f | grep '"level":\(40\|50\)'` (warn/error в реальном времени; при bare-run — stdout сервера с тем же фильтром).
++
++**Критерий прохождения:** за весь прогон ни одной строки level 40/50 без объяснения (ожидаемые — нет; каждая появившаяся — находка с комментарием в протоколе соответствующей строки).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 0.5. Раздельные браузеры/профили
++
++Refresh-кука одна на origin (`mm_refresh`): вход организатора затирает гостевую куку участника и наоборот. Консоль и тест-игрок с одного десктопа — разные браузеры/профили/инкогнито; телефоны — отдельные устройства.
++
++**Критерий прохождения:** после входа организатора вкладка участника в другом браузере продолжает получать события; «внезапных разлогинов» внутри одного профиля не интерпретируем как баг.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 1. Устройства и ориентации
++
++### 1.1. Участник на телефоне, портрет
++
++Полный поток: вход → ожидание → вопрос → reveal → финал. Эталоны: `participant-join-lobby-center-fix.html`, `participant-flow-layout-v2.html` (канонический список дизайн-дока).
++
++**Критерий прохождения:** вход — поля `#A9BDB2` с золотыми названиями, кнопка «Играть» с верхним отступом ~34px; ожидание отцентрировано по высоте телефона (логотип/заголовок не влияют); вопрос — таймер в верхней строке, нижний отступ перед вариантами ~30px; длинные тексты переносятся, внутренних скроллов нет — прокручивается страница целиком.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 1.2. Участник на телефоне, ландшафт
++
++Те же экраны в горизонтальной ориентации.
++
++**Критерий прохождения:** ничего не клиппится и не наезжает; вопрос читаем, варианты нажимаемы; внутренних скроллов нет.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 1.3. Консоль на телефоне, ландшафт (ландшафт-правило, критерий §12.2)
++
++Эталон: `console-phone-landscape-v2.html`. Автоматика: smoke шаг 4а (вьюпорт 700×360, «Закрыть вопрос» во вьюпорте) — здесь живой телефон, все состояния.
++
++**Критерий прохождения:** первый экран консоли в ландшафте (~320–400px высоты) всегда содержит статус + текущий момент + главную кнопку без прокрутки; при такой высоте — двухколоночная сетка (действия справа, информация слева). Проверить в состояниях: игра (вопрос открыт), reveal, «Квиз окончен».
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 1.4. Консоль на ноутбуке
++
++**Критерий прохождения:** консоль читается и управляется на десктопной ширине; лей-аут не расползается (mobile-first не ломает десктоп); палитра консоли — светлая (фон `#E3F0E9`, панели `#F4F8F3`, primary `#10514F` с золотым текстом).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 1.5. Проектор с расстояния
++
++`/screen/<code>` на проекторе/TV, смотреть с 2–4 метров (практическая проверка читаемости — часть приёмки, дизайн §11).
++
++**Критерий прохождения:** с расстояния читаются: текст вопроса (h1.screen-question), варианты, таймер (56px золотом справа вверху), табло дорожками (имена/счёт/дельты), логотип в левом верхнем углу. Ничего не сливается с фоном `#0A252B`.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 2. Компонентные состояния (дизайн §8, п. 15)
++
++### 2.1. hover/active — мышь
++
++Консоль и редактор на ноутбуке: наводить и нажимать кнопки всех видов (primary, secondary, quiet) и варианты ответов на сцене (участник с десктопа).
++
++**Критерий прохождения:** hover — мягкая смена заливки (140 мс: primary→`#17685F`, secondary→`#B4CDBC`, quiet→полоса `#D7E8DE`, сцена→`#23484D`); active — мгновенно и глубже (primary `#0A3E3B`, secondary `#A3BFA9`, сцена `#122E32`). Кнопки без рамок — **включая тихие** (правило п. 15).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 2.2. focus-visible — клавиатура
++
++Пройти консоль и форму входа участника табом (Tab/Shift+Tab, Enter/Space на кнопках и radio).
++
++**Критерий прохождения:** контур фокуса 3px с offset 2px виден ТОЛЬКО при клавиатурной навигации (консоль — `#10514F`, сцена — золото `#E6C77D`); клик мышью контур не оставляет; вся консоль управляема с клавиатуры (включая radio-группу редактора и toggle «ещё N — развернуть»).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 2.3. Тач на телефоне — без липкого hover
++
++На телефоне (тач): нажатия на кнопки и варианты.
++
++**Критерий прохождения:** hover-подсветка не «залипает» после тапа (hover только при `@media (hover:hover) and (pointer:fine)`); active-нажатие видимо (глубокая заливка) в момент касания.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 2.4. reduced-motion
++
++Включить «уменьшение движения» в ОС/браузере (macOS: Системные настройки → Универсальный доступ → Дисплей → Уменьшить движение; или эмуляция в DevTools → Rendering → prefers-reduced-motion), затем reveal с приростом очков.
++
++**Критерий прохождения:** анимация доезда дорожек (300 мс) отключена — полосы появляются мгновенно; hover-переходы погашены; **таймер продолжает тикать** (таймер — контент, не анимация, п. 15).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 2.5. disabled
++
++Консоль: «Открыть вопрос» disabled, пока вопрос accepting; за концом колоды — disabled с причиной.
++
++**Критерий прохождения:** disabled-кнопка — opacity 0.55, без hover/active, курсор обычный (не pointer/not-allowed), причина — текстом рядом.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 3. Шрифты (woff2, self-hosted)
++
++### 3.1. Ноль обращений к Google Fonts
++
++DevTools → Network (фильтр «font»), полный прогон сессии на любом контуре. Автоматика: smoke шаг 8 — тот же ассерт на хост-странице.
++
++**Критерий прохождения:** ни одного обращения к `fonts.googleapis.com` / `fonts.gstatic.com`; woff2 грузятся локальные subset'ы из `/fonts/` (oranienbaum-400-latin/cyrillic, pt-sans-400/700-latin/cyrillic).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 3.2. Семейства реально загружены
++
++В консоли DevTools: `await document.fonts.ready; document.fonts.check('16px Oranienbaum')` и `document.fonts.check('16px "PT Sans"')`.
++
++**Критерий прохождения:** оба `true`; визуально заголовки/сцена — Oranienbaum (с засечками, не системный serif), рабочий текст — PT Sans.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 3.3. swap-вспышка
++
++Холодная загрузка страницы (пустой кэш) — наблюдать первый кадр.
++
++**Критерий прохождения:** допустима ОДНА swap-вспышка системного шрифта на первом кадре (`font-display: swap` — норма дизайна §3); постоянного системного шрифта быть не должно, повторных вспышек при навигации — нет.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 4. Логотип и словарь
++
++### 4.1. Логотип «МЫ МОЖЕМЪ» на всех экранах сцены (п. 17)
++
++Пройти на проекторе и участнике: ожидание, вопрос (включая вопрос С таймером — в мокапах пропущен, правило зафиксировано п. 17), reveal, финал.
++
++**Критерий прохождения:** логотип присутствует на КАЖДОМ экране сцены: проектор — левый верхний угол, 22px золотом; участник — по центру вверху, 19px. Написание точное: «МЫ МОЖЕМЪ» (ъ на конце).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 4.2. Blagovest отсутствует (гейт лицензии, п. 4)
++
++Поиск по репо (`grep -ri blagovest apps/web/public apps/web/src/styles`) + Network-вкладка страницы (нет запросов blagovest-файлов).
++
++**Критерий прохождения:** файлов Blagovest в `public/fonts/` нет, `@font-face` его не подключает, токен `--font-logo` = `'Oranienbaum', serif` (tokens.css:50); упоминания в комментариях допустимы, в Network — ноль обращений.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 4.3. Дореформенный словарь Приложения A — на месте
++
++Проверить глазами по контурам все четыре места из Приложения A плана.
++
++**Критерий прохождения:** «МЫ МОЖЕМЪ» (логотип, все экраны сцены), «Вопросъ N» (заголовок вопроса — участник и проектор), «Правильный отвѣтъ» (reveal — участник и проектор), «Входъ в игру» (экран входа участника). ъ = U+044A, ѣ = U+0463 — не «е»/«ь» имитациями.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 4.4. Современная орфография вне словаря
++
++Консоль и редактор целиком + рабочие подписи сцен.
++
++**Критерий прохождения:** legend редактора — «Правильный ответ» (современное); все кнопки/подписи/пустые состояния консоли — современная орфография; пользовательский контент (тексты вопросов, имена) нигде не преобразован. Ничего лишнего дореформенного за пределами четырёх мест п. 4.3.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 4.5. Кегль логотипа консоли (carry батча D — решение владельца)
++
++Консольный strip использует `Logo contour="console" size="participant"` — кегль 19px (scene.css:19), мокапные полосы консоли — 17px.
++
++**Критерий прохождения / решение:** глазами на живой консоли (телефон + ноутбук): 19px в полосе комнаты выглядит органично или крупновато? Вердикт фиксируется в разделе «Решения по итогам приёмки», строка (б).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 5. Таймер на трёх контурах (критерий §12.3)
++
++Автоматика: unit (`apps/web/src/state/question-timer.spec.ts`) + smoke шаги 4/4б (формат `m:ss`, reload без сброса). Руками — вид, сценарии вне smoke.
++
++### 5.1. Дефолт 30 сек на всех контурах
++
++В редакторе не трогать поле «Время на ответ» (дефолт 30), открыть вопрос.
++
++**Критерий прохождения:** отсчёт виден на всех трёх контурах сразу после открытия: проектор — 56px золотом справа вверху, участник — 40px в верхней строке, консоль — в блоке текущего момента (`.console-timer`); стартовое значение ~0:30, тик раз в секунду.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 5.2. «Без лимита»
++
++В редакторе для одного вопроса выбрать «без лимита», дойти до него в игре.
++
++**Критерий прохождения:** таймера на сцене нет ВООБЩЕ (ни на проекторе, ни у участника, ни в консоли) — не «∞», не прочерк; вопрос закрывается вручную как обычно. Главная кнопка reveal для следующего вопроса с лимитом несёт длительность на себе.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 5.3. Спокойный `0:00` без краснухи
++
++Открыть вопрос с коротким лимитом (5 сек — нижняя граница схемы v3) и не закрывать.
++
++**Критерий прохождения:** по истечении таймер стоит `0:00` — цвет не меняется на красный, никакой пульсации/мигания; интерфейс не блокируется, отвечать можно до ручного закрытия (вариант А — только индикатор).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 5.4. Ручное закрытие после `0:00`
++
++После истечения таймера закрыть вопрос кнопкой.
++
++**Критерий прохождения:** закрытие проходит штатно, reveal отрисовывается; поздний ответ (после 0:00, до закрытия) принимается/отклоняется по серверной норме модуля — без UI-ошибок.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 5.5. Пересчёт после reconnect
++
++На телефоне-участнике при открытом вопросе выключить Wi-Fi на ~10 секунд, включить обратно (smoke делает reload — здесь разрыв сети).
++
++**Критерий прохождения:** после автоматического reconnect/перефолда таймер ПЕРЕСЧИТАН от серверного `openedAt` (показывает реальный остаток с учётом обрыва), а не сброшен на полный и не заморожен; баннер «Нет соединения» гаснет сам.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 6. Дорожки (ростер-«забег», критерий §12.4)
++
++Автоматика: unit (`race-tracks.spec`, `plural-ru.spec`) + smoke шаг 6 (a11y-роли list/listitem, ненулевая ширина у ответившего).
++
++### 6.1. Лидер-нормировка
++
++Игра с 3+ участниками с разными очками (один отвечает верно всегда, остальные — через раз).
++
++**Критерий прохождения:** дорожка лидера — полная ширина полотна, остальные — пропорционально лидеру (не абсолютные пиксели); заливка изумруд `#0F7B57` на полотне `#143138` (сцена) / `#D5E2DA` (консоль); место участника в шапке у участника + пометка «это ты».
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.2. Золотой прирост с числом `+N`
++
++Reveal после раунда, где часть участников набрала очки.
++
++**Критерий прохождения:** прирост за раунд — золотой сегмент в конце дорожки + число `+N` рядом со счётом (золотом, tabular-nums); у неотвечавших сегмента и числа нет.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.3. Пустая дорожка при нуле очков
++
++Reveal, где участник ни разу не ответил верно.
++
++**Критерий прохождения:** у нулевого участника дорожка пустая (без заливки вообще), имя и «0» на месте; лидер с нулевым таблом целиком (все нули) → все дорожки пустые.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.4. Анимация доезда 300 мс
++
++Reveal на проекторе — наблюдать переход дорожек (reduced-motion ВЫКЛЮЧЕН).
++
++**Критерий прохождения:** доезд полос плавный, ~300 мс; без дёрганий и двойных проходов; при повторном reveal перерисовка не анимирует «с нуля» (перефолд не переигрывает анимацию — при reconnect после reveal полосы сразу в конечном положении либо доезжают один раз).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.5. Топ-4 reveal / топ-5 финал на проекторе + плюрализация «ещё N»
++
++Сценарии с 5, 6 и 7 участниками (лишних добрать вторым телефоном/профилями; имена можно пустые — сервер выдаст псевдонимы).
++
++**Критерий прохождения:** reveal проектора — топ-4 дорожек + строка «ещё N участник/участника/участников»; финал проектора — топ-5 + «ещё N участников» (полное табло — на устройствах участников). Проверяемая строка UI — «ещё N участников» БЕЗ «+»: плюс и суффикс «· полное табло…» из мокапа проектора сознательно не переносятся — решение T13, зафиксировано в срезе (комментарий в race-tracks.tsx). Плюрализация: N=1 → «участник», N=2 → «участника», N=5 → «участников» — прогнать минимум два значения из трёх форм (unit покрывает все три, руками — две реальные).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.6. Дельты `+N` в финале (carry батча C/D — решение владельца)
++
++Известная расходимость: на финале консоль обнуляет gain осознанно (прирост — атрибут reveal-момента), сцены (проектор/участник) показывают `lastRoundGains` — золотые дельты последнего раунда на финальном табло.
++
++**Критерий прохождения / решение:** прогнать финал и сравнить три контура рядом: приемлемо ли, что сцены показывают `+N` последнего раунда, а консоль — нет? Варианты: принять как есть (обоснование: финал — итог, прирост уместен в reveal) / выровнять отдельной задачей (убрать дельты со сцен на финале или добавить в консоль). Вердикт — раздел «Решения по итогам приёмки», строка (а).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 6.7. `.fill.solo` (carry батча B — вердикт на приёмке)
++
++Одна строка CSS из неканонических мокапов (transitions.css:134): когда gain=0, сегмент `.fill` получает класс `solo` со скруглением обоих концов (без gain-сегмента правый край острый).
++
++**Критерий прохождения / решение:** глазами на reveal и финале: дорожки без прироста выглядят аккуратно (скругление работает)? Если артефакт/лишняя сложность — кандидат на удаление. Вердикт — раздел «Решения по итогам приёмки», строка (в).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 7. Live-ростер (критерий §12.5)
++
++Автоматика: unit (`roster-refetch.spec` — дедуп 2 с) + smoke шаг 5а (второй участник виден в консоли без перезагрузки).
++
++### 7.1. Второй участник заходит — консоль без перезагрузки
++
++Консоль открыта на живой комнате; второй (третий…) участник заходит с телефона.
++
++**Критерий прохождения:** имя нового участника появляется в ростере консоли само, без перезагрузки и без поллинга; задержка ≤2 секунд допустима (дедуп-окно событийного рефетча); при шквале join'ов (3+ подряд) ростер не мигает/не перерисовывается каскадом.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 7.2. displayName в лог не попадает (REQ-SEC-009)
++
++После нескольких join'ов — read-only psql (блок 0.3): `SELECT seq, type, payload FROM realtime."LogEvent" WHERE type='core.member.joined' ORDER BY seq;`
++
++**Критерий прохождения:** payload каждого события `core.member.joined` содержит ТОЛЬКО `identityId` — displayName отсутствует как ключ (имена клиент перечитывает REST'ом `GET /rooms/:id/members`; основание в коде: потребитель payload не читает вообще — рефетч по факту события, финревью батча D).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 8. Экран «Квиз окончен» (колода вычерпана, комната ACTIVE)
++
++### 8.1. Главная кнопка «Завершить событие»
++
++Пройти все вопросы до конца колоды (без досрочного завершения — тихая кнопка «Завершить квиз досрочно» не используется): путь к экрану — естественный конец колоды: после reveal последнего вопроса нажать главную кнопку «Завершить квиз» и принять confirm («Завершить квиз? Это действие необратимо.») — smoke шаг 7 делает ровно это.
++
++**Критерий прохождения:** консоль показывает связующий экран «Квиз окончен» (эталон `console-quiz-finished.html`): главная кнопка — «Завершить событие»; событие при этом живо (комната ACTIVE, сцены на связи).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 8.2. Подсказка невручённых наград — только при наличии (п. 18)
++
++Прогнать дважды: (а) без розыгрыша вообще; (б) с безпризовым розыгрышем (награда есть, не вручена).
++
++**Критерий прохождения:** (а) без наград подсказки о невручённых НЕТ вовсе; (б) при невручённой награде подсказка видна; «Завершить событие» не блокируется невручёнными наградами (REQ-RWD-009) — нажимается и завершает.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 8.3. Сцены при «Квиз окончен»
++
++Участник и проектор в тот же момент.
++
++**Критерий прохождения:** сцены показывают «Игра завершена» + итоговое табло (игра завершена по `game.finished`, комната ещё жива); никакого «ждём вопрос».
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 9. Финал без розыгрыша (п. 18, критерий §12.1)
++
++Автоматика: smoke шаг 7 (блок победителей отсутствует на проекторе). Руками — обе сцены глазами.
++
++### 9.1. Проектор
++
++Финал квиза, в котором розыгрыша не было (в логе нет `draw.completed`).
++
++**Критерий прохождения:** блок победителей не рендерится вовсе; табло топ-5 центрируется / занимает всю зону финала (никакого пустого правого блока и заголовка «Победители» без содержимого).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 9.2. Участник
++
++Тот же финал на телефоне.
++
++**Критерий прохождения:** только итоговое табло дорожками (полное, с «это ты» и местом) + «Ваши очки: N»; секции победителей нет.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 10. Финал с розыгрышем
++
++Прогон консолью с `localhost` машины стенда (ограничение LAN блока 0.2); сцены могут оставаться на LAN-устройствах. Дефолтный режим ADR-012 (`PRIZE_MODE=off`): безпризовой розыгрыш в отдельной lottery-комнате ИЛИ призовой прогон при `PRIZE_MODE=on` — по решению прогоняющего; визуальные пункты ниже общие.
++
++### 10.1. Баннер победителя в консоли
++
++После розыгрыша — карточка призов консоли (эталон `console-draw-winner-larger.html`).
++
++**Критерий прохождения:** баннер «Розыгрыш завершён», имя победителя — 36px Oranienbaum (`--font-display`), визуально КРУПНЕЙШИЙ элемент экрана; безпризовой розыгрыш — без строки названия приза; победитель виден также у участников и на экране.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 10.2. Приз с quantity 0 — «Разыграна»
++
++Призовой прогон (`PRIZE_MODE=on`): создать приз с quantity 1, разыграть его.
++
++**Критерий прохождения:** у разыгранного приза вместо кнопки — тихий статус «Разыграна» (при фонде >1 после исчерпания — «Разыграны»); кнопка не disabled-серая, а снята с глаз; попытка создания приза при `PRIZE_MODE=off` (контроль гейта, если прогон в дефолте) — «Призовой режим выключен на этом сервере.».
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 11. COMPLETED-экран консоли
++
++После «Завершить событие» (confirm принять).
++
++### 11.1. Hero, награды первыми, итоговый забег
++
++**Критерий прохождения:** hero-заголовок завершения; при наличии невручённых наград — блок awards ПЕРВЫМ (до табло), с рабочими fulfill/revoke; итоговый забег — дорожки полного табло; без наград — блока нет (п. 18). Строки плюрализованы («участников: N» и т. п. — см. блок 14).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 11.2. «Вернуться к началу — новое событие»
++
++**Критерий прохождения:** кнопка возвращает на `/host/new` (hostRoomId/hostRoomCode сняты атомарно); повторный заход на `/host` ведёт в setup, а не в мёртвую комнату; команды ведения в завершённой комнате недоступны.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 12. Длинный контент
++
++Автоматика: smoke шаг 6а (длинный вопрос 200+ символов не клиппится на проекторе). Руками — участник и варианты.
++
++### 12.1. Длинный вопрос и 6 вариантов на проекторе
++
++Вопрос 200+ символов, 6 вариантов (эталоны `projector-long-content.html`, `projector-options-no-lines.html`).
++
++**Критерий прохождения:** компактная плотность, две колонки вариантов, отступ перед вариантами ~35px; весь вопрос и все варианты видны целиком, без скролла и клиппинга; золотых вертикальных линий у вариантов нет (удалены п. 8).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 12.2. Длинный вопрос/варианты у участника
++
++Тот же вопрос на телефоне + вариант с очень длинным текстом и имя участника в 30+ символов (эталон `participant-long-content.html`).
++
++**Критерий прохождения:** длинные тексты переносятся, кнопки вариантов растут по высоте, имена не обрезаются; внутренних скроллов нет — прокручивается страница целиком.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 13. Empty-state табло
++
++Сценарий: reveal при нулевом табло (вопрос без верных ответов — например, первый же вопрос никто не ответил верно) или досрочный финал без очков.
++
++### 13.1. «Очков пока нет.» на трёх контурах
++
++**Критерий прохождения:** вместо пустых дорожек — строка «Очков пока нет.» на всех трёх контурах (участник, проектор, консоль — reveal и, при досрочном финале, финал); без NaN, без деления на ноль в ширинах, без пустого белого/тёмного блока.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 14. Плюрализация в консоли
++
++Автоматика: unit `plural-ru.spec` (формы 1/2/5/11/21/101). Руками — живые строки.
++
++### 14.1. «В колоде N вопросов»
++
++Редактор/консоль до старта: прогнать на квизах с 1, 2 и 5 вопросами (три коротких прогона setup или наблюдение до удаления вопросов в редакторе).
++
++**Критерий прохождения:** «В колоде 1 вопрос», «…2 вопроса», «…5 вопросов» — форма следует числу; то же в строках списка вопросов редактора с длительностями.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 14.2. Toggle «ещё N участников — развернуть»
++
++Reveal в консоли при 5+ участниках с очками.
++
++**Критерий прохождения:** ростер консоли — топ-4 + toggle «ещё N участник/участника/участников — развернуть»; разворот показывает полный список, обратный — «Свернуть»; при переходе к следующему вопросу список схлопывается к топ-4 сам.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## 15. Редактор квиза в руках (полный проход на реальном квизе)
++
++Эталон `console-editor.html`. Не транскрипция мокапа — живой проход: создать квиз с нуля, править, удалять, запускать.
++
++### 15.1. Полный проход редактора
++
++Создать квиз из 3+ вопросов (разные длительности, один «без лимита»), править тексты после добавления, удалить вопрос из середины, сохранить и запустить.
++
++**Критерий прохождения:** список вопросов с длительностями слева читается; шапки карточек («номер · длительность») дают навигацию; валидация формы честная («Сохранить и запустить» активна только при валидной форме, причины disabled — текстом); на телефоне редактор управляем в обеих ориентациях (ландшафт-правило для редактора смягчено — список может прокручиваться, но текущая карточка и главная кнопка доступны).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 15.2. Radio-группа «Правильный ответ» (критерий §12.6)
++
++В карточке вопроса — группа выбора правильного варианта.
++
++**Критерий прохождения:** ОДИН видимый legend «Правильный ответ» (современная орфография, Приложение A); повторяющегося label у каждого варианта нет; доступные имена radio различимы (проверить клавиатурой — стрелки ходят по группе — и/или инспектором: aria-label «Время на ответ, секунд» у поля длительности на месте — фикс батча D). Находка «двусмысленный label „Правильный"» закрыта.
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++### 15.3. Полоса номеров редактора — решение по ощущениям (carry, решение владельца 2026-10-20)
++
++Контекст: мокап `console-editor.html` содержит полосу номеров с переключателем «один активный вопрос»; реализация T10 отдала навигацию шапками карточек (таск-ревью: чтение буквы плана защитимо, Minor на владельца). Решение владельца 2026-10-20: пройти редактор в руках на реальном квизе и решить по ощущениям.
++
++**Критерий прохождения / решение:** во время прогона 15.1 оценить: хватает ли шапок карточек для ориентации в списке, или без переключателя «один активный вопрос» редактор неудобен? Если нужен переключатель — это ОТДЕЛЬНАЯ задача с active-question state, НЕ доработка T10. Вердикт — раздел «Решения по итогам приёмки», строка (г).
++**Протокол:** ⬜ дата: ____ · устройство/браузер: ____ · результат: ____ · комментарий: ____
++
++---
++
++## Сверка критериев приёмки среза (дизайн §12)
++
++Baseline автоматики: финревью батча D (HEAD `0d51756`) — web 166/166, test:int 223/223 (testcontainers, --force), boundary-check 0 нарушений (763 модуля, 2379 зависимостей), guardrails 10/10; после T13 web-сьют — **175/175 (24 файла, прогон 2026-10-20 на HEAD ветки)**, smoke.spec переписан под срез и зелёный (1/1 против compose-стенда). Финревью батча E переподтверждает гейты на HEAD перед мерджем среза.
++
++| # | Критерий (кратко) | Автоматика — основания | Ручная приёмка (блоки) | Статус |
++|---|---|---|---|---|
++| 1 | Три контура по §3–§8: палитры, типографика, лей-ауты, состояния | tokens.css + tokens.spec (токены/data-theme); smoke — якоря разметки (console-strip, screen-question, «Входъ в игру»); unit web 175/175 | Блоки 1–4, 12; сверка с мокапами-эталонами (канонический список дизайн-дока) | ⬜ |
++| 2 | Консоль управляется с телефона в обеих ориентациях; ландшафт-правило | smoke шаг 4а: вьюпорт 700×360, «Закрыть вопрос» во вьюпорте без скролла | 1.3 (все состояния), 1.4 | ⬜ |
++| 3 | Таймер на всех контурах: дефолт 30, «без лимита», спокойный `0:00`, ручное закрытие, пересчёт после reconnect | unit `apps/web/src/state/question-timer.spec.ts` (остаток, «без лимита», `0:00`); smoke шаги 4/4б (формат `m:ss`, reload без сброса от openedAt) | Блок 5 (5.1–5.5; 5.5 — разрыв сети, не reload) | ⬜ |
++| 4 | Дорожки: нормировка к лидеру, золотой прирост с числом, ноль = пустая, 300 мс с reduced-motion off; топ-4/топ-5 + «ещё N» | unit `race-tracks.spec` (нормировка, gain-сегмент, нули, topN) + `plural-ru.spec`; smoke шаг 6 (a11y-роли, ненулевая ширина) | Блок 6 (6.1–6.7), 13.1 | ⬜ |
++| 5 | Live-ростер по `core.member.joined` без поллинга; displayName в лог не попадает (REQ-SEC-009) | unit `roster-refetch.spec` (событие в сете + дедуп 2 с); smoke шаг 5а (видимость без перезагрузки); **код: payload не читается вообще** (рефетч по факту события, верифицировано финревью батча D) | 7.1 (поведение), **7.2 (psql-сверка payload — обязательная ручная строка)** | ⬜ |
++| 6 | Radio-группа редактора: один legend «Правильный ответ», доступные имена radio | unit quiz-editor-спеки батча D (RED→GREEN, 3 кейса) + aria-label фикс `b62b4ae` | 15.2 (живой проход клавиатурой) | ⬜ |
++| 7 | Логотип на всех экранах сцены; Blagovest отсутствует, логотип — Oranienbaum | `--font-logo: 'Oranienbaum', serif` (tokens.css:50); smoke шаг 8 (woff2 self-hosted); grep по репо — файлов Blagovest нет | 4.1 (все экраны сцены глазами), 4.2 (Network + grep), 3.1–3.3 | ⬜ |
++| 8 | Конвейер зелёный: гейты + unit таймера/дорожек + playwright-смоук; boundary не ослаблен | Гейты: build 6/6, lint 6/6, typecheck 10/10, test 10/10 (web 175/175), test:int 223/223, boundary-check 0/763, guardrails 10/10 — baseline батча D + web 175 после T13; **финревью батча E переподтвердит на HEAD свежими прогонами** | Не требуется (машинный критерий); строка — для отметки после финревью батча E | ⬜ |
++
++---
++
++## Решения по итогам приёмки
++
++Вердикты владельца по carry-пунктам батчей B–D (решение владельца 2026-10-20: отнесены к живой приёмке T14). Варианты: **«принято как есть»** / **«отдельная задача»** (формулировка задачи — в комментарии).
++
++| # | Вопрос | Контекст | Вердикт | Дата | Комментарий |
++|---|---|---|---|---|---|
++| (а) | Дельты `+N` в финале: сцены показывают `lastRoundGains`, консоль обнуляет gain осознанно | Строка 6.6; прирост — атрибут reveal-момента по задумке, сцены наследуют `lastRoundGains` | ⬜ принято как есть / ⬜ отдельная задача | ____ | ____ |
++| (б) | Кегль логотипа консоли 19px vs мокапные 17px полосы | Строка 4.5; `Logo size="participant"` в console-strip | ⬜ принято как есть / ⬜ отдельная задача | ____ | ____ |
++| (в) | `.fill.solo` — одна строка CSS из неканонических мокапов (скругление fill при gain=0) | Строка 6.7; transitions.css:134, race-tracks.tsx:65 | ⬜ принято как есть (нужна) / ⬜ отдельная задача (удалить) | ____ | ____ |
++| (г) | Полоса номеров редактора (переключатель «один активный вопрос») vs шапки карточек | Строка 15.3; решение владельца 2026-10-20: по ощущениям живого редактора; если нужен переключатель — отдельная задача с active-question state, НЕ доработка T10 | ⬜ принято как есть (шапок хватает) / ⬜ отдельная задача (переключатель) | ____ | ____ |
++
++---
++
++## Правила прогона
++
++- Прогон — владельцем (или с владельцем) на реальных устройствах: минимум один телефон-участник, консоль на телефоне и ноутбуке, проектор/второй экран. Стенд — локальный/LAN, НЕ production.
++- Каждая строка протокола заполняется по факту: дата, устройство/браузер, результат (✅/❌), комментарий. Строки с ❌ — находки с триажем (блокер среза / отдельная задача / известное ограничение).
++- Находки за пределами критериев §12 не блокируют мердж сами по себе — триаж владельцем по образцу deferred-триажа батчей; блокируют только провалы строк, закрывающих критерии таблицы §12.
++- После прогона: заполненный чеклист коммитится в `docs/sessions/` этим же файлом (строки ⬜ → ✅/❌); финревью батча E и мердж среза — после зелёной приёмки.

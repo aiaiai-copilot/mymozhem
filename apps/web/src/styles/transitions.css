@@ -1,0 +1,163 @@
+/* Система состояний и контент-анимаций — перенос из принятого мокапа
+   component-states-live: кнопки (ниже) и дорожки «забега» (в конце файла).
+   Кнопки: hover 140мс только на устройствах с настоящей мышью,
+   active мгновенный (≤60мс) везде включая тач, focus-visible — контур 3px со
+   смещением 2px (на сцене золотой), disabled — 0.55 без hover/active.
+   Отличие от мокапа: сцена определяется классом .btn-scene (в приложении нет
+   обёртки .panel.dark), литералы hover/active danger заменены токенами
+   --danger-hover/--danger-active, шрифт — var(--font-body). */
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 16px;
+  padding: 13px 22px;
+  cursor: pointer;
+  transition: background-color var(--t-hover) ease-out, color var(--t-hover) ease-out;
+}
+.btn-primary {
+  background: var(--console-primary);
+  color: var(--gold);
+}
+.btn-secondary {
+  background: var(--console-secondary);
+  color: var(--ink);
+}
+.btn-quiet {
+  background: none;
+  color: var(--ink);
+  padding: 13px 10px;
+  border-radius: 8px;
+}
+.btn-danger {
+  background: none;
+  color: var(--error-light);
+  padding: 13px 10px;
+  border-radius: 8px;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* hover — только устройства с настоящей мышью; на таче hover не появится вообще */
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:hover:not(:disabled) { background: var(--console-primary-hover); }
+  .btn-secondary:hover:not(:disabled) { background: var(--console-secondary-hover); }
+  .btn-quiet:hover:not(:disabled) { background: var(--console-strip); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+  .btn-scene:hover:not(:disabled) { background: var(--scene-surface-hover); }
+  /* Н15: консольный toggle «ещё N» — тихая текстовая кнопка, hover даёт
+     чернильный цвет и подчёркивание, чтобы элемент выглядел интерактивным. */
+  .console-tracks-toggle:hover { color: var(--ink); text-decoration: underline; }
+}
+
+/* active — мгновенно (≤60мс), работает везде, включая тач */
+.btn-primary:active:not(:disabled) { background: var(--console-primary-active); transition-duration: var(--t-press); }
+.btn-secondary:active:not(:disabled) { background: var(--console-secondary-active); transition-duration: var(--t-press); }
+.btn-quiet:active:not(:disabled) { background: var(--console-secondary); transition-duration: var(--t-press); }
+.btn-danger:active:not(:disabled) { background: var(--danger-active); transition-duration: var(--t-press); }
+.btn-scene:active:not(:disabled) { background: var(--scene-surface-active); transition-duration: var(--t-press); }
+
+/* focus-visible — контур только для клавиатуры; на сцене золотой */
+.btn:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 2px;
+}
+.btn-scene:focus-visible { outline-color: var(--gold); }
+.btn:focus:not(:focus-visible) { outline: none; }
+
+/* Вариант ответа на сцене */
+.btn-scene {
+  background: var(--scene-surface);
+  color: var(--scene-text);
+  min-width: 260px;
+  text-align: left;
+  font-weight: 400;
+  font-size: 18px;
+  padding: 16px 20px;
+}
+.btn-scene b { color: var(--gold); margin-right: 10px; }
+
+/* Дорожки «забега» — перенос из мокапов component-states-live /
+   tracks-scene-projector-participant / console-reveal-tracks. fill — итог без
+   прироста, нормированный к лидеру; gain — золотой сегмент прироста последнего
+   раунда; оба анимируются width за var(--t-race) (контент-анимация, не hover).
+   Полотно дорожки зависит от контура: сцена — --track-canvas-dark, консоль —
+   --track-canvas-light. Заливка одна на оба контура — var(--track-fill)
+   (бриф T6; в мокапе console-reveal-tracks fill был --console-primary —
+   осознанное расхождение мокапов, берём токен темы). */
+
+/* Доезд при монтировании (Н2, живая приёмка): полосы существуют только в
+   reveal-ветке разметки и раньше появлялись сразу в финальной ширине —
+   transition было нечего перевозить. Keyframes анимируют от width: 0 к
+   инлайн-ширине элемента; transition ниже остаётся для обновлений ширины
+   на уже живом элементе. */
+@keyframes race-in {
+  from { width: 0; }
+}
+
+.race-tracks .track-row { padding: 7px 0 9px; }
+.race-tracks .tr-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.race-tracks .tr-name { font-weight: 700; font-size: 14px; }
+.race-tracks .tr-name .me {
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+.race-tracks .tr-score { font-size: 14px; font-variant-numeric: tabular-nums; }
+/* Числовая дельта прироста рядом со счётом (дизайн §7; мокап
+   console-reveal-tracks). Цвет — var(--gold) в тон золотому сегменту .gain. */
+.race-tracks .tr-score .delta {
+  color: var(--gold);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+.race-tracks .tr-lane {
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  display: flex;
+}
+.race-tracks.contour-scene { color: var(--scene-text); }
+.race-tracks.contour-scene .tr-lane { background: var(--track-canvas-dark); }
+.race-tracks.contour-scene .tr-more { color: var(--muted-scene); }
+.race-tracks.contour-console { color: var(--ink); }
+.race-tracks.contour-console .tr-lane { background: var(--track-canvas-light); }
+.race-tracks.contour-console .tr-more { color: var(--muted); }
+.race-tracks .fill {
+  background: var(--track-fill);
+  border-radius: 5px 0 0 5px;
+  height: 100%;
+  animation: race-in var(--t-race) ease-out;
+  transition: width var(--t-race) ease-out;
+}
+/* Без прироста — закруглённый правый конец у fill */
+.race-tracks .fill.solo { border-radius: 5px; }
+.race-tracks .gain {
+  background: var(--gold);
+  height: 100%;
+  border-radius: 0 5px 5px 0;
+  animation: race-in var(--t-race) ease-out;
+  transition: width var(--t-race) ease-out;
+}
+.race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
+
+/* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации;
+   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4) */
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition-duration: 0ms !important; }
+  .race-tracks .fill,
+  .race-tracks .gain { transition-duration: 0ms !important; animation: none !important; }
+}

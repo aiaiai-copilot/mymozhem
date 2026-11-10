@@ -95,25 +95,30 @@ export function SetupPage() {
 
   if (roomError) {
     return (
-      <main>
-        <p role="alert">{roomError}</p>
+      <main className="console-page">
+        <p role="alert" className="console-error">
+          {roomError}
+        </p>
       </main>
     );
   }
   if (!roomId) {
     return (
-      <main>
-        <p>Создаём комнату…</p>
+      <main className="console-page">
+        <p className="console-note">Создаём комнату…</p>
       </main>
     );
   }
 
+  // Палитра/классы консоли (Task 10, мокапы forms-and-system-states-v2 /
+  // editor-secondary-button-darker): каркас console-page, заголовок display-
+  // шрифтом, выбор приложения — карточкой; поведение не меняется.
   return (
-    <main>
-      <h1>Настройка комнаты</h1>
-      <fieldset disabled={busy}>
-        <legend>Приложение</legend>
-        <label>
+    <main className="console-page">
+      <h1 className="setup-title">Настройка комнаты</h1>
+      <fieldset className="console-card setup-appkind" disabled={busy}>
+        <legend className="editor-legend">Приложение</legend>
+        <label className="setup-appkind-option">
           <input
             type="radio"
             name="app-kind"
@@ -122,7 +127,7 @@ export function SetupPage() {
           />
           Квиз
         </label>
-        <label>
+        <label className="setup-appkind-option">
           <input
             type="radio"
             name="app-kind"
@@ -136,17 +141,22 @@ export function SetupPage() {
         <QuizEditor onSubmit={submitQuiz} busy={busy} />
       ) : (
         <form
+          className="editor-form"
           onSubmit={(e) => {
             e.preventDefault();
             submitLottery();
           }}
         >
-          <button type="submit" disabled={busy}>
+          <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
             Сохранить и запустить
           </button>
         </form>
       )}
-      {submitError ? <p role="alert">{submitError}</p> : null}
+      {submitError ? (
+        <p role="alert" className="console-error">
+          {submitError}
+        </p>
+      ) : null}
     </main>
   );
 }

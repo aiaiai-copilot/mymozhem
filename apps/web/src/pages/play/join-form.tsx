@@ -3,6 +3,7 @@ import { DISPLAY_NAME_MAX_LENGTH, type JoinRequest } from '@mymozhem/sdk';
 import { ApiError } from '../../api/api-error';
 import type { ApiClient } from '../../api/api-client';
 import { joinRoom } from '../../api/endpoints';
+import { Logo } from '../../components/logo';
 import { decodeAccessClaims, SessionStore } from '../../state/session';
 
 // Тело join (ADR-012 §3): имя необязательно — пустое уходит БЕЗ ключа
@@ -85,39 +86,54 @@ export function JoinForm({
       .finally(() => setBusy(false));
   };
 
+  // Разметка — эталон participant-join-lobby-center-fix: логотип по центру,
+  // «Входъ в игру» (Приложение A), золотые подписи полей, кнопка «Играть» —
+  // сценический вариант (.btn-scene + .btn-join), не консольный .btn-primary.
   return (
-    <form onSubmit={submit}>
-      <h1>Вход в игру</h1>
-      {codeFromUrl ? (
-        <p>
-          Код комнаты: <strong>{codeFromUrl}</strong>
-        </p>
-      ) : (
-        <label>
-          Код комнаты
+    <>
+      <Logo contour="scene" size="participant" />
+      <h1 className="play-title">Входъ в игру</h1>
+      <form onSubmit={submit}>
+        {codeFromUrl ? (
+          // Ссылка-приглашение: код показываем read-only полем (мокап входа),
+          // вводить не просим.
+          <label className="play-field">
+            Код комнаты
+            <input className="play-input" value={codeFromUrl} readOnly autoComplete="off" />
+          </label>
+        ) : (
+          <label className="play-field">
+            Код комнаты
+            <input
+              className="play-input"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="off"
+              disabled={busy}
+            />
+          </label>
+        )}
+        <label className="play-field">
+          Ваше имя (необязательно)
           <input
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
+            className="play-input"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            maxLength={DISPLAY_NAME_MAX_LENGTH}
+            placeholder="Получите псевдоним, если пусто"
             autoComplete="off"
             disabled={busy}
           />
         </label>
-      )}
-      <label>
-        Ваше имя (необязательно)
-        <input
-          value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
-          maxLength={DISPLAY_NAME_MAX_LENGTH}
-          placeholder="Получите псевдоним, если пусто"
-          autoComplete="off"
-          disabled={busy}
-        />
-      </label>
-      {error ? <p role="alert">{error}</p> : null}
-      <button type="submit" disabled={busy}>
-        {busy ? 'Входим…' : 'Играть'}
-      </button>
-    </form>
+        {error ? (
+          <p role="alert" className="play-error">
+            {error}
+          </p>
+        ) : null}
+        <button type="submit" className="btn btn-scene btn-join" disabled={busy}>
+          {busy ? 'Входим…' : 'Играть'}
+        </button>
+      </form>
+    </>
   );
 }

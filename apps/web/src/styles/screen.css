@@ -1,0 +1,202 @@
+/* Тёмная сцена — контур проектора (/screen), дизайн §5.2, п. 8/12/13/17/18.
+   Значения перенесены из мокапов-эталонов: timer-projector-participant,
+   tracks-scene-with-logo (сессия 45), projector-options-no-lines,
+   projector-final-winners-large, projector-long-content (сессия 44); цвета —
+   токены T4. Проектор read-only (п. 8): ни кнопок, ни форм, ни focus-стилей.
+   Размещение — соседним файлом к scene.css (ruling C-2): там контур
+   участника, здесь проектор; общее у них только .logo (живёт в scene.css).
+   Заменяет временные .screen-question/.screen-options из base.css (бриф T8). */
+
+/* --- Каркас (п. 8/17) --- */
+.screen-page {
+  /* position:relative — опора центрирования ожидания во всём кадре (п. 8) */
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  /* pj-inner мокапа timer-projector-participant */
+  padding: 34px 44px;
+  background: var(--scene-bg);
+  color: var(--scene-text);
+}
+/* Логотип — левый верхний угол на всех экранах (п. 17); позиционирование —
+   обязанность страницы (ruling C-1). Отступ снизу — pj-brand мокапа
+   tracks-scene-with-logo. */
+.screen-page .logo { margin-bottom: 14px; }
+
+/* Ожидание/системные сообщения: центрирование во всём кадре (п. 8), логотип
+   не влияет (та же механика, что .play-waiting у участника, п. 7). */
+.screen-waiting {
+  position: absolute;
+  top: 50%;
+  left: 44px;
+  right: 44px;
+  transform: translateY(-50%);
+  margin: 0;
+  color: rgba(246, 237, 220, 0.82);
+  font-size: 24px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* «Игра идёт. Ждём вопрос…» — в потоке (под ним могут быть победители
+   лотереи), мокапа этого состояния нет — минимальная крупная подача. */
+.screen-note {
+  margin: 40px 0 0;
+  font-size: 24px;
+}
+
+/* --- Вопрос (п. 8/12, мокапы timer-projector-participant и
+   projector-options-no-lines) --- */
+/* Верхняя строка: «Вопросъ N из M» слева, таймер справа (pj-top). */
+.screen-strip {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.screen-kicker {
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+/* Таймер 56px золотом справа вверху, tabular-nums; «без лимита» — не
+   рендерится вообще; ноль — спокойный 0:00, без краснухи (п. 12). */
+.screen-timer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 56px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.screen-timer small {
+  color: var(--muted-scene);
+  font-family: var(--font-body);
+  font-size: 14px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+/* Отступ перед вариантами 35px (п. 8) */
+.screen-question {
+  max-width: 850px;
+  margin: 0 0 35px;
+  font-family: var(--font-display);
+  font-size: 38px;
+  line-height: 1.2;
+  font-weight: 400;
+}
+.screen-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 19px;
+}
+/* Варианты — общая поверхность, без золотых вертикальных линий (п. 8,
+   projector-options-no-lines); буквенная метка золотом (timer-мокап). */
+.screen-options li {
+  display: flex;
+  align-items: center;
+  padding: 14px 18px;
+  background: var(--scene-surface);
+  border-radius: 10px;
+  line-height: 1.25;
+}
+.screen-options li b { color: var(--gold); margin-right: 10px; }
+
+/* Компактная плотность: длинный вопрос / более четырёх вариантов (п. 8,
+   projector-options-no-lines / projector-long-content; переключение —
+   isCompactQuestion, state/question-density.ts). */
+.screen-question-compact { font-size: 34px; line-height: 1.12; }
+.screen-options-compact { gap: 10px 20px; }
+.screen-options-compact li { min-height: 48px; padding: 9px 12px; }
+
+/* --- Reveal (п. 8/13, мокап tracks-scene-with-logo): «Правильный отвѣтъ»
+   слева, табло дорожками справа (топ-4 + «ещё N» — в компоненте) --- */
+.screen-reveal {
+  display: grid;
+  grid-template-columns: 1fr 1.1fr;
+  gap: 36px;
+}
+.screen-answer-label {
+  margin-bottom: 10px;
+  color: var(--muted-scene);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.screen-answer-value {
+  margin: 0;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.2;
+  font-weight: 400;
+}
+.screen-board-title {
+  margin-bottom: 12px;
+  color: var(--muted-scene);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Кегли дорожек проектора крупнее участника (мокап tracks-scene-with-logo:
+   имя 16px, счёт 15px, дельта 13px, полотно 9px) — читаемость с расстояния.
+   База дорожек — transitions.css, здесь только переопределение размеров. */
+.screen-page .race-tracks .track-row { padding: 5px 0 7px; }
+.screen-page .race-tracks .tr-name { font-size: 16px; }
+.screen-page .race-tracks .tr-score { font-size: 15px; }
+.screen-page .race-tracks .tr-score .delta { font-size: 13px; }
+.screen-page .race-tracks .tr-lane { height: 9px; }
+
+/* --- Финал (п. 8/13/18, мокапы tracks-scene-with-logo и
+   projector-final-winners-large): табло топ-5 дорожками слева, победители —
+   центрированный блок в свободной правой зоне --- */
+.screen-final-title {
+  margin: 15px 0 17px;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 35px;
+  font-weight: 400;
+}
+.screen-final-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 36px;
+}
+/* Без розыгрыша блок победителей не рендерится, табло центрируется на всю
+   зону (п. 18); ширина колонки 720px — допущение имплементера (мокап этого
+   состояния не показывает), к ревью. */
+.screen-final-solo {
+  grid-template-columns: minmax(0, 720px);
+  justify-content: center;
+}
+/* Заголовок 32px, имена 24px (бриф/п. 8 — projector-final-winners-large).
+   Стилизация со стороны страницы: разметка Winners (section/h2/ul) общая
+   с play/console и не меняется. */
+.screen-winners {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.screen-winners h2 {
+  margin: 0 0 13px;
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 400;
+}
+.screen-winners ul {
+  margin: 0;
+  padding-left: 23px;
+  font-size: 24px;
+  line-height: 1.55;
+}
