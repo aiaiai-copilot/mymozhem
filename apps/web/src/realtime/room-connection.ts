@@ -11,6 +11,7 @@ import {
   type RoomSnapshot,
 } from '@mymozhem/sdk';
 import { ApiError } from '../api/api-error';
+import { isTerminalSessionFailure } from '../state/session-failure';
 import type { SocketLike } from './socket-like';
 
 export type ConnectionState = 'connecting' | 'live' | 'disconnected';
@@ -55,8 +56,9 @@ export class RoomConnection {
     // чтобы спека управляла успехом/провалом без реальной сети. Опционально —
     // без хука connect_error остаётся no-op'ом, как раньше.
     private readonly refreshAccessToken?: () => Promise<void>,
-    // Триггер «сессия мертва» (находка №5): стреляет ТОЛЬКО из провала refresh
-    // (мёртвая refresh-кука, self-heal невозможен). Обычный disconnect сюда НЕ
+    // Триггер «сессия мертва» (находка №5): стреляет ТОЛЬКО из терминального
+    // провала refresh (ApiError 4xx — мёртвая refresh-кука, self-heal невозможен;
+    // сеть/5xx — пауза, не смерть, находка Н13). Обычный disconnect сюда НЕ
     // ведёт — сетевой обрыв лечит сам socket.io. Потребитель — автоперезаход.
     private readonly onSessionDead?: () => void,
   ) {
@@ -90,17 +92,27 @@ export class RoomConnection {
       // перезапуск — только ручной connect(), официальный паттерн socket.io).
       // Поэтому: refresh — ровно один на стрик обрыва (иначе retry-шторм
       // превратился бы в refresh-шторм), успех → немедленный kickReconnect
-      // со свежим токеном. Провал refresh (мёртвая refresh-кука) — кик
-      // бессмысленен: явный 'disconnected' + onSessionDead (автоперезаход
-      // страницы, находка №5). Обычный onDisconnect сюда НЕ ведёт: сетевой
-      // обрыв лечит сам socket.io (там skipReconnect=false, backoff жив).
+      // со свежим токеном. Провал refresh классифицируется (дизайн §3(В),
+      // решение 4): терминален только серверный отказ по существу (ApiError
+      // 4xx — мёртвая/отозванная refresh-кука) → явный 'disconnected' +
+      // onSessionDead (автоперезаход страницы, находка №5), кик бессмысленен.
+      // Временный отказ (сеть/5xx/таймаут) — пауза, а не смерть сессии
+      // (находка Н13): латч сбрасываем, ретрай придёт по wake-каналу (T6).
+      // Обычный onDisconnect сюда НЕ ведёт: сетевой обрыв лечит сам socket.io
+      // (там skipReconnect=false, backoff жив).
       if (!this.joined || this.refreshAttempted || !this.refreshAccessToken) return;
       this.refreshAttempted = true;
       void this.refreshAccessToken()
         .then(() => this.socket.kickReconnect())
-        .catch(() => {
+        .catch((e: unknown) => {
           this.stateCb?.('disconnected');
-          this.onSessionDead?.();
+          if (isTerminalSessionFailure(e)) {
+            this.onSessionDead?.();
+          } else {
+            // Пауза, не смерть: следующая волна connect_error (online/пробуждение)
+            // снова имеет право на refresh.
+            this.refreshAttempted = false;
+          }
         });
     });
     this.socket.onDisconnect(() => this.stateCb?.('disconnected'));

@@ -407,9 +407,12 @@ describe('RoomConnection', () => {
     const socket = new FakeSocket();
     socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
     let refreshes = 0;
+    // Терминальный провал — серверный отказ по существу (ApiError 4xx — мёртвая/
+    // отозванная refresh-кука, находка Н13); сетевой TypeError — временный класс
+    // (отдельный тест ниже).
     const conn = new RoomConnection(socket, ROOM_ID, () => {
       refreshes += 1;
-      return Promise.reject(new Error('refresh cookie expired'));
+      return Promise.reject(new ApiError('SESSION_INVALID', 401));
     });
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
@@ -437,7 +440,9 @@ describe('RoomConnection', () => {
     const conn = new RoomConnection(
       socket,
       ROOM_ID,
-      () => Promise.reject(new Error('refresh cookie dead')),
+      // Терминальный путь (находка №5) — именно серверный 401; классификация
+      // временных отказов — тесты ниже (находка Н13).
+      () => Promise.reject(new ApiError('SESSION_INVALID', 401)),
       () => {
         sessionDead += 1;
       },
@@ -453,6 +458,67 @@ describe('RoomConnection', () => {
 
     expect(sessionDead).toBe(1);
     expect(states[states.length - 1]).toBe('disconnected');
+  });
+
+  it('connect_error + временный провал refresh (сеть лежит, TypeError) → disconnected БЕЗ onSessionDead, латч сброшен (находка Н13)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let refreshes = 0;
+    let sessionDead = 0;
+    const states: ConnectionState[] = [];
+    const conn = new RoomConnection(
+      socket,
+      ROOM_ID,
+      () => {
+        refreshes += 1;
+        return Promise.reject(new TypeError('fetch failed'));
+      },
+      () => {
+        sessionDead += 1;
+      },
+    );
+    conn.onStateChange((s) => states.push(s));
+    await conn.join();
+
+    // Решение 4 / дизайн §3(В): сетевой обрыв любой длины — пауза, а не смерть
+    // сессии; терминален только серверный отказ по существу (ApiError 4xx).
+    socket.triggerDisconnect();
+    socket.triggerConnectError();
+    await flushMicrotasks();
+
+    expect(refreshes).toBe(1);
+    expect(sessionDead).toBe(0);
+    expect(states).toEqual(['live', 'disconnected', 'disconnected']);
+
+    // Латч refreshAttempted сброшен: следующая волна connect_error (ретрай по
+    // online/wake-каналу, дизайн §3(В)) снова имеет право на refresh.
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    expect(refreshes).toBe(2);
+    expect(sessionDead).toBe(0);
+  });
+
+  it('временный провал refresh → вторая волна connect_error с успешным refresh → kickReconnect (ретрай обрыва)', async () => {
+    const socket = new FakeSocket();
+    socket.programAck(REALTIME_MESSAGES.SUBSCRIBE, { ok: true, snapshot: SNAPSHOT });
+    let wave = 0;
+    const conn = new RoomConnection(socket, ROOM_ID, () => {
+      wave += 1;
+      // Первая волна — сеть лежит (временный отказ); вторая — сеть поднялась.
+      return wave === 1 ? Promise.reject(new TypeError('fetch failed')) : Promise.resolve();
+    });
+    await conn.join();
+    socket.connected = false;
+
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    // Временный провал — кика нет: токен не обновлён, кик бессмысленен.
+    expect(socket.kickCount).toBe(0);
+
+    // Вторая волна (online/пробуждение): refresh успешен → кик со свежим токеном.
+    socket.triggerConnectError();
+    await flushMicrotasks();
+    expect(socket.kickCount).toBe(1);
   });
 
   it('обычный disconnect (сеть) → onSessionDead НЕ стреляет (Review Focus 5)', async () => {
