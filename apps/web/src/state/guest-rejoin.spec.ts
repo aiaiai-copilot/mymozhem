@@ -18,7 +18,7 @@ describe('rejoinAsGuest', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('join по сохранённым code/displayName → accessToken + roomId из claims', async () => {
-    const token = makeToken({ sub: 'id-1', kind: 'GUEST', roomId: 'room-9' });
+    const token = makeToken({ sub: 'id-1', kind: 'GUEST', roomId: 'room-9', exp: 1_900_000_000 });
     // Тип-параметр vi.fn — сигнатура fetch: mock.calls типизирован
     // [string, RequestInit] для body-assert ниже (без него calls выводится как []).
     const fetchMock = vi.fn<(input: string, init: RequestInit) => Promise<Response>>(async () =>
@@ -44,7 +44,7 @@ describe('rejoinAsGuest', () => {
       vi.fn(async () =>
         new Response(
           JSON.stringify({
-            accessToken: makeToken({ sub: 'id-1', kind: 'GUEST' }),
+            accessToken: makeToken({ sub: 'id-1', kind: 'GUEST', exp: 1_900_000_000 }),
             tokenType: 'Bearer',
             expiresIn: 900,
             displayName: 'x',

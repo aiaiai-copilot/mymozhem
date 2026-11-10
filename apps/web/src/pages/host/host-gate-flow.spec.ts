@@ -28,8 +28,8 @@ const makeToken = (claims: unknown): string =>
     .replace(/\//g, '_')
     .replace(/=+$/, '')}.sig`;
 
-const REGISTERED = makeToken({ sub: 'org-1', kind: 'REGISTERED' });
-const GUEST = makeToken({ sub: 'guest-1', kind: 'GUEST', roomId: 'room-1' });
+const REGISTERED = makeToken({ sub: 'org-1', kind: 'REGISTERED', exp: 1_900_000_000 });
+const GUEST = makeToken({ sub: 'guest-1', kind: 'GUEST', roomId: 'room-1', exp: 1_900_000_000 });
 
 // Фейк сессии по структурному интерфейсу GateSession: память + шпион refresh.
 const makeSession = (initial: string | null) => {
