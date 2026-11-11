@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
 import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
 import { ApiClient } from '../../api/api-client';
-import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
 import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
@@ -19,6 +18,7 @@ import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
 import { useFocusDim } from '../../state/use-focus-dim';
 import { useRoomBinding } from '../../state/use-room-binding';
+import { answerErrorText } from './answer-error-text';
 import { JoinForm } from './join-form';
 
 // Буквенные метки вариантов (золотые <b> в .btn-scene, мокапы component-states-live
@@ -32,22 +32,6 @@ const anonClient = new ApiClient({
   getAccessToken: () => null,
   refresh: () => Promise.resolve(),
 });
-
-const answerErrorText = (e: unknown): string => {
-  if (e instanceof ApiError) {
-    switch (e.code) {
-      case 'ALREADY_ANSWERED':
-        return 'Ответ уже принят.';
-      case 'ROUND_NOT_OPEN':
-        return 'Приём ответов закрыт.';
-      case 'ANSWER_TOO_FAST':
-        return 'Слишком быстро — попробуйте ещё раз.';
-      default:
-        return `Ответ не принят (${e.code}).`;
-    }
-  }
-  return 'Ошибка сети. Ответ не отправлен.';
-};
 
 export function PlayPage() {
   const { code } = useParams();
@@ -271,6 +255,10 @@ export function PlayPage() {
   // собственного события по fan-out; сбрасывается на смену вопроса.
   const [answerAck, setAnswerAck] = useState(false);
   const [answerError, setAnswerError] = useState<string | null>(null);
+  // Busy на время полёта publish (находка Н1, решение 3): без автоповтора —
+  // второй клик в полёте невозможен конструкцией (кнопки disabled); settle
+  // гарантирован ack-таймаутом T1, поэтому finally всегда отпускает.
+  const [answerSubmitting, setAnswerSubmitting] = useState(false);
   useEffect(() => {
     setAnswerAck(false);
     setAnswerError(null);
@@ -288,12 +276,14 @@ export function PlayPage() {
   );
 
   const submitAnswer = (optionIndex: number) => {
-    if (currentQuestion === null) return;
+    if (currentQuestion === null || answerSubmitting) return;
+    setAnswerSubmitting(true);
     setAnswerError(null);
     void binding
       .publish('quiz.answer.submitted', { questionIndex: currentQuestion, optionIndex })
       .then(() => setAnswerAck(true))
-      .catch((e: unknown) => setAnswerError(answerErrorText(e)));
+      .catch((e: unknown) => setAnswerError(answerErrorText(e)))
+      .finally(() => setAnswerSubmitting(false));
   };
 
   if (!roomId) {
@@ -395,6 +385,7 @@ export function PlayPage() {
                   <button
                     type="button"
                     className="btn btn-scene"
+                    disabled={answerSubmitting}
                     onClick={() => submitAnswer(optionIndex)}
                   >
                     {letter ? <b>{letter}</b> : null}
@@ -405,6 +396,7 @@ export function PlayPage() {
             })}
           </ul>
         )}
+        {answerSubmitting ? <p role="status">Отправляю…</p> : null}
         {answerError ? (
           <p role="alert" className="play-error">
             {answerError}
