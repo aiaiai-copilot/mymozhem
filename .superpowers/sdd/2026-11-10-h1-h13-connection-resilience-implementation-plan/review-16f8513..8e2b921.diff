@@ -1,0 +1,354 @@
+# Review package: 16f8513..HEAD
+
+## Commits
+8e2b921 docs(acceptance): environmentный механизм Н1 + строки приёмки фикса Н1/Н13
+2a9d4f9 fix(web): busy-состояния REST-действий консоли и setup (находка Н1)
+
+## Files changed
+ apps/web/src/pages/host/awards-panel.tsx           | 25 +++++++++++-----
+ apps/web/src/pages/host/members-panel.tsx          |  4 ++-
+ apps/web/src/pages/host/prizes-panel.tsx           | 10 +++++--
+ apps/web/src/pages/host/quiz-editor.tsx            |  4 ++-
+ apps/web/src/pages/host/setup-page.tsx             |  4 ++-
+ .../2026-10-19-design-ui-acceptance-checklist.md   | 35 ++++++++++++++++++++++
+ 6 files changed, 68 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/pages/host/awards-panel.tsx b/apps/web/src/pages/host/awards-panel.tsx
+index be9131f..0c6a96a 100644
+--- a/apps/web/src/pages/host/awards-panel.tsx
++++ b/apps/web/src/pages/host/awards-panel.tsx
+@@ -37,21 +37,26 @@ interface AwardsPanelProps {
+ // Панель вручения (бриф Task 15, стилизация — бриф T11, дизайн §5.3, мокапы
+ // console-draw-winner-larger / console-landscape-editor-draw-finish): карточка
+ // консоли; строки «имя · статус» с действиями справа — «Вручить» primary,
+ // «Отозвать» тихая без рамки (п. 15); терминальные статусы — тихим текстом.
+ // Кнопки живы только в статусе AWARDED — FULFILLED/REVOKED терминальны
+ // (REQ-RWD-007, сервер ответил бы REWARD_ALREADY_RESOLVED). Статус комнаты
+ // здесь сознательно НЕ гейтится: fulfill/revoke легальны при COMPLETED
+ // (REQ-RWD-009) — призы вручают после завершения события.
+ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
+   const [awards, setAwards] = useState<AwardResponse[] | null>(null);
+-  const [busyId, setBusyId] = useState<string | null>(null);
++  // Действие в полёте: id награды + само действие (busy-индикация на кнопке,
++  // находка Н1, дизайн §3(Б)). Settle гарантирован таймаутом ApiClient (T2).
++  const [resolving, setResolving] = useState<{
++    awardId: string;
++    action: 'fulfill' | 'revoke';
++  } | null>(null);
+   const [error, setError] = useState<string | null>(null);
+ 
+   useEffect(() => {
+     let stale = false;
+     listRewards(hostClient, roomId)
+       .then((r) => {
+         if (!stale) setAwards(r.awards);
+       })
+       .catch((e: unknown) => {
+         if (!stale) setError(awardErrorText(e));
+@@ -68,29 +73,29 @@ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
+     if (!last || last.type !== 'rewards.reward.awarded') return;
+     listRewards(hostClient, roomId)
+       .then((r) => setAwards(r.awards))
+       // Best effort: список самоисправится на следующем событии или действии.
+       .catch(() => {});
+   }, [events, roomId]);
+ 
+   // fulfill/revoke — идемпотентны на сервере (no-op при повторе), но параллельные
+   // клики по разным наградам не упорядочиваем — одна команда за раз, как везде.
+   const resolve = (awardId: string, action: 'fulfill' | 'revoke') => {
+-    if (busyId !== null) return;
+-    setBusyId(awardId);
++    if (resolving !== null) return;
++    setResolving({ awardId, action });
+     setError(null);
+     const call = action === 'fulfill' ? fulfillAward : revokeAward;
+     void call(hostClient, roomId, awardId)
+       .then(() => listRewards(hostClient, roomId))
+       .then((r) => setAwards(r.awards))
+       .catch((e: unknown) => setError(awardErrorText(e)))
+-      .finally(() => setBusyId(null));
++      .finally(() => setResolving(null));
+   };
+ 
+   // Заголовок со счётчиком вручения — по мокапу завершения
+   // («Награды — вручить 2 из 3»); счётчик только когда вручать есть что.
+   const pending = awards?.filter((a) => a.status === 'AWARDED').length ?? 0;
+   const title =
+     awards !== null && awards.length > 0 && pending > 0
+       ? `Награды — вручить ${pending} из ${awards.length}`
+       : 'Награды';
+ 
+@@ -112,32 +117,36 @@ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
+                 {a.prizeId !== null ? ` — приз ${a.prizeId}` : ''}
+                 {a.status !== 'AWARDED' ? (
+                   <span className="console-award-status"> · {statusLabel(a.status)}</span>
+                 ) : null}
+               </span>
+               {a.status === 'AWARDED' ? (
+                 <span className="console-award-actions">
+                   <button
+                     type="button"
+                     className="btn btn-primary console-mini"
+-                    disabled={busyId !== null}
++                    disabled={resolving !== null}
+                     onClick={() => resolve(a.id, 'fulfill')}
+                   >
+-                    Вручить
++                    {resolving?.awardId === a.id && resolving.action === 'fulfill'
++                      ? 'Вручаем…'
++                      : 'Вручить'}
+                   </button>
+                   <button
+                     type="button"
+                     className="btn btn-quiet console-mini"
+-                    disabled={busyId !== null}
++                    disabled={resolving !== null}
+                     onClick={() => resolve(a.id, 'revoke')}
+                   >
+-                    Отозвать
++                    {resolving?.awardId === a.id && resolving.action === 'revoke'
++                      ? 'Отзываем…'
++                      : 'Отозвать'}
+                   </button>
+                 </span>
+               ) : null}
+             </li>
+           ))}
+         </ul>
+       ) : null}
+       {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11). */}
+       {error ? (
+         <p role="alert" className="console-error-banner console-panel-alert">
+diff --git a/apps/web/src/pages/host/members-panel.tsx b/apps/web/src/pages/host/members-panel.tsx
+index d3d46a3..908ebca 100644
+--- a/apps/web/src/pages/host/members-panel.tsx
++++ b/apps/web/src/pages/host/members-panel.tsx
+@@ -89,20 +89,22 @@ export function MembersPanel({ roomId, members, names, disabled, onChanged }: Me
+           {excludable.map((m) => (
+             <li key={m.identityId}>
+               {/* displayName может быть null после TTL-свipa — displayNameOf
+                   отдаёт fallback «Гость», дыр в ростере нет. */}
+               {displayNameOf(names, m.identityId)} ({roleLabel(m.role)}){' '}
+               <button
+                 type="button"
+                 disabled={disabled || excludingId !== null}
+                 onClick={() => exclude(m.identityId)}
+               >
+-                Исключить
++                {/* Busy-индикация на время полёта REST (находка Н1, дизайн
++                    §3(Б)): settle гарантирован таймаутом ApiClient (T2). */}
++                {excludingId === m.identityId ? 'Исключаем…' : 'Исключить'}
+               </button>
+             </li>
+           ))}
+         </ul>
+       ) : null}
+       {error ? <p role="alert">{error}</p> : null}
+     </section>
+   );
+ }
+diff --git a/apps/web/src/pages/host/prizes-panel.tsx b/apps/web/src/pages/host/prizes-panel.tsx
+index f3252d0..1c915ee 100644
+--- a/apps/web/src/pages/host/prizes-panel.tsx
++++ b/apps/web/src/pages/host/prizes-panel.tsx
+@@ -283,21 +283,23 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
+                 </span>
+               </span>
+               {isLottery ? (
+                 isDrawable(p) ? (
+                   <button
+                     type="button"
+                     className="btn btn-secondary console-mini"
+                     disabled={disabled || pendingDraw !== null}
+                     onClick={() => runDraw(p)}
+                   >
+-                    Разыграть
++                    {/* Busy-индикация попытки (находка Н1, дизайн §3(Б)):
++                        settle гарантирован ack-таймаутом publish (T1). */}
++                    {pendingDraw?.prizeId === p.id ? 'Разыгрываем…' : 'Разыграть'}
+                   </button>
+                 ) : (
+                   /* Разыгранный приз (quantity 0): вместо disabled-кнопки —
+                      тихий статус (мокап «Разыграна»; при фонде >1 — мн. ч.). */
+                   <span className="console-prize-drawn">
+                     {p.quantityTotal > 1 ? 'Разыграны' : 'Разыграна'}
+                   </span>
+                 )
+               ) : null}
+             </li>
+@@ -326,37 +328,39 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
+             value={quantity}
+             onChange={(e) => setQuantity(e.target.value)}
+             disabled={disabled || creating}
+           />
+         </label>
+         <button
+           type="submit"
+           className="btn btn-secondary console-prize-add"
+           disabled={disabled || creating}
+         >
+-          + Добавить приз
++          {creating ? 'Добавляем…' : '+ Добавить приз'}
+         </button>
+       </form>
+       {/* ADR-012 §4: создание приза — юридическая ответственность организатора
+           (лотереи, налоги). Текст виден всегда: клиент режим не знает, серверный
+           гейт отвечает PRIZES_DISABLED при prize_mode=off. */}
+       <p className="console-empty-note">
+         Призовой режим — юридическая ответственность организатора (лотереи, налоги).
+       </p>
+       {isLottery ? (
+         <button
+           type="button"
+           className="btn btn-secondary console-draw-participant"
+           disabled={disabled || pendingDraw !== null}
+           onClick={runParticipantDraw}
+         >
+-          Разыграть участника
++          {pendingDraw !== null && pendingDraw.prizeId === null
++            ? 'Разыгрываем…'
++            : 'Разыграть участника'}
+         </button>
+       ) : null}
+       {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11,
+           мокап console-empty-long-errors-v2). */}
+       {error ? (
+         <p role="alert" className="console-error-banner console-panel-alert">
+           {error}
+         </p>
+       ) : null}
+     </section>
+diff --git a/apps/web/src/pages/host/quiz-editor.tsx b/apps/web/src/pages/host/quiz-editor.tsx
+index 2ed253e..c587f89 100644
+--- a/apps/web/src/pages/host/quiz-editor.tsx
++++ b/apps/web/src/pages/host/quiz-editor.tsx
+@@ -271,15 +271,17 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
+             onChange={(e) => setMinAnswerIntervalMs(e.target.value)}
+           />
+         </label>
+       </fieldset>
+       {error ? (
+         <p role="alert" className="console-error">
+           {error}
+         </p>
+       ) : null}
+       <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
+-        Сохранить и запустить
++        {/* Busy-индикация submit setup (находка Н1, дизайн §3(Б)): та же
++            кнопка, что у лотереи на setup-page — текст идентичен. */}
++        {busy ? 'Сохраняем…' : 'Сохранить и запустить'}
+       </button>
+     </form>
+   );
+ }
+diff --git a/apps/web/src/pages/host/setup-page.tsx b/apps/web/src/pages/host/setup-page.tsx
+index 59eda4f..8ade31a 100644
+--- a/apps/web/src/pages/host/setup-page.tsx
++++ b/apps/web/src/pages/host/setup-page.tsx
+@@ -145,21 +145,23 @@ export function SetupPage() {
+         <QuizEditor onSubmit={submitQuiz} busy={busy} />
+       ) : (
+         <form
+           className="editor-form"
+           onSubmit={(e) => {
+             e.preventDefault();
+             submitLottery();
+           }}
+         >
+           <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
+-            Сохранить и запустить
++            {/* Busy-индикация на время configure+activate (находка Н1 — первый
++                случай был именно здесь; дизайн §3(Б)). */}
++            {busy ? 'Сохраняем…' : 'Сохранить и запустить'}
+           </button>
+         </form>
+       )}
+       {submitError ? (
+         <p role="alert" className="console-error">
+           {submitError}
+         </p>
+       ) : null}
+     </main>
+   );
+diff --git a/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md b/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md
+index 53e0cd8..1f39b63 100644
+--- a/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md
++++ b/docs/sessions/2026-10-19-design-ui-acceptance-checklist.md
+@@ -462,20 +462,54 @@ Reveal в консоли при 5+ участниках с очками.
+ 
+ ### 15.3. Полоса номеров редактора — решение по ощущениям (carry, решение владельца 2026-10-20)
+ 
+ Контекст: мокап `console-editor.html` содержит полосу номеров с переключателем «один активный вопрос»; реализация T10 отдала навигацию шапками карточек (таск-ревью: чтение буквы плана защитимо, Minor на владельца). Решение владельца 2026-10-20: пройти редактор в руках на реальном квизе и решить по ощущениям.
+ 
+ **Критерий прохождения / решение:** во время прогона 15.1 оценить: хватает ли шапок карточек для ориентации в списке, или без переключателя «один активный вопрос» редактор неудобен? Если нужен переключатель — это ОТДЕЛЬНАЯ задача с active-question state, НЕ доработка T10. Вердикт — раздел «Решения по итогам приёмки», строка (г).
+ **Протокол:** ✅ вердикт владельца 2026-10-29: «переключатель нужен» → **отдельная задача** с active-question state (НЕ доработка T10) — решения, строка (г).
+ 
+ ---
+ 
++## 16. Приёмка фикса Н1/Н13 (connection resilience)
++
++Новые поведения среза `h1-h13-connection-resilience` (план `2026-11-10-h1-h13-connection-resilience-implementation-plan.md`). Прогон — на стенде, собранном из ветки среза (dist worktree), ПОСЛЕ мерджа среза или из его ветки по решению владельца.
++
++### 16.1. Пересчёт после reconnect — повтор 5.5 после фикса Н13
++
++Тот же сценарий, что строка 5.5: iPhone-участник, открытый вопрос, Wi-Fi off/on ~10 секунд.
++
++**Критерий прохождения:** участник ОСТАЁТСЯ в комнате (формы входа нет — разрыв сети классифицирован временным, сессия не умирает); баннер «Нет соединения» виден на время разрыва и гаснет сам; после reconnect таймер пересчитан от серверного `openedAt`; в ростере не появляется сирота-identity.
++**Протокол:** ⬜
++
++### 16.2. Затемнение нефокусного окна (play + console, проектор — без вуали)
++
++На ноутбуке: окно play или console видимо, но фокус в другом приложении (клик по окну другого приложения / Cmd+Tab).
++
++**Критерий прохождения:** на play и console появляется полноэкранная вуаль с текстом-пояснением (без pointer-events — клики сквозь неё); возврат фокуса снимает вуаль; на проекторе (/screen) вуали НЕТ ни при какой потере фокуса; при свёрнутой вкладке (hidden) вуали нет; reduced-motion: появление без анимации.
++**Протокол:** ⬜
++
++### 16.3. Явный отказ publish при заглушенной сети
++
++Консоль ведущего: выключить сеть (Wi-Fi off), нажать «Открыть вопрос» (или иную publish-команду).
++
++**Критерий прохождения:** кнопка сразу показывает busy («Отправляю…»); через ~5 с (ack-таймаут) — честный текст «Нет подтверждения — проверьте, не применилось ли» (НЕ «точно не отправлено»); кнопка снова доступна; после восстановления сети повторный клик доходит (вопрос открывается, в серверном логе — один committed вопрос).
++**Протокол:** ⬜
++
++### 16.4. Warn-цепочки auth-шума в логе стенда (Н13)
++
++После прогона 16.1–16.3 с простоями (окно без действий ≥ времени жизни access-токена) сверить лог стенда по блоку 0.4.
++
++**Критерий прохождения:** цепочки `jwt expired` (REST + socket) при простоях РЕЗКО сокращены относительно финальной сверки 0.4 исходной приёмки (там: 176 строк level 40, из них 85 REST `jwt expired` + 44 socket `jwt expired`); проактивный refresh по пробуждению виден как одиночные успешные refresh, а не серии 401; строк level 50/60 — ноль.
++**Протокол:** ⬜
++
++---
++
+ ## Сверка критериев приёмки среза (дизайн §12)
+ 
+ Baseline автоматики: финревью батча D (HEAD `0d51756`) — web 166/166, test:int 223/223 (testcontainers, --force), boundary-check 0 нарушений (763 модуля, 2379 зависимостей), guardrails 10/10; после T13 web-сьют — **175/175 (24 файла, прогон 2026-10-20 на HEAD ветки)**, smoke.spec переписан под срез и зелёный (1/1 против compose-стенда). Финревью батча E переподтверждает гейты на HEAD перед мерджем среза. После fix-волн живой приёмки (Н15 `203cb78`, вердикт (б) `4699c55`) web-сьют — **178/178**.
+ 
+ | # | Критерий (кратко) | Автоматика — основания | Ручная приёмка (блоки) | Статус |
+ |---|---|---|---|---|
+ | 1 | Три контура по §3–§8: палитры, типографика, лей-ауты, состояния | tokens.css + tokens.spec (токены/data-theme); smoke — якоря разметки (console-strip, screen-question, «Входъ в игру»); unit web 175/175 | Блоки 1–4, 12; сверка с мокапами-эталонами (канонический список дизайн-документа) | ⏳ (1.2/1.3/2.1/2.2/2.3/3.3 ✅; 1.5 ❌ → Н14 → редизайн (з), решение владельца; осталась 2.4 — после фикса Н2) |
+ | 2 | Консоль управляется с телефона в обеих ориентациях; ландшафт-правило | smoke шаг 4а: вьюпорт 700×360, «Закрыть вопрос» во вьюпорте без скролла | 1.3 (все состояния), 1.4 | ✅ (1.3 закрыта 2026-11-10, фаза B, комната `ytb8ak39`) |
+ | 3 | Таймер на всех контурах: дефолт 30, «без лимита», спокойный `0:00`, ручное закрытие, пересчёт после reconnect | unit `apps/web/src/state/question-timer.spec.ts` (остаток, «без лимита», `0:00`); smoke шаги 4/4б (формат `m:ss`, reload без сброса от openedAt) | Блок 5 (5.1–5.5; 5.5 — разрыв сети, не reload) | ❌ на 5.5 (Н13 — offline-окно убивает гостевую сессию; триаж владельца; код сессионной машины клиента, не среза) |
+ | 4 | Дорожки: нормировка к лидеру, золотой прирост с числом, ноль = пустая, доезд var(--t-race)=600ms с reduced-motion off; топ-4/топ-5 + «ещё N» | unit `race-tracks.spec` (нормировка, gain-сегмент, нули, topN) + `plural-ru.spec` + стражи Н2 в tokens.spec (keyframes race-in, animation на .fill/.gain, reduced-motion) ; smoke шаг 6 (a11y-роли, ненулевая ширина) | Блок 6 (6.1–6.7), 13.1 | ✅/триаж (6.4 ✅ 2026-11-10 — Н2 починена `41c6651`+`ebdee78`; 6.3 — триаж Н4; 6.5 и 13.1 ✅ 2026-10-29) |
+@@ -522,20 +556,21 @@ Baseline автоматики: финревью батча D (HEAD `0d51756`) 
+ | **Н9** | **Панель призов не рефетчится по `draw.completed`** (2026-10-29, блок 10): после призового розыгрыша список вживую остался «осталось 1 из 1» с живой кнопкой «Разыграть» при исчерпанном фонде (в БД quantity 0 — сервер корректен); reload лечит → «Разыграна». UX-ловушка: повторный клик по живой кнопке получит серверный отказ фонда. | Строка 10.2 прошла по критерию (после reload), находка — живое обновление | Триаж владельца (вероятно, отдельная задача: рефетч призов по событию draw.completed). |
+ | **Н10** | **`prizeId` UUID'ом вместо названия приза в Winners (сцены + консоль) и AwardsPanel** (2026-10-29, блок 10): «Росомаха-94 — приз dd48691d-…» на проекторе и у участников; консольный баннер название резолвит (drawPrizeName из локального списка), Winners/AwardsPanel — нет. Родственно stay-deferred «prizeId→name в AwardsPanel», но здесь задет публичный контур (проектор). Сцены список призов не получают (контур организатора) — нужно решение уровня контракта (название в payload draw.completed / публичный listPrizes). | Видимый дефект на проекторе | Триаж владельца (вероятно, отдельная задача с контрактным решением). |
+ | **Н11** | Разово «Участники (5)» при трёх строках ростера и трёх excludable-членствах на сервере (проверено REST и БД); самоустранилось на следующем рефетче БЕЗ reload; статически не объясняется (счётчик и список — один массив в одном рендере) | Наблюдение | Версия владельца: артефакт кадра во время рефетча. **Без действий; при повторении — вернуться.** |
+ | **Наблюдение** | Сцены lottery-комнаты несут квизовую копию: «Игра идёт. Ждём вопрос…» в ожидании, «Игра завершена» после COMPLETED (2026-10-29) | Наблюдение (тексты сцен заточены под quiz) | Триаж владельца (кандидат: generic-копия для не-квизовых приложений). |
+ | **Н12** | **Потеря несохранённого содержимого редактора при переключении вида приложения** (2026-10-29, второй прогон): владелец набил 3 вопроса, нечаянно переключил «Квиз»→«Лотерея» — введённое исчезло (QuizEditor размонтируется, локальное состояние уничтожается; setup-page.tsx:140). Один мисклик = потеря всей набивки. | Потеря данных организатора | Триаж владельца (варианты: keep-alive обоих редакторов / подъём состояния в setup-page / confirm при переключении с непустой формой). |
+ | **Н13** | **Offline-окно убивает гостевую сессию** (строка 5.5 ❌, 2026-10-29): iPhone, Wi-Fi off/on ~10 с при открытом вопросе → выброс на форму входа вместо reconnect с пересчитанным таймером. Терминальный fail-путь (onSessionDead → rejoin неудачен, пока сеть лежит → clearGuest + форма) завершился за ~15 с; лог: socket disconnect 12:52:46, первый дошедший до сервера refresh — 12:54:02 постфактум. Клиент не различает «refresh отклонён сервером» и «сеть недостижима». Родственно Н1, но механизм иной (сессионная машина клиента). | Блокер UX на живом событии (разрыв сети = потеря участника) | Триаж владельца (вероятно, отдельная приоритетная задача рядом с Н1). |
+ | **Н14** | **Проектор не масштабируется под экран/дистанцию** (строка 1.5 ❌, 2026-10-29): заголовок мелкий (вердикт владельца — нужен ×2), кегль строк табло мал, ~2/3 высоты экрана пустует (контент прижат к верхней трети). | Задевает критерий §12.1 (читаемость сцены с 2–4 м) | **РЕШЕНИЕ ВЛАДЕЛЬЦА: в редизайн дорожек (з)** вместе с «адаптивным порогом/полным табло» (к); срез мержится без этой правки. |
+ | **Н15** | Консольный toggle «ещё N — развернуть» без hover-отклика (только cursor:pointer) | Минор | **ПОЧИНЕНО в срезе** (`203cb78`: `:hover` под hover-медиа + страж в tokens.spec; проверено живьём). |
+ | **Н16** | **`/host/new` недостижим при живом черновике после полной перезагрузки** (2026-11-06/10): гейт при существующем `hostRoomId` ВСЕГДА ведёт в консоль (host-gate-flow.ts:35) — противоречие комментарию setup-page.tsx:49-52 («гейт приведёт обратно»). Вернуться в редактор своего черновика нельзя; обход — свежее частное окно. Родственно Н3 (тупик DRAFT), но механизм другой: здесь потерян путь В редактор. | Отдельная задача | **РЕШЕНИЕ ВЛАДЕЛЬЦА: отдельная задача ПОСЛЕ мерджа, новой сессией.** |
+ | **Наблюдение** | iPhone Safari в ландшафте: плавающая нижняя панель наезжает на контент до первого скролла (2026-10-29, строка 1.2) | Платформенное поведение iOS | Триаж владельца (возможное смягчение: `safe-area-inset-bottom`). |
++| **Наблюдение** | **Environmentный механизм Н1 (корень «первый клик потерян», зафиксирован 2026-11-10/11, сессия 56):** macOS тратит первый клик по окну на его активацию, когда frontmost — другое приложение; страница не получает ни одного события (даже pointerdown). Подтверждено голым HTML-зондом в трёх браузерах (Safari, Яндекс.Браузер/Chromium, Chrome): frontmost вне браузера → первый клик уходит оконному серверу. Лечения кодом нет — это оконный сервер ОС, веб-платформа управления не даёт (нет аналога acceptsFirstMouse); на Windows клик по неактивному окну наоборот доставляется контенту (click-through). **Митигация в срезе Н1/Н13 — визуальное затемнение нефокусного окна на play/console (T7, строка приёмки 16.2):** ведущий/участник видит, что окно неактивно, и первый клик воспринимает как активацию. | Environment (ОС), не код | Задокументировано; митигация — в срезе `h1-h13-connection-resilience`; кодового лечения не существует. |
+ 
+ ### Остаток до мерджа (по состоянию на 2026-11-10)
+ 
+ 1. ~~**Блок 10 — розыгрыш**~~ **✅ ПРОЙДЕН 2026-10-29** (lottery-комната `pmvftpwk`, консоль на localhost): 10.1 ✅ (оба варианта баннера, победители на сценах live), 10.2 ✅ (с Н9), 8.2(б) ✅ (hero «· вручите награды»), 11.1-ветка «награды первыми» ✅ (fulfill живой), 13.1 частично (empty-state на трёх контурах лотереи). Новые: Н9, Н10, Н11(наблюдение), расширение Н1 на REST-путь. Стенд поднят bare-run (postgres в контейнере + сервер на хосте) из-за деградации npm-registry (~8 КБ/с — docker-билд не вытянул install); оба варианта санкционированы блоком 0.2.
+ 2. ~~**Второй квиз-прогон**~~ **✅ 2026-10-29** (комната `3bg9wyy3`, playwright-боты, 5–7 участников): 13.1 ✅ (квиз-вариант «Очков пока нет.» на трёх контурах), 6.5 ✅ (топ-4/топ-5 + две формы «ещё N» живьём), 14.2 ✅ (разворот/сворачивание/auto-collapse, Enter), 14.1 ✅ («5 вопросов» живьём, «1 вопрос» — по unit, допущено строкой), 5.5 ❌ (Н13), 15.1-хвост ✅ (удаление из середины, правка текстов). Новые: Н12, Н13.
+ 3. ~~**Устройства/состояния**~~ **✅**: 1.2 ✅ (2026-10-29, фаза A, `2g2cjptk`, iPhone ландшафт), 1.3 ✅ (2026-11-10, фаза B, `ytb8ak39`, три состояния), 2.1 ✅ (с Н15 → починено `203cb78`), 2.2 ✅ (Option+Tab + стрелки; закрыл и 15.2-хвост), 2.3 ✅ (тач чист, long-press — платформа), 3.3 ✅ (одна swap-вспышка, повторных нет); 1.5 ❌ → Н14 → редизайн (з), решение владельца; **2.4 — после фикса Н2**.
+ 4. ~~**Вердикты**~~ **✅**: (б) — починено в срезе (`4699c55`, 17px, «Органично»); (г) — отдельная задача («переключатель нужен»); Н14 и «полное табло на проекторе» (вариант 1) → редизайн (з); **Н16 → отдельная задача ПОСЛЕ мерджа, новой сессией (решение владельца 2026-11-10).**
+ 5. ~~fix Н2~~ ✅ **2026-11-10** (`41c6651` + `ebdee78`; мини-прогон `jc6hy38x`: 6.4 ✅ доезд плавный 600 мс, 2.4 ✅ мгновенно под reduced-motion, таймер тикает; попутно Н1-случай №5 на контуре участника, Яндекс.Браузер). **Осталось до мерджа:** финальная сверка 0.4 (лог level 40/50 за все сегменты) → решение владельца по весу Н1 (главный подозреваемый — оконная фокус-потеря macOS, кросс-браузерно) → удаление временного бот-спека (`apps/web/e2e/quiz-bots.run2.spec.ts` + `apps/web/e2e/playwright.config.quiz-bots.ts`) → мердж среза (merge --no-ff, ритуал сессии 43).
+ 6. **После мерджа (новыми сессиями):** Н16; приоритетная линия Н1/Н13 (realtime/сессии); триаж Н3/Н4/Н5/Н6/Н9/Н10/Н12; наблюдения (safe-area-inset-bottom, квизовая копия на не-квизовых сценах, Н11 при повторении); редизайн дорожек (з) — поглощает (а)/(в)/(ж)/(и)/(к)/Н14; переключатель «один активный вопрос» (г); поимённый live-список ответивших (продуктовое пожелание владельца на фазе B).
+ 
