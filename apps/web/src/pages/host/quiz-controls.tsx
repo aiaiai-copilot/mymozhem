@@ -48,6 +48,10 @@ interface QuizControlsProps {
   // сама команда (completeRoom + confirm) живёт на странице.
   completing: boolean;
   onCompleteEvent: () => void;
+  // Одна publish-команда в полёте (находка Н1, решение 3): кнопки команд
+  // disabled, пока publish не settle'нулся (settle гарантирован ack-таймаутом
+  // T1). Ставит/сбрасывает страница.
+  commandPending: boolean;
   // Команды ведущего (clientInitiated по манифесту): quiz.question.opened /
   // quiz.question.closed / quiz.game.finish. Ошибку publish показывает страница.
   onCommand: (type: string, payload: Record<string, unknown>) => void;
@@ -70,12 +74,16 @@ export function QuizControls({
   participants,
   pendingAwards,
   completing,
+  commandPending,
   onCompleteEvent,
   onCommand,
   commandError,
 }: QuizControlsProps) {
   const current = quiz.currentQuestion;
   const next = nextQuestionIndex(quiz);
+  // Команды недоступны в терминале комнаты (disabled) и пока предыдущая
+  // команда в полёте (commandPending) — второй клик невозможен конструкцией.
+  const commandsDisabled = disabled || commandPending;
 
   // «ещё N — развернуть» (I-5): toggle полного ростера — локальное состояние;
   // между раундами (смена currentQuestion) схлопывается к топ-4.
@@ -203,7 +211,7 @@ export function QuizControls({
                 disabled={completing}
                 onClick={onCompleteEvent}
               >
-                Завершить событие
+                {completing ? 'Завершаем…' : 'Завершить событие'}
               </button>
               <p className="console-fh-note">Комната останется доступной до завершения.</p>
             </div>
@@ -327,7 +335,7 @@ export function QuizControls({
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={disabled}
+                disabled={commandsDisabled}
                 onClick={() => onCommand('quiz.question.closed', { questionIndex: current })}
               >
                 Закрыть вопрос
@@ -345,7 +353,7 @@ export function QuizControls({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={disabled}
+              disabled={commandsDisabled}
               onClick={finishQuiz}
             >
               Завершить квиз
@@ -357,7 +365,7 @@ export function QuizControls({
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={disabled || deckExhausted}
+                disabled={commandsDisabled || deckExhausted}
                 onClick={() => onCommand('quiz.question.opened', { questionIndex: next })}
               >
                 {openQuestionLabel(next, nextDurationSec)}
@@ -366,7 +374,7 @@ export function QuizControls({
                 <button
                   type="button"
                   className="btn btn-quiet"
-                  disabled={disabled}
+                  disabled={commandsDisabled}
                   onClick={finishQuiz}
                 >
                   Завершить квиз досрочно

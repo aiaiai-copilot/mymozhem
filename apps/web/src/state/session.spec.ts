@@ -39,14 +39,17 @@ afterEach(() => {
 });
 
 describe('decodeAccessClaims', () => {
-  it('decodes claims payload (base64url) — sub/kind/roomId', () => {
-    const claims = { sub: 'actor-1', kind: 'GUEST', roomId: 'room-1' };
+  it('decodes claims payload (base64url) — sub/kind/roomId/exp', () => {
+    const claims = { sub: 'actor-1', kind: 'GUEST', roomId: 'room-1', exp: 1_900_000_000 };
 
     expect(decodeAccessClaims(makeToken(claims))).toEqual(claims);
     // Без roomId (организатор вне комнаты) поле просто отсутствует.
-    expect(decodeAccessClaims(makeToken({ sub: 'actor-2', kind: 'REGISTERED' }))).toEqual({
+    expect(
+      decodeAccessClaims(makeToken({ sub: 'actor-2', kind: 'REGISTERED', exp: 1_900_000_000 })),
+    ).toEqual({
       sub: 'actor-2',
       kind: 'REGISTERED',
+      exp: 1_900_000_000,
     });
   });
 
@@ -55,6 +58,12 @@ describe('decodeAccessClaims', () => {
     expect(() => decodeAccessClaims('not-a-jwt')).toThrow('malformed access token');
     // Payload есть, но не JSON — JSON.parse пробрасывает; fail-loud, не тихий null.
     expect(() => decodeAccessClaims('hdr.%%%bad%%%.sig')).toThrow();
+  });
+
+  it('throws on token without exp (exp обязателен — серверные токены всегда с exp)', () => {
+    // Токен без exp — дрейф контракта: проактивный refresh (T6) читает exp;
+    // тихий undefined*1000=NaN дал бы вечное «не due» — fail-loud, не тихий null.
+    expect(() => decodeAccessClaims(makeToken({ sub: 'a', kind: 'GUEST' }))).toThrow('exp');
   });
 });
 

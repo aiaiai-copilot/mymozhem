@@ -278,7 +278,9 @@ export function QuizEditor({ onSubmit, busy }: QuizEditorProps) {
         </p>
       ) : null}
       <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
-        Сохранить и запустить
+        {/* Busy-индикация submit setup (находка Н1, дизайн §3(Б)): та же
+            кнопка, что у лотереи на setup-page — текст идентичен. */}
+        {busy ? 'Сохраняем…' : 'Сохранить и запустить'}
       </button>
     </form>
   );

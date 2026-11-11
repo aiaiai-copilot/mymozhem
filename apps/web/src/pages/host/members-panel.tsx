@@ -96,7 +96,9 @@ export function MembersPanel({ roomId, members, names, disabled, onChanged }: Me
                 disabled={disabled || excludingId !== null}
                 onClick={() => exclude(m.identityId)}
               >
-                Исключить
+                {/* Busy-индикация на время полёта REST (находка Н1, дизайн
+                    §3(Б)): settle гарантирован таймаутом ApiClient (T2). */}
+                {excludingId === m.identityId ? 'Исключаем…' : 'Исключить'}
               </button>
             </li>
           ))}

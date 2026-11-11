@@ -1,0 +1,1047 @@
+# Review package: 46c1b54..d6dd4eb
+
+## Commits
+d6dd4eb fix(web): команды ведущего — busy и честный отказ «нет подтверждения» (находка Н1)
+317998d fix(web): ответ участника — busy-состояние и честный отказ «нет подтверждения» (находка Н1)
+db0d893 feat(web): затемнение нефокусного окна на play/console — съеденный macOS клик получает видимый смысл (находка Н1)
+
+## Files changed
+ apps/web/src/components/focus-dim.tsx             | 14 ++++++
+ apps/web/src/pages/host/console-page.spec.ts      | 50 +++++++++++++++++++++-
+ apps/web/src/pages/host/console-page.tsx          | 51 +++++++++++++++++++---
+ apps/web/src/pages/host/quiz-controls.tsx         | 18 +++++---
+ apps/web/src/pages/play/answer-error-text.spec.ts | 34 +++++++++++++++
+ apps/web/src/pages/play/answer-error-text.ts      | 25 +++++++++++
+ apps/web/src/pages/play/play-page.tsx             | 36 ++++++++--------
+ apps/web/src/state/focus-dim.spec.ts              | 52 +++++++++++++++++++++++
+ apps/web/src/state/focus-dim.ts                   | 29 +++++++++++++
+ apps/web/src/state/use-focus-dim.ts               | 37 ++++++++++++++++
+ apps/web/src/styles/tokens.css                    |  5 +++
+ apps/web/src/styles/tokens.spec.ts                | 27 ++++++++++++
+ apps/web/src/styles/transitions.css               | 28 +++++++++++-
+ 13 files changed, 375 insertions(+), 31 deletions(-)
+
+## Diff
+diff --git a/apps/web/src/components/focus-dim.tsx b/apps/web/src/components/focus-dim.tsx
+new file mode 100644
+index 0000000..9120062
+--- /dev/null
++++ b/apps/web/src/components/focus-dim.tsx
+@@ -0,0 +1,14 @@
++// Вуаль нефокусного окна (находка Н1, решение 1): чисто визуальный слой БЕЗ
++// перехвата кликов (pointer-events: none в .focus-dim) — на macOS ОС съедает
++// первый клик на активацию окна раньше страницы, на Windows click-through
++// доставляет клик контенту; щит съедал бы рабочие клики, вуаль нигде не
++// мешает и везде объясняет. Текст — черновик дизайна §4, финальная редакция
++// на живой приёмке. aria-hidden: слой декоративный, состояние фокуса окна
++// скринридеру недоступно и не действие.
++export function FocusDim() {
++  return (
++    <div className="focus-dim" aria-hidden="true">
++      <p className="focus-dim-text">Окно неактивно — кликните, чтобы продолжить</p>
++    </div>
++  );
++}
+diff --git a/apps/web/src/pages/host/console-page.spec.ts b/apps/web/src/pages/host/console-page.spec.ts
+index acbce3d..d3fe02f 100644
+--- a/apps/web/src/pages/host/console-page.spec.ts
++++ b/apps/web/src/pages/host/console-page.spec.ts
+@@ -1,13 +1,61 @@
+ import { describe, expect, it } from 'vitest';
+ import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
+-import { isStaleRoomJoinError, participantsCount, pendingAwardsCount } from './console-page';
++import { ApiError } from '../../api/api-error';
++import {
++  commandErrorText,
++  isStaleRoomJoinError,
++  joinErrorText,
++  participantsCount,
++  pendingAwardsCount,
++} from './console-page';
++
++// Тексты отказа publish-команд ведущего (находка Н1, решение 7): ack-таймаут
++// не значит «не исполнилось» — честное «нет подтверждения», повтор руками
++// безопасен (сервер отвечает конфликтом состояния). Коды — из RoomConnection
++// (T1). Прочее — прежний честный код / прежний сетевой текст.
++describe('commandErrorText', () => {
++  it('NOT_CONNECTED и PUBLISH_TIMEOUT → «Нет подтверждения команды…» (решение 7)', () => {
++    const text =
++      'Нет подтверждения команды — проверьте, не применилась ли она, прежде чем повторять.';
++    expect(commandErrorText(new ApiError('NOT_CONNECTED', 0))).toBe(text);
++    expect(commandErrorText(new ApiError('PUBLISH_TIMEOUT', 0))).toBe(text);
++  });
++
++  it('прочий ApiError — прежний честный код; сеть — прежний текст', () => {
++    expect(commandErrorText(new ApiError('ROOM_NOT_ACTIVE', 409))).toBe(
++      'Команда не выполнена (ROOM_NOT_ACTIVE).',
++    );
++    expect(commandErrorText(new TypeError('fetch failed'))).toBe(
++      'Ошибка сети. Команда не выполнена.',
++    );
++  });
++});
++
++// Поверхность отказа стартовой подписки (carry финревью батча A): join после
++// T1 может отказать ApiError('SUBSCRIBE_TIMEOUT') — раньше сетевой отказ join
++// давал null и только общий баннер. Подписка сама не восстанавливается
++// (join не идемпотентен), поэтому честный текст с явным советом обновить.
++describe('joinErrorText', () => {
++  it('SUBSCRIBE_TIMEOUT → текст про неподтверждённое подключение с советом', () => {
++    expect(joinErrorText('SUBSCRIBE_TIMEOUT')).toBe(
++      'Комната не подтвердила подключение — проверьте связь и обновите страницу.',
++    );
++  });
++
++  it('прочие коды и null (сеть до T1) → отдельной поверхности нет', () => {
++    expect(joinErrorText('ACTOR_NOT_MEMBER')).toBeNull();
++    expect(joinErrorText('SESSION_INVALID')).toBeNull();
++    expect(joinErrorText(null)).toBeNull();
++  });
++});
++
+ 
+ // Стейл-roomId (находка №3): комната из прошлой БД → join отказывает
+ // ACTOR_NOT_MEMBER; консоль обязана показать «комната не найдена», а не
+ // вечный «Нет соединения». NOT_FOUND — на случай будущего REST-восстановления
+ // комнаты; сетевые отказы (null) сюда не попадают.
+ describe('isStaleRoomJoinError', () => {
+   it('ACTOR_NOT_MEMBER и NOT_FOUND → true', () => {
+     expect(isStaleRoomJoinError('ACTOR_NOT_MEMBER')).toBe(true);
+     expect(isStaleRoomJoinError('NOT_FOUND')).toBe(true);
+   });
+diff --git a/apps/web/src/pages/host/console-page.tsx b/apps/web/src/pages/host/console-page.tsx
+index 42bdeeb..4556ee7 100644
+--- a/apps/web/src/pages/host/console-page.tsx
++++ b/apps/web/src/pages/host/console-page.tsx
+@@ -1,40 +1,60 @@
+ import { useEffect, useMemo, useState } from 'react';
+ import { useNavigate } from 'react-router-dom';
+ import { CORE_EVENTS, coreEventType } from '@mymozhem/sdk';
+ import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
+ import { gameFinishedPayload, QUIZ_APP_ID } from '@mymozhem/app-quiz';
+ import { ApiError } from '../../api/api-error';
+ import { completeRoom, listRewards } from '../../api/endpoints';
++import { FocusDim } from '../../components/focus-dim';
+ import { Logo } from '../../components/logo';
+ import { RaceTracks } from '../../components/race-tracks';
+ import { displayNameOf } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { HOST_NEW_PATH } from '../../routes';
+ import { SessionStore } from '../../state/session';
+ import { pluralRu } from '../../state/plural-ru';
++import { useFocusDim } from '../../state/use-focus-dim';
+ import { useRoomBinding } from '../../state/use-room-binding';
+ import { useRoomFeed } from '../../state/use-room-feed';
+ import { AwardsPanel } from './awards-panel';
+ import { hostClient, hostSession } from './host-session';
+ import { MembersPanel } from './members-panel';
+ import { PrizesPanel } from './prizes-panel';
+ import { QuizControls } from './quiz-controls';
+ 
+ // UX-маппинг ошибок publish-команд — тот же стиль, что answerErrorText в
+ // play-page: известных человеческих формулировок у команд ведущего нет,
+-// поэтому честный код (REQ-SEC-006: коды безопасны для показа).
+-const commandErrorText = (e: unknown): string => {
+-  if (e instanceof ApiError) return `Команда не выполнена (${e.code}).`;
++// поэтому честный код (REQ-SEC-006: коды безопасны для показа). Отказы
++// транспорта (NOT_CONNECTED/PUBLISH_TIMEOUT, T1) — честная формулировка
++// решения 7: ack-таймаут не значит «не исполнилось», повтор руками безопасен
++// (сервер отвечает конфликтом состояния, состояние сходится через realtime).
++export const commandErrorText = (e: unknown): string => {
++  if (e instanceof ApiError) {
++    if (e.code === 'NOT_CONNECTED' || e.code === 'PUBLISH_TIMEOUT') {
++      return 'Нет подтверждения команды — проверьте, не применилась ли она, прежде чем повторять.';
++    }
++    return `Команда не выполнена (${e.code}).`;
++  }
+   return 'Ошибка сети. Команда не выполнена.';
+ };
+ 
++// Поверхность отказа стартовой подписки (carry финревью батча A): после T1
++// join может отказать ApiError('SUBSCRIBE_TIMEOUT') — подписка сама не
++// восстанавливается (join не идемпотентен, use-room-binding), поэтому честный
++// текст с явным советом, а не только общий баннер «переподключаемся».
++// Стейл-коды (isStaleRoomJoinError) сюда не доезжают — у них свой экран.
++export const joinErrorText = (code: string | null): string | null =>
++  code === 'SUBSCRIBE_TIMEOUT'
++    ? 'Комната не подтвердила подключение — проверьте связь и обновите страницу.'
++    : null;
++
+ // Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
+ // ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
+ export const isStaleRoomJoinError = (code: string | null): boolean =>
+   code === 'ACTOR_NOT_MEMBER' || code === 'NOT_FOUND';
+ 
+ // Знаменатель разбора «не успели» и «N из M ответили» (бриф T9): играют
+ // только participant — организатор и наблюдатели в счётчик не входят.
+ export const participantsCount = (members: RosterEntry[]): number =>
+   members.filter((m) => m.role === 'participant').length;
+ 
+@@ -49,36 +69,43 @@ export const pendingAwardsCount = (awards: AwardResponse[]): number =>
+ // «Завершить событие» внизу. Переиспользует hostSession/hostClient
+ // Task 13 — второй SessionStore на host-флоу не заводим.
+ export function ConsolePage() {
+   const navigate = useNavigate();
+   // roomId/code — из localStorage, меняться за жизнь страницы не могут.
+   const [roomId] = useState<string | null>(() => SessionStore.loadHostRoomId());
+   const [roomCode] = useState<string | null>(() => SessionStore.loadHostRoomCode());
+   const [commandError, setCommandError] = useState<string | null>(null);
+   const [copied, setCopied] = useState<string | null>(null);
+   const [completing, setCompleting] = useState(false);
++  // Busy publish-команд (находка Н1, решение 3): одна команда в полёте —
++  // второй клик невозможен конструкцией (кнопки QuizControls disabled); settle
++  // гарантирован ack-таймаутом T1, finally всегда отпускает.
++  const [commandPending, setCommandPending] = useState(false);
+   // Награды целиком (null — не загружены/ошибка): из них derive подсказка
+   // «Квиз окончен» (только факт невручённых, п. 18) и гейт секции наград на
+   // COMPLETED (без наград — без блока вообще, п. 18).
+   const [awards, setAwards] = useState<AwardResponse[] | null>(null);
+   // «ещё N — развернуть» итогового табло COMPLETED (I-5, образец — toggle
+   // промежуточного табло в quiz-controls).
+   const [completedExpanded, setCompletedExpanded] = useState(false);
+ 
+   // Прямой заход на /host/console без комнаты/токена — на гейт: он сделает
+   // refresh и сам разведёт на console или setup.
+   useEffect(() => {
+     if (!roomId || !hostSession.getAccessToken()) navigate('/host', { replace: true });
+   }, [roomId, navigate]);
+ 
+   const binding = useRoomBinding(roomId, hostSession);
+   const feed = useRoomFeed(roomId, hostClient, binding.events);
++  // Затемнение нефокусного окна (находка Н1, решение 1; контуры — решение 2:
++  // play + console, проектор без вуали). Хук до ранних return — хуки безусловны.
++  const dimmed = useFocusDim();
+ 
+   const [roomGone, setRoomGone] = useState(false);
+ 
+   // Однократно на переход joinError: ключи снимаем атомарно (clearHostRoom),
+   // иначе следующий заход на /host снова приведёт в мёртвую комнату.
+   useEffect(() => {
+     if (isStaleRoomJoinError(binding.joinError)) {
+       SessionStore.clearHostRoom();
+       setRoomGone(true);
+     }
+@@ -99,20 +126,24 @@ export function ConsolePage() {
+     return appId;
+   }, [binding.events]);
+ 
+   // Терминальный статус: deriveRoomStatus уже отразил completed/cancelled из
+   // лога; панели в терминале глушим (сервер и так отказал бы, но зря не даём).
+   const terminal = feed.status === 'COMPLETED' || feed.status === 'CANCELLED';
+ 
+   // Экран «Квиз окончен» живёт при quiz.finished && ACTIVE (бриф T9 Step 5).
+   const quizFinishedLive = feed.quiz.finished && feed.status === 'ACTIVE';
+ 
++  // Текстовая поверхность отказа стартовой подписки (carry финревью батча A):
++  // SUBSCRIBE_TIMEOUT → честный текст с советом; null — поверхности нет.
++  const joinErrorSurface = joinErrorText(binding.joinError);
++
+   // Рефетч-триггер наград: публичные rewards.* (awarded/fulfilled/revoked —
+   // REQ-SEC-009, payload только id). Счётчик событий, а не последнее событие:
+   // переход quizFinishedLive с quiz.game.finished последним тоже должен
+   // загрузить список.
+   const rewardsEventCount = useMemo(
+     () => binding.events.filter((e) => e.type.startsWith('rewards.')).length,
+     [binding.events],
+   );
+ 
+   // Награды грузим на экране «Квиз окончен» (подсказка) и на COMPLETED
+@@ -153,24 +184,27 @@ export function ConsolePage() {
+       Object.entries(feed.quiz.totals).map(([actorId, total]) => ({ actorId, total }));
+     return rows.map((r) => ({
+       actorId: r.actorId,
+       name: displayNameOf(feed.names, r.actorId),
+       total: r.total,
+       gain: 0,
+     }));
+   }, [completedStandings, feed.quiz.totals, feed.names]);
+ 
+   const runCommand = (type: string, payload: Record<string, unknown>) => {
++    if (commandPending) return;
++    setCommandPending(true);
+     setCommandError(null);
+     void binding
+       .publish(type, payload)
+-      .catch((e: unknown) => setCommandError(commandErrorText(e)));
++      .catch((e: unknown) => setCommandError(commandErrorText(e)))
++      .finally(() => setCommandPending(false));
+   };
+ 
+   // «Завершить событие» (бриф Task 15): confirm() — переход терминален и
+   // необратим (REQ-RT-005), случайный клик не должен гасить событие. Статус
+   // COMPLETED приедет core.room.completed в лог — deriveRoomStatus поднимет его
+   // сам, локальный статус не выставляем.
+   const completeEvent = () => {
+     if (!roomId || terminal || completing) return;
+     if (!window.confirm('Завершить событие? Это действие необратимо.')) return;
+     setCompleting(true);
+@@ -218,20 +252,21 @@ export function ConsolePage() {
+           <a className="btn btn-primary console-lost-btn" href={HOST_NEW_PATH}>
+             К настройке комнаты
+           </a>
+         </div>
+       </main>
+     );
+   }
+ 
+   return (
+     <main className="console-page">
++      {dimmed ? <FocusDim /> : null}
+       {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
+           код. Sticky — статус виден при прокрутке секций. */}
+       <header className="console-strip">
+         <Logo contour="console" size="compact" />
+         <span
+           className={`console-conn${binding.connectionState === 'live' ? '' : ' off'}`}
+           role="status"
+         >
+           <span className="console-conn-dot" />
+           {binding.connectionState === 'live'
+@@ -245,20 +280,25 @@ export function ConsolePage() {
+       {/* Баннер обрыва — по мокапу console-empty-long-errors-v2; reconnect
+           самолечится перефолдом, но ведущий обязан видеть обрыв явно. */}
+       {binding.connectionState === 'disconnected' ? (
+         <p role="status" className="console-error-banner">
+           Нет соединения — переподключаемся…
+           <span className="console-error-sub">
+             Таймер и счётчики могут отставать. Ничего нажимать не нужно.
+           </span>
+         </p>
+       ) : null}
++      {joinErrorSurface ? (
++        <p role="alert" className="console-error">
++          {joinErrorSurface}
++        </p>
++      ) : null}
+       {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
+       {feed.status === 'COMPLETED' ? (
+         /* Экран завершения (бриф T11, дизайн §5.3 «Завершение», п. 18; мокап
+            console-draw-winner-larger finish-состояние): hero → невручённые
+            награды первой секцией → итоговый забег → тихая «новое событие».
+            Пульта квиза и панелей приглашений/участников/призов здесь нет. */
+         <>
+           <section className="console-hero console-completed-hero">
+             <div className="console-moment">
+               <div className="console-fh-title">Событие завершено</div>
+@@ -316,20 +356,21 @@ export function ConsolePage() {
+       {pinnedAppId === QUIZ_APP_ID ? (
+         <QuizControls
+           events={binding.events}
+           quiz={feed.quiz}
+           names={feed.names}
+           appSettings={binding.appSettings}
+           disabled={terminal}
+           participants={participantsCount(feed.members)}
+           pendingAwards={pendingAwards}
+           completing={completing}
++          commandPending={commandPending}
+           onCompleteEvent={completeEvent}
+           onCommand={runCommand}
+           commandError={commandError}
+         />
+       ) : null}
+       <div className="console-sections">
+         {roomCode ? (
+           <section className="console-card">
+             <h3 className="console-card-title">Приглашения</h3>
+             {/* Не router-Link: one-shot join в play/screen не перезапускается на
+@@ -390,18 +431,18 @@ export function ConsolePage() {
+       {/* Тихая «Завершить событие» внизу (бриф T9, дизайн п. 10). На экране
+           «Квиз окончен» её роль играет главная кнопка hero — дубль не нужен.
+           Не блокируется невручёнными наградами (REQ-RWD-009). */}
+       {feed.status === 'ACTIVE' && !feed.quiz.finished ? (
+         <button
+           type="button"
+           className="btn btn-quiet console-finish"
+           disabled={completing}
+           onClick={completeEvent}
+         >
+-          Завершить событие
++          {completing ? 'Завершаем…' : 'Завершить событие'}
+         </button>
+       ) : null}
+         </>
+       )}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/pages/host/quiz-controls.tsx b/apps/web/src/pages/host/quiz-controls.tsx
+index 4a65fdf..21300f5 100644
+--- a/apps/web/src/pages/host/quiz-controls.tsx
++++ b/apps/web/src/pages/host/quiz-controls.tsx
+@@ -41,20 +41,24 @@ interface QuizControlsProps {
+   // Число участников ростера (role participant) — знаменатель «не успели»
+   // и «N из M ответили»; считает страница (participantsCount).
+   participants: number;
+   // Невручённые награды для подсказки «Квиз окончен»; null — ещё не загружены
+   // (подсказки нет, дизайн п. 18).
+   pendingAwards: number | null;
+   // «Завершить событие» — главная кнопка экрана «Квиз окончен» (дизайн §5.3);
+   // сама команда (completeRoom + confirm) живёт на странице.
+   completing: boolean;
+   onCompleteEvent: () => void;
++  // Одна publish-команда в полёте (находка Н1, решение 3): кнопки команд
++  // disabled, пока publish не settle'нулся (settle гарантирован ack-таймаутом
++  // T1). Ставит/сбрасывает страница.
++  commandPending: boolean;
+   // Команды ведущего (clientInitiated по манифесту): quiz.question.opened /
+   // quiz.question.closed / quiz.game.finish. Ошибку publish показывает страница.
+   onCommand: (type: string, payload: Record<string, unknown>) => void;
+   commandError: string | null;
+ }
+ 
+ // Пульт ведущего квиза (бриф T9, дизайн §5.3 «пульт ведущего»): иерархия
+ // «статус → текущий момент → следующее действие». Hero = момент + действия;
+ // ростер reveal — дорожками (RaceTracks, contour console) с приростом из
+ // lastRoundGains. Кнопок reveal нет — question.revealed и game.finished
+@@ -63,26 +67,30 @@ interface QuizControlsProps {
+ // console-reveal-final-button, console-quiz-finished.
+ export function QuizControls({
+   events,
+   quiz,
+   names,
+   appSettings,
+   disabled,
+   participants,
+   pendingAwards,
+   completing,
++  commandPending,
+   onCompleteEvent,
+   onCommand,
+   commandError,
+ }: QuizControlsProps) {
+   const current = quiz.currentQuestion;
+   const next = nextQuestionIndex(quiz);
++  // Команды недоступны в терминале комнаты (disabled) и пока предыдущая
++  // команда в полёте (commandPending) — второй клик невозможен конструкцией.
++  const commandsDisabled = disabled || commandPending;
+ 
+   // «ещё N — развернуть» (I-5): toggle полного ростера — локальное состояние;
+   // между раундами (смена currentQuestion) схлопывается к топ-4.
+   const [expanded, setExpanded] = useState(false);
+   useEffect(() => {
+     setExpanded(false);
+   }, [current]);
+ 
+   // Длина колоды и тексты — из публичной проекции appSettings: тот же
+   // safeParse по ключу questions, что на play-page (correctAnswers сюда
+@@ -196,21 +204,21 @@ export function QuizControls({
+           {/* В терминале (событие уже завершено/отменено) действий нет —
+               статус показывает заметка страницы. */}
+           {!disabled ? (
+             <div className="console-actions">
+               <button
+                 type="button"
+                 className="btn btn-primary"
+                 disabled={completing}
+                 onClick={onCompleteEvent}
+               >
+-                Завершить событие
++                {completing ? 'Завершаем…' : 'Завершить событие'}
+               </button>
+               <p className="console-fh-note">Комната останется доступной до завершения.</p>
+             </div>
+           ) : null}
+         </section>
+         {commandError ? (
+           <p role="alert" className="console-error">
+             {commandError}
+           </p>
+         ) : null}
+@@ -320,60 +328,60 @@ export function QuizControls({
+               ) : null}
+             </>
+           )}
+         </div>
+         <div className="console-actions">
+           {quiz.accepting && current !== null ? (
+             <>
+               <button
+                 type="button"
+                 className="btn btn-primary"
+-                disabled={disabled}
++                disabled={commandsDisabled}
+                 onClick={() => onCommand('quiz.question.closed', { questionIndex: current })}
+               >
+                 Закрыть вопрос
+               </button>
+               {/* disabled с причиной текстом рядом (дизайн п. 15): второй open
+                   до close модуль отклонит, но и нажать его зря не даём. */}
+               <button type="button" className="btn btn-secondary" disabled>
+                 {openQuestionLabel(next, nextDurationSec)}{' '}
+                 <span className="console-btn-note">— сначала закройте текущий</span>
+               </button>
+             </>
+           ) : deckExhausted && current !== null ? (
+             /* Колода кончилась: по иерархии «следующее действие» остаётся
+                одно — завершить квиз, он и становится главной кнопкой. */
+             <button
+               type="button"
+               className="btn btn-primary"
+-              disabled={disabled}
++              disabled={commandsDisabled}
+               onClick={finishQuiz}
+             >
+               Завершить квиз
+             </button>
+           ) : (
+             <>
+               {/* Подпись 1-based для ведущего (openQuestionLabel), payload
+                   остаётся 0-based (questionIndex: next) — так ждёт модуль. */}
+               <button
+                 type="button"
+                 className="btn btn-primary"
+-                disabled={disabled || deckExhausted}
++                disabled={commandsDisabled || deckExhausted}
+                 onClick={() => onCommand('quiz.question.opened', { questionIndex: next })}
+               >
+                 {openQuestionLabel(next, nextDurationSec)}
+               </button>
+               {current !== null ? (
+                 <button
+                   type="button"
+                   className="btn btn-quiet"
+-                  disabled={disabled}
++                  disabled={commandsDisabled}
+                   onClick={finishQuiz}
+                 >
+                   Завершить квиз досрочно
+                 </button>
+               ) : null}
+             </>
+           )}
+         </div>
+       </section>
+       {commandError ? (
+diff --git a/apps/web/src/pages/play/answer-error-text.spec.ts b/apps/web/src/pages/play/answer-error-text.spec.ts
+new file mode 100644
+index 0000000..ab358b0
+--- /dev/null
++++ b/apps/web/src/pages/play/answer-error-text.spec.ts
+@@ -0,0 +1,34 @@
++import { describe, expect, it } from 'vitest';
++import { ApiError } from '../../api/api-error';
++import { answerErrorText } from './answer-error-text';
++
++// Тексты отказа ответа участника (находка Н1, решение 7): честная формулировка
++// «нет подтверждения — проверьте, не применилось ли», НЕ «точно не отправлено»
++// (ack-таймаут не значит, что команда не исполнилась). Коды NOT_CONNECTED /
++// PUBLISH_TIMEOUT — из RoomConnection (T1); сетевой TypeError — прежний текст.
++describe('answerErrorText', () => {
++  it('NOT_CONNECTED и PUBLISH_TIMEOUT → «Нет подтверждения…» (решение 7)', () => {
++    expect(answerErrorText(new ApiError('NOT_CONNECTED', 0))).toBe(
++      'Нет подтверждения ответа — проверьте, не засчитан ли он, и нажмите ещё раз.',
++    );
++    expect(answerErrorText(new ApiError('PUBLISH_TIMEOUT', 0))).toBe(
++      'Нет подтверждения ответа — проверьте, не засчитан ли он, и нажмите ещё раз.',
++    );
++  });
++
++  it('известные коды — прежние человеческие формулировки', () => {
++    expect(answerErrorText(new ApiError('ALREADY_ANSWERED', 409))).toBe('Ответ уже принят.');
++    expect(answerErrorText(new ApiError('ROUND_NOT_OPEN', 409))).toBe('Приём ответов закрыт.');
++    expect(answerErrorText(new ApiError('ANSWER_TOO_FAST', 429))).toBe(
++      'Слишком быстро — попробуйте ещё раз.',
++    );
++  });
++
++  it('неизвестный код — прежний честный код', () => {
++    expect(answerErrorText(new ApiError('WHAT_EVER', 400))).toBe('Ответ не принят (WHAT_EVER).');
++  });
++
++  it('не-ApiError (сеть) — прежнее «Ошибка сети…»', () => {
++    expect(answerErrorText(new TypeError('fetch failed'))).toBe('Ошибка сети. Ответ не отправлен.');
++  });
++});
+diff --git a/apps/web/src/pages/play/answer-error-text.ts b/apps/web/src/pages/play/answer-error-text.ts
+new file mode 100644
+index 0000000..b945366
+--- /dev/null
++++ b/apps/web/src/pages/play/answer-error-text.ts
+@@ -0,0 +1,25 @@
++import { ApiError } from '../../api/api-error';
++
++// UX-маппинг ошибок ответа участника (вынесен из play-page в T8 среза Н1/Н13 —
++// чистая функция под unit-тестом, прецедент open-question-label.ts). Отказы
++// транспорта (NOT_CONNECTED/PUBLISH_TIMEOUT, T1) — честная формулировка
++// решения 7: ack-таймаут не значит «не исполнилось»; сервер отвечает на
++// повтор конфликтом состояния, состояние сходится через realtime.
++export const answerErrorText = (e: unknown): string => {
++  if (e instanceof ApiError) {
++    switch (e.code) {
++      case 'ALREADY_ANSWERED':
++        return 'Ответ уже принят.';
++      case 'ROUND_NOT_OPEN':
++        return 'Приём ответов закрыт.';
++      case 'ANSWER_TOO_FAST':
++        return 'Слишком быстро — попробуйте ещё раз.';
++      case 'NOT_CONNECTED':
++      case 'PUBLISH_TIMEOUT':
++        return 'Нет подтверждения ответа — проверьте, не засчитан ли он, и нажмите ещё раз.';
++      default:
++        return `Ответ не принят (${e.code}).`;
++    }
++  }
++  return 'Ошибка сети. Ответ не отправлен.';
++};
+diff --git a/apps/web/src/pages/play/play-page.tsx b/apps/web/src/pages/play/play-page.tsx
+index aa20a68..cbfb287 100644
+--- a/apps/web/src/pages/play/play-page.tsx
++++ b/apps/web/src/pages/play/play-page.tsx
+@@ -1,59 +1,45 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useParams } from 'react-router-dom';
+ import type { RosterEntry } from '@mymozhem/sdk';
+ import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
+ import { ApiClient } from '../../api/api-client';
+-import { ApiError } from '../../api/api-error';
+ import { listMembers, refreshSession } from '../../api/endpoints';
+ import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
+ import { ConnectionBanner } from '../../components/connection-banner';
++import { FocusDim } from '../../components/focus-dim';
+ import { Logo } from '../../components/logo';
+ import { RaceTracks } from '../../components/race-tracks';
+ import { displayNameOf, rosterNames } from '../../components/roster-names';
+ import { Winners } from '../../components/winners';
+ import { deriveRoomStatus, projectAnsweredActors, projectLottery, projectQuiz } from '../../state/projections';
+ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
+ import { lastRoundGains, myPlace } from '../../state/race-tracks';
+ import { createRosterEventRefetcher } from '../../state/roster-refetch';
+ import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
++import { useFocusDim } from '../../state/use-focus-dim';
+ import { useRoomBinding } from '../../state/use-room-binding';
++import { answerErrorText } from './answer-error-text';
+ import { JoinForm } from './join-form';
+ 
+ // Буквенные метки вариантов (золотые <b> в .btn-scene, мокапы component-states-live
+ // и timer-projector-participant). Вариантов больше, чем букв, — рендер без метки.
+ const OPTION_LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З'];
+ 
+ // anonClient (ruling): join/refresh — auth:false, access-токена им не нужен,
+ // поэтому провайдер всегда отдаёт null. Module-level const — это не мутабельное
+ // состояние: клиент безстейтов, токены живут в SessionStore страницы.
+ const anonClient = new ApiClient({
+   getAccessToken: () => null,
+   refresh: () => Promise.resolve(),
+ });
+ 
+-const answerErrorText = (e: unknown): string => {
+-  if (e instanceof ApiError) {
+-    switch (e.code) {
+-      case 'ALREADY_ANSWERED':
+-        return 'Ответ уже принят.';
+-      case 'ROUND_NOT_OPEN':
+-        return 'Приём ответов закрыт.';
+-      case 'ANSWER_TOO_FAST':
+-        return 'Слишком быстро — попробуйте ещё раз.';
+-      default:
+-        return `Ответ не принят (${e.code}).`;
+-    }
+-  }
+-  return 'Ошибка сети. Ответ не отправлен.';
+-};
+-
+ export function PlayPage() {
+   const { code } = useParams();
+   // Сохранённая гостевая идентификация (код+имя, не токен) — источник авто-входа.
+   const [saved, setSaved] = useState<GuestSession | null>(() => SessionStore.loadGuest());
+   const [session] = useState(
+     () => new SessionStore(async () => (await refreshSession(anonClient)).accessToken),
+   );
+   // Авторизованный клиент поверх SessionStore — для listMembers (auth:true).
+   const [client] = useState(() => new ApiClient(session));
+   const [roomId, setRoomId] = useState<string | null>(null);
+@@ -150,20 +136,23 @@ export function PlayPage() {
+   const binding = useRoomBinding(roomId, session, {
+     onSessionDead: useCallback(() => {
+       // Rebind при том же roomId (Review Focus 1): React не перезапустит effect
+       // при одинаковом значении deps — сначала отвязываемся (cleanup закроет
+       // мёртвое соединение), rejoin следующим тиком установит roomId заново.
+       setRoomId(null);
+       setTimeout(() => void rejoin(), 0);
+     }, [rejoin]),
+   });
+   const events = binding.events;
++  // Затемнение нефокусного окна (находка Н1, решение 1): съеденный macOS клик
++  // получает видимый смысл. Хук до ранних return — хуки безусловны.
++  const dimmed = useFocusDim();
+ 
+   const [members, setMembers] = useState<RosterEntry[]>([]);
+ 
+   // Ростер (ruling 3): первая загрузка на subscribe (гонка snapshot/replay,
+   // I-8)…
+   useEffect(() => {
+     if (!roomId) return;
+     let stale = false;
+     listMembers(client, roomId)
+       .then((r) => {
+@@ -259,43 +248,49 @@ export function PlayPage() {
+     });
+     return revealIndex > closeIndex
+       ? questionRevealedPayload.parse(events[revealIndex].payload)
+       : null;
+   }, [events, currentQuestion]);
+ 
+   // Локальный ack «Ответ принят» — мгновенная обратная связь до прихода
+   // собственного события по fan-out; сбрасывается на смену вопроса.
+   const [answerAck, setAnswerAck] = useState(false);
+   const [answerError, setAnswerError] = useState<string | null>(null);
++  // Busy на время полёта publish (находка Н1, решение 3): без автоповтора —
++  // второй клик в полёте невозможен конструкцией (кнопки disabled); settle
++  // гарантирован ack-таймаутом T1, поэтому finally всегда отпускает.
++  const [answerSubmitting, setAnswerSubmitting] = useState(false);
+   useEffect(() => {
+     setAnswerAck(false);
+     setAnswerError(null);
+   }, [currentQuestion]);
+ 
+   // quiz.answers на клиенте ВСЕГДА пуст (answer.submitted — module-private),
+   // поэтому факт «я ответил» выводим из публичных quiz.answer.accepted —
+   // проекция переживает перефолд/reload (accept едет в snapshot).
+   const answeredActors = useMemo(
+     () =>
+       currentQuestion !== null
+         ? projectAnsweredActors(events, currentQuestion)
+         : new Set<string>(),
+     [events, currentQuestion],
+   );
+ 
+   const submitAnswer = (optionIndex: number) => {
+-    if (currentQuestion === null) return;
++    if (currentQuestion === null || answerSubmitting) return;
++    setAnswerSubmitting(true);
+     setAnswerError(null);
+     void binding
+       .publish('quiz.answer.submitted', { questionIndex: currentQuestion, optionIndex })
+       .then(() => setAnswerAck(true))
+-      .catch((e: unknown) => setAnswerError(answerErrorText(e)));
++      .catch((e: unknown) => setAnswerError(answerErrorText(e)))
++      .finally(() => setAnswerSubmitting(false));
+   };
+ 
+   if (!roomId) {
+     if (autoJoinPending)
+       return (
+         <main className="play-page">
+           <Logo contour="scene" size="participant" />
+           <p className="play-waiting">Входим…</p>
+         </main>
+       );
+@@ -383,30 +378,32 @@ export function PlayPage() {
+           <p>Ответ принят.</p>
+         ) : (
+           <ul className="play-options">
+             {(question?.options ?? []).map((option, optionIndex) => {
+               const letter = OPTION_LETTERS[optionIndex];
+               return (
+                 <li key={optionIndex}>
+                   <button
+                     type="button"
+                     className="btn btn-scene"
++                    disabled={answerSubmitting}
+                     onClick={() => submitAnswer(optionIndex)}
+                   >
+                     {letter ? <b>{letter}</b> : null}
+                     {option}
+                   </button>
+                 </li>
+               );
+             })}
+           </ul>
+         )}
++        {answerSubmitting ? <p role="status">Отправляю…</p> : null}
+         {answerError ? (
+           <p role="alert" className="play-error">
+             {answerError}
+           </p>
+         ) : null}
+       </section>
+     );
+   } else if (currentQuestion !== null && reveal) {
+     // Reveal (§5.1, мокап game-states): вердикт значком+текстом+цветом, очки
+     // из payload (единственный публичный источник баллов), «Правильный отвѣтъ»
+@@ -478,20 +475,21 @@ export function PlayPage() {
+           <div className="play-winners">
+             <Winners draws={lottery.draws} names={names} />
+           </div>
+         ) : null}
+       </section>
+     );
+   }
+ 
+   return (
+     <main className="play-page">
++      {dimmed ? <FocusDim /> : null}
+       <ConnectionBanner state={binding.connectionState} />
+       {rejoined ? (
+         <p role="status">
+           Сессия истекла — вы вошли заново, прежние очки не переносятся.{' '}
+           <button type="button" className="btn btn-scene" onClick={() => setRejoined(false)}>
+             Понятно
+           </button>
+         </p>
+       ) : null}
+       <Logo contour="scene" size="participant" />
+diff --git a/apps/web/src/state/focus-dim.spec.ts b/apps/web/src/state/focus-dim.spec.ts
+new file mode 100644
+index 0000000..fde4d2f
+--- /dev/null
++++ b/apps/web/src/state/focus-dim.spec.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from 'vitest';
++import { createFocusDimTracker } from './focus-dim';
++
++// Затемнение нефокусного окна (находка Н1, дизайн §3(А), решение 1):
++// dimmed ⟺ blurred && visible. Условие «visible» отделяет десктопное «окно
++// видно, фокус в другом приложении» (macOS съедает первый клик на активацию —
++// вуаль даёт съеденному клику видимый смысл) от мобильного app-switch, где
++// страница hidden и затемнять нечего (Review Focus 4). Трекер чистый: DOM не
++// читает, visibility приходит снаружи через onVisibility (хук use-focus-dim).
++describe('createFocusDimTracker', () => {
++  it('изначально не затемнён', () => {
++    const tracker = createFocusDimTracker();
++    expect(tracker.dimmed()).toBe(false);
++  });
++
++  it('blur при видимой странице → затемнено', () => {
++    const tracker = createFocusDimTracker();
++    tracker.onBlur();
++    expect(tracker.dimmed()).toBe(true);
++  });
++
++  it('blur при hidden-вкладке (мобильный app-switch) → НЕ затемнено', () => {
++    const tracker = createFocusDimTracker();
++    tracker.onVisibility(false);
++    tracker.onBlur();
++    expect(tracker.dimmed()).toBe(false);
++  });
++
++  it('focus снимает затемнение', () => {
++    const tracker = createFocusDimTracker();
++    tracker.onBlur();
++    expect(tracker.dimmed()).toBe(true);
++    tracker.onFocus();
++    expect(tracker.dimmed()).toBe(false);
++  });
++
++  it('hidden снимает вуаль при удержанном blur, возврат в visible — ставит снова', () => {
++    const tracker = createFocusDimTracker();
++    tracker.onBlur();
++    tracker.onVisibility(false);
++    expect(tracker.dimmed()).toBe(false);
++    tracker.onVisibility(true);
++    expect(tracker.dimmed()).toBe(true);
++  });
++
++  it('повторный blur без focus — без изменений', () => {
++    const tracker = createFocusDimTracker();
++    tracker.onBlur();
++    tracker.onBlur();
++    expect(tracker.dimmed()).toBe(true);
++  });
++});
+diff --git a/apps/web/src/state/focus-dim.ts b/apps/web/src/state/focus-dim.ts
+new file mode 100644
+index 0000000..8009548
+--- /dev/null
++++ b/apps/web/src/state/focus-dim.ts
+@@ -0,0 +1,29 @@
++// Трекер затемнения нефокусного окна (находка Н1, дизайн §3(А), решение 1):
++// dimmed ⟺ blurred && visible. «visible» отделяет десктопный сценарий «окно
++// видно, фокус в другом приложении» от мобильного app-switch, где страница
++// hidden и затемнять нечего (Review Focus 4). Чистый: DOM не читает — события
++// и visibility скармливает хук use-focus-dim; начальное состояние — видимая
++// сфокусированная страница.
++export interface FocusDimTracker {
++  dimmed(): boolean;
++  onBlur(): void;
++  onFocus(): void;
++  onVisibility(visible: boolean): void;
++}
++
++export function createFocusDimTracker(): FocusDimTracker {
++  let blurred = false;
++  let visible = true;
++  return {
++    dimmed: () => blurred && visible,
++    onBlur: () => {
++      blurred = true;
++    },
++    onFocus: () => {
++      blurred = false;
++    },
++    onVisibility: (v: boolean) => {
++      visible = v;
++    },
++  };
++}
+diff --git a/apps/web/src/state/use-focus-dim.ts b/apps/web/src/state/use-focus-dim.ts
+new file mode 100644
+index 0000000..28d3e2d
+--- /dev/null
++++ b/apps/web/src/state/use-focus-dim.ts
+@@ -0,0 +1,37 @@
++import { useEffect, useState } from 'react';
++import { createFocusDimTracker } from './focus-dim';
++
++// React-клей трекера затемнения (дизайн §3(А)): blur/focus на window,
++// visibilitychange на document, cleanup снимает всех слушателей. Текущая
++// visibility подаётся в трекер и на blur тоже: macOS может отдать blur до
++// перехода вкладки в hidden — порядок событий браузером не гарантирован,
++// поэтому каждое событие несёт свежий снимок document.visibilityState.
++export function useFocusDim(): boolean {
++  const [dimmed, setDimmed] = useState(false);
++  useEffect(() => {
++    const tracker = createFocusDimTracker();
++    const sync = () => setDimmed(tracker.dimmed());
++    const onBlur = () => {
++      tracker.onVisibility(document.visibilityState === 'visible');
++      tracker.onBlur();
++      sync();
++    };
++    const onFocus = () => {
++      tracker.onFocus();
++      sync();
++    };
++    const onVisibility = () => {
++      tracker.onVisibility(document.visibilityState === 'visible');
++      sync();
++    };
++    window.addEventListener('blur', onBlur);
++    window.addEventListener('focus', onFocus);
++    document.addEventListener('visibilitychange', onVisibility);
++    return () => {
++      window.removeEventListener('blur', onBlur);
++      window.removeEventListener('focus', onFocus);
++      document.removeEventListener('visibilitychange', onVisibility);
++    };
++  }, []);
++  return dimmed;
++}
+diff --git a/apps/web/src/styles/tokens.css b/apps/web/src/styles/tokens.css
+index 7af244e..aac8113 100644
+--- a/apps/web/src/styles/tokens.css
++++ b/apps/web/src/styles/tokens.css
+@@ -38,16 +38,21 @@
+   --danger-active: #ECCFC4;
+   /* Литералы мокапа console.css (T13): ok-зелёный полосы связи, фон полей ввода */
+   --ok: #2F6B4F;
+   --input-console: #FFFFFF;
+ 
+   /* Тайминги состояний: hover мягкий, нажатие мгновенное, забег — контент-анимация */
+   --t-hover: 140ms;
+   --t-press: 60ms;
+   --t-race: 600ms;
+ 
++  /* Вуаль затемнения нефокусного окна (находка Н1, T7): --scene-bg с альфой —
++     читается на обоих контурах (сцена тёмная, консоль светлая). Кандидат
++     в токены по идиоме среза: новый литерал — с комментарием. */
++  --focus-dim-veil: rgba(10, 37, 43, 0.6);
++
+   /* Шрифты: self-hosted woff2 (OFL), подключены в base.css.
+      --font-logo = Oranienbaum до решения лицензии Blagovest (гейт лицензии). */
+   --font-logo: 'Oranienbaum', serif;
+   --font-display: 'Oranienbaum', serif;
+   --font-body: 'PT Sans', sans-serif;
+ }
+diff --git a/apps/web/src/styles/tokens.spec.ts b/apps/web/src/styles/tokens.spec.ts
+index 43880be..aae1308 100644
+--- a/apps/web/src/styles/tokens.spec.ts
++++ b/apps/web/src/styles/tokens.spec.ts
+@@ -185,20 +185,47 @@ describe('transitions.css — кнопочная система состояни
+   });
+ 
+   it('reduced-motion гасит доезд: полосы появляются мгновенно (2.4)', () => {
+     const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
+     expect(block).toMatch(
+       /\.race-tracks \.fill,\s*\.race-tracks \.gain\s*\{[^}]*animation:\s*none\s*!important/,
+     );
+   });
+ });
+ 
++describe('focus-dim — вуаль нефокусного окна (находка Н1, T7)', () => {
++  it('токен --focus-dim-veil определён в tokens.css', () => {
++    const css = readStyle('tokens.css');
++    expect(css).toMatch(/--focus-dim-veil\s*:\s*rgba\(10,\s*37,\s*43,\s*0\.6\)\s*;/);
++  });
++
++  it('transitions.css ссылается на var(--focus-dim-veil), сырого литерала нет', () => {
++    const css = readStyle('transitions.css');
++    expect(css).toContain('var(--focus-dim-veil)');
++    expect(css).not.toMatch(/rgba\(\s*10,\s*37,\s*43/);
++  });
++
++  it('.focus-dim — полноэкранный оверлей БЕЗ перехвата кликов (решение 1)', () => {
++    const css = readStyle('transitions.css');
++    const m = css.match(/\.focus-dim\s*\{([^}]*)\}/);
++    expect(m, 'ожидался блок .focus-dim').not.toBeNull();
++    expect(m![1]).toMatch(/position:\s*fixed/);
++    expect(m![1]).toMatch(/pointer-events:\s*none/);
++  });
++
++  it('reduced-motion: страж против будущих анимаций появления вуали', () => {
++    const css = readStyle('transitions.css');
++    const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
++    expect(block).toContain('.focus-dim');
++  });
++});
++
+ describe('scene.css — кегли логотипа', () => {
+   const css = readStyle('scene.css');
+ 
+   // Вердикт (б) живой приёмки: 19px в полосе комнаты крупновато, по мокапу 17px.
+   // Кегль несёт компонент (ruling C-1), поэтому страж на класс размера, а не на
+   // переопределение в console.css.
+   it('есть compact-кегль логотипа 17px для консольной полосы (вердикт (б))', () => {
+     const m = css.match(/\.logo-compact\s*\{([^}]*)\}/);
+     expect(m, 'ожидался блок .logo-compact').not.toBeNull();
+     expect(m![1]).toMatch(/font-size:\s*17px/);
+diff --git a/apps/web/src/styles/transitions.css b/apps/web/src/styles/transitions.css
+index 534c5f9..9f5b66b 100644
+--- a/apps/web/src/styles/transitions.css
++++ b/apps/web/src/styles/transitions.css
+@@ -147,17 +147,43 @@
+ .race-tracks .fill.solo { border-radius: 5px; }
+ .race-tracks .gain {
+   background: var(--gold);
+   height: 100%;
+   border-radius: 0 5px 5px 0;
+   animation: race-in var(--t-race) ease-out;
+   transition: width var(--t-race) ease-out;
+ }
+ .race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
+ 
++/* Затемнение нефокусного окна (находка Н1, решение 1): вуаль НЕ перехватывает
++   клики (pointer-events: none) — на macOS первый клик и так уходит оконному
++   серверу, на Windows click-through доставляет его контенту; щит съедал бы
++   рабочие клики. z-index — первый слой поверх контента: других z-index в
++   стилях пока нет (console-strip sticky без z-index), 10 с запасом. */
++.focus-dim {
++  position: fixed;
++  inset: 0;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  background: var(--focus-dim-veil);
++  pointer-events: none;
++  z-index: 10;
++}
++.focus-dim-text {
++  color: var(--scene-text);
++  font-size: 20px;
++  font-weight: 700;
++  text-align: center;
++  padding: 0 24px;
++}
++
+ /* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации;
+-   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4) */
++   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4).
++   Вуаль затемнения появляется без анимаций при любом режиме (дизайн §3(А));
++   гард в RM-блоке — страховка от будущего transition/animation на .focus-dim. */
+ @media (prefers-reduced-motion: reduce) {
+   .btn { transition-duration: 0ms !important; }
+   .race-tracks .fill,
+   .race-tracks .gain { transition-duration: 0ms !important; animation: none !important; }
++  .focus-dim { transition: none !important; animation: none !important; }
+ }

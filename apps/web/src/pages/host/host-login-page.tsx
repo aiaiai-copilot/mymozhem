@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../../api/api-error';
 import { bootstrapOrganizer } from '../../api/endpoints';
+import { useSessionWakeRefresh } from '../../state/wake-refresh';
 import { anonClient, hostSession } from './host-session';
 
 // ADR-012 §2: вход организатора — setup-токен из конфигурации инстанса
@@ -9,6 +10,9 @@ import { anonClient, hostSession } from './host-session';
 // после протухания refresh-сессии вводится заново.
 export function HostLoginPage() {
   const navigate = useNavigate();
+  // Проактивный refresh по пробуждению (находка Н13, дизайн §3(Г)): на login
+  // access-токена нет → dueSoon(null)=false, хук молчит до входа.
+  useSessionWakeRefresh(hostSession);
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

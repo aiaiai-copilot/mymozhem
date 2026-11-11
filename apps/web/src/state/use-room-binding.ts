@@ -4,13 +4,34 @@ import { ApiError } from '../api/api-error';
 import type { TokenProvider } from '../api/token-provider';
 import { RoomConnection, type ConnectionState } from '../realtime/room-connection';
 import { createSocket } from '../realtime/socket-like';
-import { createFocusRefetcher } from './focus-refetch';
 import { LogStore } from './log-store';
+import { createSessionWakeRefresher } from './wake-refresh';
 
 // Код отказа стартового join (находка №3): ApiError несёт wire-код; сетевые
 // отказы (не ApiError) — null, их место — баннер 'disconnected', не экраны ошибок.
 export const joinErrorCode = (e: unknown): string | null =>
   e instanceof ApiError ? e.code : null;
+
+// Поверхность отказа стартовой подписки (carry финревью батча A): после T1
+// join может отказать ApiError('SUBSCRIBE_TIMEOUT') — подписка сама не
+// восстанавливается (join не идемпотентен, re-subscribe под гардом joined в
+// RoomConnection), поэтому честный текст с явным советом, а не только общий
+// баннер «переподключаемся», который в этом состоянии врёт. Общая для
+// play/console/screen — живёт рядом с joinErrorCode (владелец контракта кодов).
+export const joinErrorText = (code: string | null): string | null =>
+  code === 'SUBSCRIBE_TIMEOUT'
+    ? 'Комната не подтвердила подключение — проверьте связь и обновите страницу.'
+    : null;
+
+// Баннер «переподключаемся» честен, только пока reconnect действительно идёт
+// (финревью батча C, Important 1): после упавшего СТАРТОВОГО join никто не
+// переподключается — при живой joinErrorSurface баннер скрывается, говорит
+// alert joinErrorText. Иначе на экране одновременно «ничего не нажимай» и
+// «обновите страницу».
+export const reconnectBannerVisible = (
+  state: ConnectionState,
+  joinErrorSurface: string | null,
+): boolean => state === 'disconnected' && joinErrorSurface === null;
 
 // Тонкий React-клей поверх RoomConnection + LogStore (дизайн §3): вся фолд-логика
 // (буфер до snapshot, перефолд на resync) уже оттестирована в LogStore и
@@ -63,18 +84,27 @@ export function useRoomBinding(
       setEvents(store.all());
     });
     conn.onStateChange(setConnectionState);
-    // Кик reconnect'а при пробуждении вкладки (находка №8): WebKit выбрасывает
-    // backoff-таймер socket.io из замороженной вкладки — вечный баннер до reload.
-    // pageshow — возврат из bfcache (ключевой сигнал iOS Safari),
-    // visibilitychange/focus — парный сигнал десктопа; дедуп парных событий —
-    // тот же createFocusRefetcher, что у ростера (находка №6). Протухший токен
-    // при пробуждении обслуживает существующий путь connect_error → refresh.
-    const onWake = createFocusRefetcher(() => {
-      if (document.visibilityState === 'visible') conn.wakeUp();
-    });
+    // Пробуждение вкладки (находки №8 и Н13): проактивный refresh, если до exp
+    // access-токена меньше порога, и только ПОСЛЕ него — кик reconnect
+    // (refresh-then-kick, дизайн §3(Г): handshake уйдёт со свежим токеном;
+    // реактивный путь connect_error → refresh остаётся страховкой). Кик нужен
+    // против застрявшего backoff WebKit — только при видимой вкладке.
+    // pageshow — возврат из bfcache (ключевой сигнал iOS Safari), online —
+    // ретрай сетевого обрыва (дизайн §3(В)); дедуп парных событий — внутри
+    // createSessionWakeRefresher (тот же createFocusRefetcher, находка №6).
+    const onWake = createSessionWakeRefresher(
+      () => tokens.getAccessToken(),
+      () => tokens.refresh(),
+      {
+        onWake: () => {
+          if (document.visibilityState === 'visible') conn.wakeUp();
+        },
+      },
+    );
     document.addEventListener('visibilitychange', onWake);
     window.addEventListener('focus', onWake);
     window.addEventListener('pageshow', onWake);
+    window.addEventListener('online', onWake);
     // join() НЕ идемпотентен (второй вызов = второй subscribe) — ровно один вызов
     // на effect. Стартовый отказ обязан обрабатываться: gateway при ошибке subscribe
     // зачищает серверную подписку (registry.remove + socket.leave + ack-ошибка,
@@ -97,6 +127,7 @@ export function useRoomBinding(
       document.removeEventListener('visibilitychange', onWake);
       window.removeEventListener('focus', onWake);
       window.removeEventListener('pageshow', onWake);
+      window.removeEventListener('online', onWake);
       // Обнуляем ref ДО следующего effect (cleanup всегда предшествует ему):
       // publish на уже закрытом соединении обязан отказать NOT_CONNECTED,
       // а не уйти emit'ом в мёртвый сокет.

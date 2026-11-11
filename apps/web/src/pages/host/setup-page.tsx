@@ -10,6 +10,7 @@ import { ApiError } from '../../api/api-error';
 import { activateRoom, configureRoom, createRoom } from '../../api/endpoints';
 import { HOST_CONSOLE_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
+import { useSessionWakeRefresh } from '../../state/wake-refresh';
 import { hostClient, hostSession } from './host-session';
 import { QuizEditor } from './quiz-editor';
 
@@ -39,6 +40,9 @@ const submitErrorText = (e: unknown): string => {
 // activateRoom → консоль.
 export function SetupPage() {
   const navigate = useNavigate();
+  // Проактивный refresh по пробуждению (находка Н13, дизайн §3(Г)): setup —
+  // место первого случая Н1 (configure), токен обязан быть свежим до submit.
+  useSessionWakeRefresh(hostSession);
   const [roomId, setRoomId] = useState<string | null>(() => SessionStore.loadHostRoomId());
   const [roomError, setRoomError] = useState<string | null>(null);
   const [appKind, setAppKind] = useState<AppKind>('quiz');
@@ -148,7 +152,9 @@ export function SetupPage() {
           }}
         >
           <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
-            Сохранить и запустить
+            {/* Busy-индикация на время configure+activate (находка Н1 — первый
+                случай был именно здесь; дизайн §3(Б)). */}
+            {busy ? 'Сохраняем…' : 'Сохранить и запустить'}
           </button>
         </form>
       )}

@@ -3,10 +3,10 @@ import { useParams } from 'react-router-dom';
 import type { RosterEntry } from '@mymozhem/sdk';
 import { questionRevealedPayload, quizSettingsSchema } from '@mymozhem/app-quiz';
 import { ApiClient } from '../../api/api-client';
-import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
-import { rejoinAsGuest } from '../../state/guest-rejoin';
+import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
+import { FocusDim } from '../../components/focus-dim';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
 import { displayNameOf, rosterNames } from '../../components/roster-names';
@@ -16,7 +16,9 @@ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
 import { lastRoundGains, myPlace } from '../../state/race-tracks';
 import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
-import { useRoomBinding } from '../../state/use-room-binding';
+import { useFocusDim } from '../../state/use-focus-dim';
+import { joinErrorText, useRoomBinding } from '../../state/use-room-binding';
+import { answerErrorText } from './answer-error-text';
 import { JoinForm } from './join-form';
 
 // Буквенные метки вариантов (золотые <b> в .btn-scene, мокапы component-states-live
@@ -30,22 +32,6 @@ const anonClient = new ApiClient({
   getAccessToken: () => null,
   refresh: () => Promise.resolve(),
 });
-
-const answerErrorText = (e: unknown): string => {
-  if (e instanceof ApiError) {
-    switch (e.code) {
-      case 'ALREADY_ANSWERED':
-        return 'Ответ уже принят.';
-      case 'ROUND_NOT_OPEN':
-        return 'Приём ответов закрыт.';
-      case 'ANSWER_TOO_FAST':
-        return 'Слишком быстро — попробуйте ещё раз.';
-      default:
-        return `Ответ не принят (${e.code}).`;
-    }
-  }
-  return 'Ошибка сети. Ответ не отправлен.';
-};
 
 export function PlayPage() {
   const { code } = useParams();
@@ -66,11 +52,16 @@ export function PlayPage() {
   const [autoJoinError, setAutoJoinError] = useState<string | null>(null);
   const autoJoinStarted = useRef(false);
   const rejoinInFlight = useRef(false);
+  // Вооружение повтора rejoin (временный отказ): слушатели пробуждения живут,
+  // только пока retry вооружён; снимаются на успех/терминал/unmount.
+  const [rejoinRetryArmed, setRejoinRetryArmed] = useState(false);
 
   // Перезаход с новой identity (находка №5): общий путь для авто-входа §5
   // (TTL протух на загрузке) и onSessionDead (кука умерла на живой странице).
   // Гард: один перезаход в полёте — повторный onSessionDead не плодит identity.
-  const rejoin = useCallback(async () => {
+  // pending/вооружение retry выставляются ЗДЕСЬ, а не в вызывающем: путь
+  // wake-слушателя не проходит через эффект авто-входа (финревью батча B).
+  const rejoin = useCallback(async (): Promise<void> => {
     const s = SessionStore.loadGuest();
     if (!s || rejoinInFlight.current) return;
     rejoinInFlight.current = true;
@@ -79,16 +70,39 @@ export function PlayPage() {
       session.setAccessToken(res.accessToken);
       setRejoined(true);
       setRoomId(res.roomId);
-    } catch {
-      // Сохранённое больше не валидно (комната удалена/закрыта) — забываем
-      // его и честно показываем форму, а не вечный «Входим…».
-      SessionStore.clearGuest();
-      setSaved(null);
-      setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+      setAutoJoinPending(false);
+      setRejoinRetryArmed(false);
+    } catch (e) {
+      if (rejoinFailureAction(e) === 'terminal') {
+        // Сохранённое отклонено сервером по существу (комната удалена/закрыта)
+        // — забываем его и честно показываем форму, а не вечный «Входим…».
+        SessionStore.clearGuest();
+        setSaved(null);
+        setAutoJoinError('Сохранённая сессия недействительна. Войдите заново.');
+        setAutoJoinPending(false);
+        setRejoinRetryArmed(false);
+      } else {
+        // Сеть лежит (временный отказ, находка Н13): экран «Входим…», личность
+        // не трогаем (решение 4); повтор — wake-слушатели эффекта ниже.
+        setAutoJoinPending(true);
+        setRejoinRetryArmed(true);
+      }
     } finally {
       rejoinInFlight.current = false;
     }
   }, [session]);
+
+  // Повтор rejoin по пробуждению/online (находка Н13, дизайн §3(В)): слушатели
+  // живут, только пока вооружён retry — cleanup снимает их на disarm/unmount,
+  // иначе сработка после ухода со страницы создала бы сироту-identity на
+  // сервере (финревью батча B, Important 2). Не только online: 5xx при ЖИВОЙ
+  // сети (рестарт сервера) online не стреляет — догоняем по
+  // focus/visibilitychange/pageshow (Important 1); парные события дедупит гард
+  // rejoinInFlight внутри rejoin.
+  useEffect(() => {
+    if (!rejoinRetryArmed) return;
+    return createRejoinRetryListeners(() => void rejoin(), window, document);
+  }, [rejoinRetryArmed, rejoin]);
 
   // Авто-вход (дизайн §5): сначала silent refresh — refresh-кука жива → та же
   // identity и прежние очки. TTL протух → повторный join создаёт НОВУЮ identity
@@ -110,10 +124,11 @@ export function PlayPage() {
         const resumedRoomId = token ? decodeAccessClaims(token).roomId : undefined;
         if (!resumedRoomId) throw new Error('refreshed token without roomId');
         setRoomId(resumedRoomId);
-      } catch {
-        await rejoin();
-      } finally {
         setAutoJoinPending(false);
+      } catch {
+        // pending и retry-слушатели — внутри rejoin: refresh не прошёл, ветка
+        // rejoin решает исход (решение 4 / находка Н13).
+        await rejoin();
       }
     })();
   }, [autoJoinPending, session, rejoin]);
@@ -128,6 +143,13 @@ export function PlayPage() {
     }, [rejoin]),
   });
   const events = binding.events;
+  // Поверхность отказа стартовой подписки (финревью батча C, Important 2):
+  // SUBSCRIBE_TIMEOUT → честный текст с советом; баннер «переподключаемся»
+  // при нём подавляется внутри ConnectionBanner (переподключать некому).
+  const joinErrorSurface = joinErrorText(binding.joinError);
+  // Затемнение нефокусного окна (находка Н1, решение 1): съеденный macOS клик
+  // получает видимый смысл. Хук до ранних return — хуки безусловны.
+  const dimmed = useFocusDim();
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
 
@@ -237,6 +259,10 @@ export function PlayPage() {
   // собственного события по fan-out; сбрасывается на смену вопроса.
   const [answerAck, setAnswerAck] = useState(false);
   const [answerError, setAnswerError] = useState<string | null>(null);
+  // Busy на время полёта publish (находка Н1, решение 3): без автоповтора —
+  // второй клик в полёте невозможен конструкцией (кнопки disabled); settle
+  // гарантирован ack-таймаутом T1, поэтому finally всегда отпускает.
+  const [answerSubmitting, setAnswerSubmitting] = useState(false);
   useEffect(() => {
     setAnswerAck(false);
     setAnswerError(null);
@@ -254,12 +280,14 @@ export function PlayPage() {
   );
 
   const submitAnswer = (optionIndex: number) => {
-    if (currentQuestion === null) return;
+    if (currentQuestion === null || answerSubmitting) return;
+    setAnswerSubmitting(true);
     setAnswerError(null);
     void binding
       .publish('quiz.answer.submitted', { questionIndex: currentQuestion, optionIndex })
       .then(() => setAnswerAck(true))
-      .catch((e: unknown) => setAnswerError(answerErrorText(e)));
+      .catch((e: unknown) => setAnswerError(answerErrorText(e)))
+      .finally(() => setAnswerSubmitting(false));
   };
 
   if (!roomId) {
@@ -361,6 +389,7 @@ export function PlayPage() {
                   <button
                     type="button"
                     className="btn btn-scene"
+                    disabled={answerSubmitting}
                     onClick={() => submitAnswer(optionIndex)}
                   >
                     {letter ? <b>{letter}</b> : null}
@@ -371,6 +400,7 @@ export function PlayPage() {
             })}
           </ul>
         )}
+        {answerSubmitting ? <p role="status">Отправляю…</p> : null}
         {answerError ? (
           <p role="alert" className="play-error">
             {answerError}
@@ -456,7 +486,13 @@ export function PlayPage() {
 
   return (
     <main className="play-page">
-      <ConnectionBanner state={binding.connectionState} />
+      {dimmed ? <FocusDim /> : null}
+      <ConnectionBanner state={binding.connectionState} joinErrorSurface={joinErrorSurface} />
+      {joinErrorSurface ? (
+        <p role="alert" className="play-error">
+          {joinErrorSurface}
+        </p>
+      ) : null}
       {rejoined ? (
         <p role="status">
           Сессия истекла — вы вошли заново, прежние очки не переносятся.{' '}

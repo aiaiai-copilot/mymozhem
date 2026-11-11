@@ -44,7 +44,12 @@ interface AwardsPanelProps {
 // (REQ-RWD-009) — призы вручают после завершения события.
 export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
   const [awards, setAwards] = useState<AwardResponse[] | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  // Действие в полёте: id награды + само действие (busy-индикация на кнопке,
+  // находка Н1, дизайн §3(Б)). Settle гарантирован таймаутом ApiClient (T2).
+  const [resolving, setResolving] = useState<{
+    awardId: string;
+    action: 'fulfill' | 'revoke';
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -75,15 +80,15 @@ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
   // fulfill/revoke — идемпотентны на сервере (no-op при повторе), но параллельные
   // клики по разным наградам не упорядочиваем — одна команда за раз, как везде.
   const resolve = (awardId: string, action: 'fulfill' | 'revoke') => {
-    if (busyId !== null) return;
-    setBusyId(awardId);
+    if (resolving !== null) return;
+    setResolving({ awardId, action });
     setError(null);
     const call = action === 'fulfill' ? fulfillAward : revokeAward;
     void call(hostClient, roomId, awardId)
       .then(() => listRewards(hostClient, roomId))
       .then((r) => setAwards(r.awards))
       .catch((e: unknown) => setError(awardErrorText(e)))
-      .finally(() => setBusyId(null));
+      .finally(() => setResolving(null));
   };
 
   // Заголовок со счётчиком вручения — по мокапу завершения
@@ -119,18 +124,22 @@ export function AwardsPanel({ roomId, names, events }: AwardsPanelProps) {
                   <button
                     type="button"
                     className="btn btn-primary console-mini"
-                    disabled={busyId !== null}
+                    disabled={resolving !== null}
                     onClick={() => resolve(a.id, 'fulfill')}
                   >
-                    Вручить
+                    {resolving?.awardId === a.id && resolving.action === 'fulfill'
+                      ? 'Вручаем…'
+                      : 'Вручить'}
                   </button>
                   <button
                     type="button"
                     className="btn btn-quiet console-mini"
-                    disabled={busyId !== null}
+                    disabled={resolving !== null}
                     onClick={() => resolve(a.id, 'revoke')}
                   >
-                    Отозвать
+                    {resolving?.awardId === a.id && resolving.action === 'revoke'
+                      ? 'Отзываем…'
+                      : 'Отозвать'}
                   </button>
                 </span>
               ) : null}

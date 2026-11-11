@@ -1,17 +1,24 @@
 import type { TokenProvider } from '../api/token-provider';
 
-// JWT-декод БЕЗ верификации — только для UI («кто я», моя комната). Все решения
-// доступа — на сервере; подделанный payload прав не даёт (Review Focus 1).
-export const decodeAccessClaims = (
-  token: string,
-): { sub: string; kind: 'GUEST' | 'REGISTERED'; roomId?: string } => {
+// JWT-декод БЕЗ верификации — только для UI («кто я», моя комната, срок жизни).
+// Все решения доступа — на сервере; подделанный payload прав не даёт
+// (Review Focus 1).
+export interface AccessClaims {
+  sub: string;
+  kind: 'GUEST' | 'REGISTERED';
+  roomId?: string;
+  // Секунды (JWT-стандарт). Обязателен: серверные токены всегда с exp;
+  // потребитель — проактивный refresh (дизайн §3(Г)), тихий undefined дал бы
+  // NaN-сравнение = вечное «не due» — поэтому fail-loud.
+  exp: number;
+}
+
+export const decodeAccessClaims = (token: string): AccessClaims => {
   const part = token.split('.')[1];
   if (!part) throw new Error('malformed access token');
-  return JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as {
-    sub: string;
-    kind: 'GUEST' | 'REGISTERED';
-    roomId?: string;
-  };
+  const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as AccessClaims;
+  if (typeof claims.exp !== 'number') throw new Error('access token without exp');
+  return claims;
 };
 
 const GUEST_KEY = 'mm.guest.session';

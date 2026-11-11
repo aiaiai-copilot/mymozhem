@@ -5,6 +5,7 @@ import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
 import { gameFinishedPayload, QUIZ_APP_ID } from '@mymozhem/app-quiz';
 import { ApiError } from '../../api/api-error';
 import { completeRoom, listRewards } from '../../api/endpoints';
+import { FocusDim } from '../../components/focus-dim';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
 import { displayNameOf } from '../../components/roster-names';
@@ -12,7 +13,8 @@ import { Winners } from '../../components/winners';
 import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
 import { pluralRu } from '../../state/plural-ru';
-import { useRoomBinding } from '../../state/use-room-binding';
+import { useFocusDim } from '../../state/use-focus-dim';
+import { joinErrorText, reconnectBannerVisible, useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
 import { AwardsPanel } from './awards-panel';
 import { hostClient, hostSession } from './host-session';
@@ -22,11 +24,23 @@ import { QuizControls } from './quiz-controls';
 
 // UX-маппинг ошибок publish-команд — тот же стиль, что answerErrorText в
 // play-page: известных человеческих формулировок у команд ведущего нет,
-// поэтому честный код (REQ-SEC-006: коды безопасны для показа).
-const commandErrorText = (e: unknown): string => {
-  if (e instanceof ApiError) return `Команда не выполнена (${e.code}).`;
+// поэтому честный код (REQ-SEC-006: коды безопасны для показа). Отказы
+// транспорта (NOT_CONNECTED/PUBLISH_TIMEOUT, T1) — честная формулировка
+// решения 7: ack-таймаут не значит «не исполнилось», повтор руками безопасен
+// (сервер отвечает конфликтом состояния, состояние сходится через realtime).
+export const commandErrorText = (e: unknown): string => {
+  if (e instanceof ApiError) {
+    if (e.code === 'NOT_CONNECTED' || e.code === 'PUBLISH_TIMEOUT') {
+      return 'Нет подтверждения команды — проверьте, не применилась ли она, прежде чем повторять.';
+    }
+    return `Команда не выполнена (${e.code}).`;
+  }
   return 'Ошибка сети. Команда не выполнена.';
 };
+
+// Поверхность отказа стартовой подписки (joinErrorText) — общая для
+// play/console/screen, живёт в state/use-room-binding рядом с joinErrorCode
+// (переезд фикс-волны батча C, финревью Important 2).
 
 // Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
 // ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
@@ -56,6 +70,10 @@ export function ConsolePage() {
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
+  // Busy publish-команд (находка Н1, решение 3): одна команда в полёте —
+  // второй клик невозможен конструкцией (кнопки QuizControls disabled); settle
+  // гарантирован ack-таймаутом T1, finally всегда отпускает.
+  const [commandPending, setCommandPending] = useState(false);
   // Награды целиком (null — не загружены/ошибка): из них derive подсказка
   // «Квиз окончен» (только факт невручённых, п. 18) и гейт секции наград на
   // COMPLETED (без наград — без блока вообще, п. 18).
@@ -72,6 +90,9 @@ export function ConsolePage() {
 
   const binding = useRoomBinding(roomId, hostSession);
   const feed = useRoomFeed(roomId, hostClient, binding.events);
+  // Затемнение нефокусного окна (находка Н1, решение 1; контуры — решение 2:
+  // play + console, проектор без вуали). Хук до ранних return — хуки безусловны.
+  const dimmed = useFocusDim();
 
   const [roomGone, setRoomGone] = useState(false);
 
@@ -105,6 +126,10 @@ export function ConsolePage() {
 
   // Экран «Квиз окончен» живёт при quiz.finished && ACTIVE (бриф T9 Step 5).
   const quizFinishedLive = feed.quiz.finished && feed.status === 'ACTIVE';
+
+  // Текстовая поверхность отказа стартовой подписки (carry финревью батча A):
+  // SUBSCRIBE_TIMEOUT → честный текст с советом; null — поверхности нет.
+  const joinErrorSurface = joinErrorText(binding.joinError);
 
   // Рефетч-триггер наград: публичные rewards.* (awarded/fulfilled/revoked —
   // REQ-SEC-009, payload только id). Счётчик событий, а не последнее событие:
@@ -160,10 +185,13 @@ export function ConsolePage() {
   }, [completedStandings, feed.quiz.totals, feed.names]);
 
   const runCommand = (type: string, payload: Record<string, unknown>) => {
+    if (commandPending) return;
+    setCommandPending(true);
     setCommandError(null);
     void binding
       .publish(type, payload)
-      .catch((e: unknown) => setCommandError(commandErrorText(e)));
+      .catch((e: unknown) => setCommandError(commandErrorText(e)))
+      .finally(() => setCommandPending(false));
   };
 
   // «Завершить событие» (бриф Task 15): confirm() — переход терминален и
@@ -225,6 +253,7 @@ export function ConsolePage() {
 
   return (
     <main className="console-page">
+      {dimmed ? <FocusDim /> : null}
       {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
           код. Sticky — статус виден при прокрутке секций. */}
       <header className="console-strip">
@@ -243,13 +272,21 @@ export function ConsolePage() {
         {roomCode ? <span className="console-room-code">{roomCode}</span> : null}
       </header>
       {/* Баннер обрыва — по мокапу console-empty-long-errors-v2; reconnect
-          самолечится перефолдом, но ведущий обязан видеть обрыв явно. */}
-      {binding.connectionState === 'disconnected' ? (
+          самолечится перефолдом, но ведущий обязан видеть обрыв явно.
+          Скрывается при живой поверхности отказа join: после упавшего
+          СТАРТОВОГО subscribe никто не переподключается — говорит alert
+          (финревью батча C, Important 1). */}
+      {reconnectBannerVisible(binding.connectionState, joinErrorSurface) ? (
         <p role="status" className="console-error-banner">
           Нет соединения — переподключаемся…
           <span className="console-error-sub">
             Таймер и счётчики могут отставать. Ничего нажимать не нужно.
           </span>
+        </p>
+      ) : null}
+      {joinErrorSurface ? (
+        <p role="alert" className="console-error">
+          {joinErrorSurface}
         </p>
       ) : null}
       {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
@@ -323,6 +360,7 @@ export function ConsolePage() {
           participants={participantsCount(feed.members)}
           pendingAwards={pendingAwards}
           completing={completing}
+          commandPending={commandPending}
           onCompleteEvent={completeEvent}
           onCommand={runCommand}
           commandError={commandError}
@@ -397,7 +435,7 @@ export function ConsolePage() {
           disabled={completing}
           onClick={completeEvent}
         >
-          Завершить событие
+          {completing ? 'Завершаем…' : 'Завершить событие'}
         </button>
       ) : null}
         </>

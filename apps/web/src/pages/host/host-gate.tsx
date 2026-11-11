@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSessionWakeRefresh } from '../../state/wake-refresh';
 import { resolveHostGateTarget } from './host-gate-flow';
 import { hostSession } from './host-session';
 
@@ -9,6 +10,8 @@ import { hostSession } from './host-session';
 // лендинг; организатор — в консоль (комната уже создана) или в setup.
 export function HostGate() {
   const navigate = useNavigate();
+  // Проактивный refresh по пробуждению (находка Н13, дизайн §3(Г)).
+  useSessionWakeRefresh(hostSession);
   // StrictMode в dev дёргает effect дважды; refresh-токен ротируется сервером,
   // и параллельный дубль может инвалидировать первый ответ — эффект одноразовый.
   const started = useRef(false);

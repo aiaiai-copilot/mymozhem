@@ -77,6 +77,94 @@ const AWARD_ID = '33333333-3333-4333-8333-333333333333';
 describe('ApiClient', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    // Фейковые таймеры — из таймаутных тестов; возврат в afterEach, а не в
+    // finally тела: при падении тела finally может не выполниться, и фейк
+    // утёк бы в следующие тесты.
+    vi.useRealTimers();
+  });
+
+  // Fetch, который никогда не отвечает и reject'ится по abort сигнала —
+  // идиома реального fetch при AbortController.abort() (находка Н1: подвисший
+  // запрос/refresh без таймаута висел вечно).
+  const hangUntilAbort = (init?: RequestInit): Promise<Response> =>
+    new Promise((_, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      });
+    });
+
+  it('запрос, не ответивший за 10с, reject\'ится — и НЕ ApiError (таймаут = сетевой класс, дизайн §3(Б))', async () => {
+    vi.useFakeTimers();
+    const client = new ApiClient(new FakeTokens('token-1'));
+    vi.stubGlobal('fetch', (_input: unknown, init?: RequestInit) => hangUntilAbort(init));
+
+    const p = client.call({ method: 'GET', path: '/x', schema: rosterResponseSchema });
+    p.catch(() => {});
+    const assertion = expect(p).rejects.not.toBeInstanceOf(ApiError);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+  });
+
+  it('таймаутный отказ refresh-ноги не зацикливает retry: исходный запрос reject\'ится, повторного fetch нет', async () => {
+    vi.useFakeTimers();
+    // Refresh-нога — тоже ApiClient.call (/auth/refresh): её fetch получает свой
+    // таймаут, поэтому подвисший single-flight refresh гарантированно settle'ится.
+    // Кольцо client ↔ tokens замыкается хендлером после конструктора.
+    const tokens = new (class implements TokenProvider {
+      refreshed = 0;
+      onRefresh: () => Promise<void> = () => Promise.resolve();
+      getAccessToken(): string | null {
+        return 'token-1';
+      }
+      async refresh(): Promise<void> {
+        this.refreshed += 1;
+        await this.onRefresh();
+      }
+    })();
+    const client = new ApiClient(tokens);
+    tokens.onRefresh = async () => {
+      await client.call({ method: 'POST', path: '/auth/refresh', schema: tokenResponseSchema, auth: false });
+    };
+
+    const calls: FetchCall[] = [];
+    vi.stubGlobal('fetch', (input: unknown, init?: RequestInit) => {
+      calls.push({ input, init });
+      if (input === '/auth/refresh') return hangUntilAbort(init);
+      return Promise.resolve(jsonResponse(401, { code: 'UNAUTHORIZED' }));
+    });
+
+    const p = client.call({ method: 'GET', path: '/x', schema: rosterResponseSchema });
+    p.catch(() => {});
+    const assertion = expect(p).rejects.not.toBeInstanceOf(ApiError);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+
+    expect(tokens.refreshed).toBe(1);
+    // Два fetch: исходный (401) + refresh (завис → таймаут). Повторного запроса
+    // после провала refresh нет — retry-цикл не запускается.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('второй запрос после сработавшего таймаута первого — чистый (per-call AbortController, Review Focus 5)', async () => {
+    vi.useFakeTimers();
+    const client = new ApiClient(new FakeTokens('token-1'));
+    const calls: FetchCall[] = [];
+    vi.stubGlobal('fetch', (input: unknown, init?: RequestInit) => {
+      calls.push({ input, init });
+      if (calls.length === 1) return hangUntilAbort(init);
+      return Promise.resolve(jsonResponse(200, { members: [] }));
+    });
+
+    const p1 = client.call({ method: 'GET', path: '/hang', schema: rosterResponseSchema });
+    p1.catch(() => {});
+    const first = expect(p1).rejects.not.toBeInstanceOf(ApiError);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await first;
+
+    // Наследования сработавшего abort нет: второй запрос живёт своей жизнью.
+    const result = await client.call({ method: 'GET', path: '/ok', schema: rosterResponseSchema });
+    expect(result).toEqual({ members: [] });
+    expect(calls).toHaveLength(2);
   });
 
   it('валидирует ok-ответ схемой и возвращает типизированный результат', async () => {
