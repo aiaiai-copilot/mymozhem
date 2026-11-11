@@ -24,11 +24,29 @@ import { QuizControls } from './quiz-controls';
 
 // UX-маппинг ошибок publish-команд — тот же стиль, что answerErrorText в
 // play-page: известных человеческих формулировок у команд ведущего нет,
-// поэтому честный код (REQ-SEC-006: коды безопасны для показа).
-const commandErrorText = (e: unknown): string => {
-  if (e instanceof ApiError) return `Команда не выполнена (${e.code}).`;
+// поэтому честный код (REQ-SEC-006: коды безопасны для показа). Отказы
+// транспорта (NOT_CONNECTED/PUBLISH_TIMEOUT, T1) — честная формулировка
+// решения 7: ack-таймаут не значит «не исполнилось», повтор руками безопасен
+// (сервер отвечает конфликтом состояния, состояние сходится через realtime).
+export const commandErrorText = (e: unknown): string => {
+  if (e instanceof ApiError) {
+    if (e.code === 'NOT_CONNECTED' || e.code === 'PUBLISH_TIMEOUT') {
+      return 'Нет подтверждения команды — проверьте, не применилась ли она, прежде чем повторять.';
+    }
+    return `Команда не выполнена (${e.code}).`;
+  }
   return 'Ошибка сети. Команда не выполнена.';
 };
+
+// Поверхность отказа стартовой подписки (carry финревью батча A): после T1
+// join может отказать ApiError('SUBSCRIBE_TIMEOUT') — подписка сама не
+// восстанавливается (join не идемпотентен, use-room-binding), поэтому честный
+// текст с явным советом, а не только общий баннер «переподключаемся».
+// Стейл-коды (isStaleRoomJoinError) сюда не доезжают — у них свой экран.
+export const joinErrorText = (code: string | null): string | null =>
+  code === 'SUBSCRIBE_TIMEOUT'
+    ? 'Комната не подтвердила подключение — проверьте связь и обновите страницу.'
+    : null;
 
 // Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
 // ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
@@ -58,6 +76,10 @@ export function ConsolePage() {
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
+  // Busy publish-команд (находка Н1, решение 3): одна команда в полёте —
+  // второй клик невозможен конструкцией (кнопки QuizControls disabled); settle
+  // гарантирован ack-таймаутом T1, finally всегда отпускает.
+  const [commandPending, setCommandPending] = useState(false);
   // Награды целиком (null — не загружены/ошибка): из них derive подсказка
   // «Квиз окончен» (только факт невручённых, п. 18) и гейт секции наград на
   // COMPLETED (без наград — без блока вообще, п. 18).
@@ -110,6 +132,10 @@ export function ConsolePage() {
 
   // Экран «Квиз окончен» живёт при quiz.finished && ACTIVE (бриф T9 Step 5).
   const quizFinishedLive = feed.quiz.finished && feed.status === 'ACTIVE';
+
+  // Текстовая поверхность отказа стартовой подписки (carry финревью батча A):
+  // SUBSCRIBE_TIMEOUT → честный текст с советом; null — поверхности нет.
+  const joinErrorSurface = joinErrorText(binding.joinError);
 
   // Рефетч-триггер наград: публичные rewards.* (awarded/fulfilled/revoked —
   // REQ-SEC-009, payload только id). Счётчик событий, а не последнее событие:
@@ -165,10 +191,13 @@ export function ConsolePage() {
   }, [completedStandings, feed.quiz.totals, feed.names]);
 
   const runCommand = (type: string, payload: Record<string, unknown>) => {
+    if (commandPending) return;
+    setCommandPending(true);
     setCommandError(null);
     void binding
       .publish(type, payload)
-      .catch((e: unknown) => setCommandError(commandErrorText(e)));
+      .catch((e: unknown) => setCommandError(commandErrorText(e)))
+      .finally(() => setCommandPending(false));
   };
 
   // «Завершить событие» (бриф Task 15): confirm() — переход терминален и
@@ -258,6 +287,11 @@ export function ConsolePage() {
           </span>
         </p>
       ) : null}
+      {joinErrorSurface ? (
+        <p role="alert" className="console-error">
+          {joinErrorSurface}
+        </p>
+      ) : null}
       {feed.status === 'CANCELLED' ? <p className="console-note">Комната отменена.</p> : null}
       {feed.status === 'COMPLETED' ? (
         /* Экран завершения (бриф T11, дизайн §5.3 «Завершение», п. 18; мокап
@@ -329,6 +363,7 @@ export function ConsolePage() {
           participants={participantsCount(feed.members)}
           pendingAwards={pendingAwards}
           completing={completing}
+          commandPending={commandPending}
           onCompleteEvent={completeEvent}
           onCommand={runCommand}
           commandError={commandError}
@@ -403,7 +438,7 @@ export function ConsolePage() {
           disabled={completing}
           onClick={completeEvent}
         >
-          Завершить событие
+          {completing ? 'Завершаем…' : 'Завершить событие'}
         </button>
       ) : null}
         </>

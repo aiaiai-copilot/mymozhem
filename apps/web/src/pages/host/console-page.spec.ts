@@ -1,6 +1,54 @@
 import { describe, expect, it } from 'vitest';
 import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
-import { isStaleRoomJoinError, participantsCount, pendingAwardsCount } from './console-page';
+import { ApiError } from '../../api/api-error';
+import {
+  commandErrorText,
+  isStaleRoomJoinError,
+  joinErrorText,
+  participantsCount,
+  pendingAwardsCount,
+} from './console-page';
+
+// Тексты отказа publish-команд ведущего (находка Н1, решение 7): ack-таймаут
+// не значит «не исполнилось» — честное «нет подтверждения», повтор руками
+// безопасен (сервер отвечает конфликтом состояния). Коды — из RoomConnection
+// (T1). Прочее — прежний честный код / прежний сетевой текст.
+describe('commandErrorText', () => {
+  it('NOT_CONNECTED и PUBLISH_TIMEOUT → «Нет подтверждения команды…» (решение 7)', () => {
+    const text =
+      'Нет подтверждения команды — проверьте, не применилась ли она, прежде чем повторять.';
+    expect(commandErrorText(new ApiError('NOT_CONNECTED', 0))).toBe(text);
+    expect(commandErrorText(new ApiError('PUBLISH_TIMEOUT', 0))).toBe(text);
+  });
+
+  it('прочий ApiError — прежний честный код; сеть — прежний текст', () => {
+    expect(commandErrorText(new ApiError('ROOM_NOT_ACTIVE', 409))).toBe(
+      'Команда не выполнена (ROOM_NOT_ACTIVE).',
+    );
+    expect(commandErrorText(new TypeError('fetch failed'))).toBe(
+      'Ошибка сети. Команда не выполнена.',
+    );
+  });
+});
+
+// Поверхность отказа стартовой подписки (carry финревью батча A): join после
+// T1 может отказать ApiError('SUBSCRIBE_TIMEOUT') — раньше сетевой отказ join
+// давал null и только общий баннер. Подписка сама не восстанавливается
+// (join не идемпотентен), поэтому честный текст с явным советом обновить.
+describe('joinErrorText', () => {
+  it('SUBSCRIBE_TIMEOUT → текст про неподтверждённое подключение с советом', () => {
+    expect(joinErrorText('SUBSCRIBE_TIMEOUT')).toBe(
+      'Комната не подтвердила подключение — проверьте связь и обновите страницу.',
+    );
+  });
+
+  it('прочие коды и null (сеть до T1) → отдельной поверхности нет', () => {
+    expect(joinErrorText('ACTOR_NOT_MEMBER')).toBeNull();
+    expect(joinErrorText('SESSION_INVALID')).toBeNull();
+    expect(joinErrorText(null)).toBeNull();
+  });
+});
+
 
 // Стейл-roomId (находка №3): комната из прошлой БД → join отказывает
 // ACTOR_NOT_MEMBER; консоль обязана показать «комната не найдена», а не
