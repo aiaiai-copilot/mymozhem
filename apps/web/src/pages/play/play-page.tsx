@@ -7,6 +7,7 @@ import { ApiError } from '../../api/api-error';
 import { listMembers, refreshSession } from '../../api/endpoints';
 import { createRejoinRetryListeners, rejoinAsGuest, rejoinFailureAction } from '../../state/guest-rejoin';
 import { ConnectionBanner } from '../../components/connection-banner';
+import { FocusDim } from '../../components/focus-dim';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
 import { displayNameOf, rosterNames } from '../../components/roster-names';
@@ -16,6 +17,7 @@ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
 import { lastRoundGains, myPlace } from '../../state/race-tracks';
 import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
+import { useFocusDim } from '../../state/use-focus-dim';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { JoinForm } from './join-form';
 
@@ -157,6 +159,9 @@ export function PlayPage() {
     }, [rejoin]),
   });
   const events = binding.events;
+  // Затемнение нефокусного окна (находка Н1, решение 1): съеденный macOS клик
+  // получает видимый смысл. Хук до ранних return — хуки безусловны.
+  const dimmed = useFocusDim();
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
 
@@ -485,6 +490,7 @@ export function PlayPage() {
 
   return (
     <main className="play-page">
+      {dimmed ? <FocusDim /> : null}
       <ConnectionBanner state={binding.connectionState} />
       {rejoined ? (
         <p role="status">

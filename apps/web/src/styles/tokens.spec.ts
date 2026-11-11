@@ -192,6 +192,33 @@ describe('transitions.css — кнопочная система состояни
   });
 });
 
+describe('focus-dim — вуаль нефокусного окна (находка Н1, T7)', () => {
+  it('токен --focus-dim-veil определён в tokens.css', () => {
+    const css = readStyle('tokens.css');
+    expect(css).toMatch(/--focus-dim-veil\s*:\s*rgba\(10,\s*37,\s*43,\s*0\.6\)\s*;/);
+  });
+
+  it('transitions.css ссылается на var(--focus-dim-veil), сырого литерала нет', () => {
+    const css = readStyle('transitions.css');
+    expect(css).toContain('var(--focus-dim-veil)');
+    expect(css).not.toMatch(/rgba\(\s*10,\s*37,\s*43/);
+  });
+
+  it('.focus-dim — полноэкранный оверлей БЕЗ перехвата кликов (решение 1)', () => {
+    const css = readStyle('transitions.css');
+    const m = css.match(/\.focus-dim\s*\{([^}]*)\}/);
+    expect(m, 'ожидался блок .focus-dim').not.toBeNull();
+    expect(m![1]).toMatch(/position:\s*fixed/);
+    expect(m![1]).toMatch(/pointer-events:\s*none/);
+  });
+
+  it('reduced-motion: страж против будущих анимаций появления вуали', () => {
+    const css = readStyle('transitions.css');
+    const [block] = extractMediaBlock(css, '(prefers-reduced-motion: reduce)');
+    expect(block).toContain('.focus-dim');
+  });
+});
+
 describe('scene.css — кегли логотипа', () => {
   const css = readStyle('scene.css');
 

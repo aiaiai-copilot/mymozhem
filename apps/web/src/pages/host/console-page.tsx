@@ -5,6 +5,7 @@ import type { AwardResponse, RosterEntry } from '@mymozhem/sdk';
 import { gameFinishedPayload, QUIZ_APP_ID } from '@mymozhem/app-quiz';
 import { ApiError } from '../../api/api-error';
 import { completeRoom, listRewards } from '../../api/endpoints';
+import { FocusDim } from '../../components/focus-dim';
 import { Logo } from '../../components/logo';
 import { RaceTracks } from '../../components/race-tracks';
 import { displayNameOf } from '../../components/roster-names';
@@ -12,6 +13,7 @@ import { Winners } from '../../components/winners';
 import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
 import { pluralRu } from '../../state/plural-ru';
+import { useFocusDim } from '../../state/use-focus-dim';
 import { useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
 import { AwardsPanel } from './awards-panel';
@@ -72,6 +74,9 @@ export function ConsolePage() {
 
   const binding = useRoomBinding(roomId, hostSession);
   const feed = useRoomFeed(roomId, hostClient, binding.events);
+  // Затемнение нефокусного окна (находка Н1, решение 1; контуры — решение 2:
+  // play + console, проектор без вуали). Хук до ранних return — хуки безусловны.
+  const dimmed = useFocusDim();
 
   const [roomGone, setRoomGone] = useState(false);
 
@@ -225,6 +230,7 @@ export function ConsolePage() {
 
   return (
     <main className="console-page">
+      {dimmed ? <FocusDim /> : null}
       {/* Полоса комнаты (мокап console-phone-landscape-v2): логотип, связь,
           код. Sticky — статус виден при прокрутке секций. */}
       <header className="console-strip">

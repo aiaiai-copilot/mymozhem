@@ -154,10 +154,36 @@
 }
 .race-tracks .tr-more { font-size: 13px; margin-top: 6px; }
 
+/* Затемнение нефокусного окна (находка Н1, решение 1): вуаль НЕ перехватывает
+   клики (pointer-events: none) — на macOS первый клик и так уходит оконному
+   серверу, на Windows click-through доставляет его контенту; щит съедал бы
+   рабочие клики. z-index — первый слой поверх контента: других z-index в
+   стилях пока нет (console-strip sticky без z-index), 10 с запасом. */
+.focus-dim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--focus-dim-veil);
+  pointer-events: none;
+  z-index: 10;
+}
+.focus-dim-text {
+  color: var(--scene-text);
+  font-size: 20px;
+  font-weight: 700;
+  text-align: center;
+  padding: 0 24px;
+}
+
 /* «Уменьшить движение» в системе гасит переходы состояний и контент-анимации;
-   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4) */
+   доезд дорожек отменяется целиком (animation: none) — полосы мгновенны (2.4).
+   Вуаль затемнения появляется без анимаций при любом режиме (дизайн §3(А));
+   гард в RM-блоке — страховка от будущего transition/animation на .focus-dim. */
 @media (prefers-reduced-motion: reduce) {
   .btn { transition-duration: 0ms !important; }
   .race-tracks .fill,
   .race-tracks .gain { transition-duration: 0ms !important; animation: none !important; }
+  .focus-dim { transition: none !important; animation: none !important; }
 }
