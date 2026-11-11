@@ -152,7 +152,9 @@ export function SetupPage() {
           }}
         >
           <button type="submit" className="btn btn-primary editor-submit" disabled={busy}>
-            Сохранить и запустить
+            {/* Busy-индикация на время configure+activate (находка Н1 — первый
+                случай был именно здесь; дизайн §3(Б)). */}
+            {busy ? 'Сохраняем…' : 'Сохранить и запустить'}
           </button>
         </form>
       )}

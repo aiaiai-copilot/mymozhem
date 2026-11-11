@@ -290,7 +290,9 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
                     disabled={disabled || pendingDraw !== null}
                     onClick={() => runDraw(p)}
                   >
-                    Разыграть
+                    {/* Busy-индикация попытки (находка Н1, дизайн §3(Б)):
+                        settle гарантирован ack-таймаутом publish (T1). */}
+                    {pendingDraw?.prizeId === p.id ? 'Разыгрываем…' : 'Разыграть'}
                   </button>
                 ) : (
                   /* Разыгранный приз (quantity 0): вместо disabled-кнопки —
@@ -333,7 +335,7 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
           className="btn btn-secondary console-prize-add"
           disabled={disabled || creating}
         >
-          + Добавить приз
+          {creating ? 'Добавляем…' : '+ Добавить приз'}
         </button>
       </form>
       {/* ADR-012 §4: создание приза — юридическая ответственность организатора
@@ -349,7 +351,9 @@ export function PrizesPanel({ roomId, pinnedAppId, disabled, events, names, publ
           disabled={disabled || pendingDraw !== null}
           onClick={runParticipantDraw}
         >
-          Разыграть участника
+          {pendingDraw !== null && pendingDraw.prizeId === null
+            ? 'Разыгрываем…'
+            : 'Разыграть участника'}
         </button>
       ) : null}
       {/* Ошибки панели — единый стиль с баннером обрыва связи (бриф T11,
