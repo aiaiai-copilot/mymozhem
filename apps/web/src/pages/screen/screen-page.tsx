@@ -16,7 +16,7 @@ import { formatTimer, useQuestionTimer } from '../../state/question-timer';
 import { lastRoundGains } from '../../state/race-tracks';
 import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore } from '../../state/session';
-import { useRoomBinding } from '../../state/use-room-binding';
+import { joinErrorText as bindingJoinErrorText, useRoomBinding } from '../../state/use-room-binding';
 
 // Буквенные метки вариантов (золотые <b>, мокап timer-projector-participant;
 // тот же подход, что в play-page). Вариантов больше, чем букв, — без метки.
@@ -109,6 +109,11 @@ export function ScreenPage() {
     }, [joinSpectator]),
   });
   const events = binding.events;
+  // Поверхность отказа стартовой подписки (финревью батча C, Important 2):
+  // SUBSCRIBE_TIMEOUT → честный текст с советом; баннер «переподключаемся»
+  // при нём подавляется внутри ConnectionBanner. Алиас импорта — локальный
+  // joinErrorText выше маппит ошибки REST-join (другая сигнатура).
+  const bindingJoinSurface = bindingJoinErrorText(binding.joinError);
 
   const [members, setMembers] = useState<RosterEntry[]>([]);
 
@@ -343,7 +348,12 @@ export function ScreenPage() {
 
   return (
     <main className="screen-page">
-      <ConnectionBanner state={binding.connectionState} />
+      <ConnectionBanner state={binding.connectionState} joinErrorSurface={bindingJoinSurface} />
+      {bindingJoinSurface ? (
+        <p role="alert" className="screen-waiting">
+          {bindingJoinSurface}
+        </p>
+      ) : null}
       <Logo contour="scene" size="projector" />
       {view}
     </main>

@@ -4,7 +4,6 @@ import { ApiError } from '../../api/api-error';
 import {
   commandErrorText,
   isStaleRoomJoinError,
-  joinErrorText,
   participantsCount,
   pendingAwardsCount,
 } from './console-page';
@@ -31,24 +30,9 @@ describe('commandErrorText', () => {
   });
 });
 
-// Поверхность отказа стартовой подписки (carry финревью батча A): join после
-// T1 может отказать ApiError('SUBSCRIBE_TIMEOUT') — раньше сетевой отказ join
-// давал null и только общий баннер. Подписка сама не восстанавливается
-// (join не идемпотентен), поэтому честный текст с явным советом обновить.
-describe('joinErrorText', () => {
-  it('SUBSCRIBE_TIMEOUT → текст про неподтверждённое подключение с советом', () => {
-    expect(joinErrorText('SUBSCRIBE_TIMEOUT')).toBe(
-      'Комната не подтвердила подключение — проверьте связь и обновите страницу.',
-    );
-  });
-
-  it('прочие коды и null (сеть до T1) → отдельной поверхности нет', () => {
-    expect(joinErrorText('ACTOR_NOT_MEMBER')).toBeNull();
-    expect(joinErrorText('SESSION_INVALID')).toBeNull();
-    expect(joinErrorText(null)).toBeNull();
-  });
-});
-
+// Поверхность отказа стартовой подписки (joinErrorText) переехала в
+// state/use-room-binding (фикс-волна батча C, финревью Important 2: поверхность
+// общая для play/console/screen) — её кейсы живут в use-room-binding.spec.ts.
 
 // Стейл-roomId (находка №3): комната из прошлой БД → join отказывает
 // ACTOR_NOT_MEMBER; консоль обязана показать «комната не найдена», а не

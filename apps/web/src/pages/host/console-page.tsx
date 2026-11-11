@@ -14,7 +14,7 @@ import { HOST_NEW_PATH } from '../../routes';
 import { SessionStore } from '../../state/session';
 import { pluralRu } from '../../state/plural-ru';
 import { useFocusDim } from '../../state/use-focus-dim';
-import { useRoomBinding } from '../../state/use-room-binding';
+import { joinErrorText, reconnectBannerVisible, useRoomBinding } from '../../state/use-room-binding';
 import { useRoomFeed } from '../../state/use-room-feed';
 import { AwardsPanel } from './awards-panel';
 import { hostClient, hostSession } from './host-session';
@@ -38,15 +38,9 @@ export const commandErrorText = (e: unknown): string => {
   return 'Ошибка сети. Команда не выполнена.';
 };
 
-// Поверхность отказа стартовой подписки (carry финревью батча A): после T1
-// join может отказать ApiError('SUBSCRIBE_TIMEOUT') — подписка сама не
-// восстанавливается (join не идемпотентен, use-room-binding), поэтому честный
-// текст с явным советом, а не только общий баннер «переподключаемся».
-// Стейл-коды (isStaleRoomJoinError) сюда не доезжают — у них свой экран.
-export const joinErrorText = (code: string | null): string | null =>
-  code === 'SUBSCRIBE_TIMEOUT'
-    ? 'Комната не подтвердила подключение — проверьте связь и обновите страницу.'
-    : null;
+// Поверхность отказа стартовой подписки (joinErrorText) — общая для
+// play/console/screen, живёт в state/use-room-binding рядом с joinErrorCode
+// (переезд фикс-волны батча C, финревью Important 2).
 
 // Стейл-roomId (находка №3): сохранённая комната из прошлой БД — join отказывает
 // ACTOR_NOT_MEMBER; это «комнаты нет», а не «нет соединения».
@@ -278,8 +272,11 @@ export function ConsolePage() {
         {roomCode ? <span className="console-room-code">{roomCode}</span> : null}
       </header>
       {/* Баннер обрыва — по мокапу console-empty-long-errors-v2; reconnect
-          самолечится перефолдом, но ведущий обязан видеть обрыв явно. */}
-      {binding.connectionState === 'disconnected' ? (
+          самолечится перефолдом, но ведущий обязан видеть обрыв явно.
+          Скрывается при живой поверхности отказа join: после упавшего
+          СТАРТОВОГО subscribe никто не переподключается — говорит alert
+          (финревью батча C, Important 1). */}
+      {reconnectBannerVisible(binding.connectionState, joinErrorSurface) ? (
         <p role="status" className="console-error-banner">
           Нет соединения — переподключаемся…
           <span className="console-error-sub">

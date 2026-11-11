@@ -17,7 +17,7 @@ import { lastRoundGains, myPlace } from '../../state/race-tracks';
 import { createRosterEventRefetcher } from '../../state/roster-refetch';
 import { decodeAccessClaims, SessionStore, type GuestSession } from '../../state/session';
 import { useFocusDim } from '../../state/use-focus-dim';
-import { useRoomBinding } from '../../state/use-room-binding';
+import { joinErrorText, useRoomBinding } from '../../state/use-room-binding';
 import { answerErrorText } from './answer-error-text';
 import { JoinForm } from './join-form';
 
@@ -143,6 +143,10 @@ export function PlayPage() {
     }, [rejoin]),
   });
   const events = binding.events;
+  // Поверхность отказа стартовой подписки (финревью батча C, Important 2):
+  // SUBSCRIBE_TIMEOUT → честный текст с советом; баннер «переподключаемся»
+  // при нём подавляется внутри ConnectionBanner (переподключать некому).
+  const joinErrorSurface = joinErrorText(binding.joinError);
   // Затемнение нефокусного окна (находка Н1, решение 1): съеденный macOS клик
   // получает видимый смысл. Хук до ранних return — хуки безусловны.
   const dimmed = useFocusDim();
@@ -483,7 +487,12 @@ export function PlayPage() {
   return (
     <main className="play-page">
       {dimmed ? <FocusDim /> : null}
-      <ConnectionBanner state={binding.connectionState} />
+      <ConnectionBanner state={binding.connectionState} joinErrorSurface={joinErrorSurface} />
+      {joinErrorSurface ? (
+        <p role="alert" className="play-error">
+          {joinErrorSurface}
+        </p>
+      ) : null}
       {rejoined ? (
         <p role="status">
           Сессия истекла — вы вошли заново, прежние очки не переносятся.{' '}

@@ -12,6 +12,27 @@ import { createSessionWakeRefresher } from './wake-refresh';
 export const joinErrorCode = (e: unknown): string | null =>
   e instanceof ApiError ? e.code : null;
 
+// Поверхность отказа стартовой подписки (carry финревью батча A): после T1
+// join может отказать ApiError('SUBSCRIBE_TIMEOUT') — подписка сама не
+// восстанавливается (join не идемпотентен, re-subscribe под гардом joined в
+// RoomConnection), поэтому честный текст с явным советом, а не только общий
+// баннер «переподключаемся», который в этом состоянии врёт. Общая для
+// play/console/screen — живёт рядом с joinErrorCode (владелец контракта кодов).
+export const joinErrorText = (code: string | null): string | null =>
+  code === 'SUBSCRIBE_TIMEOUT'
+    ? 'Комната не подтвердила подключение — проверьте связь и обновите страницу.'
+    : null;
+
+// Баннер «переподключаемся» честен, только пока reconnect действительно идёт
+// (финревью батча C, Important 1): после упавшего СТАРТОВОГО join никто не
+// переподключается — при живой joinErrorSurface баннер скрывается, говорит
+// alert joinErrorText. Иначе на экране одновременно «ничего не нажимай» и
+// «обновите страницу».
+export const reconnectBannerVisible = (
+  state: ConnectionState,
+  joinErrorSurface: string | null,
+): boolean => state === 'disconnected' && joinErrorSurface === null;
+
 // Тонкий React-клей поверх RoomConnection + LogStore (дизайн §3): вся фолд-логика
 // (буфер до snapshot, перефолд на resync) уже оттестирована в LogStore и
 // RoomConnection; хук только поднимает их колбэки в useState. Новый roomId →
